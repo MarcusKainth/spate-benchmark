@@ -30,11 +30,19 @@ hue   = 32
 short = "Flink"
 
 [version]
-# Read from the image rather than the config, so a base-image bump cannot leave
-# the recorded version behind. `pinned` is asserted against what is resolved: a
-# mismatch refuses the run rather than publishing a mislabelled number.
-strategy = "image-label"
-label    = "org.apache.flink.version"
+# Read from the SHIPPED DISTRIBUTION JAR, which is as close to the truth as this
+# gets: it is the artefact that actually runs.
+#
+# An image label was the obvious choice and is wrong here. `flink:2.2.1-java17`
+# carries no `org.apache.flink.version` label at all — its only version label is
+# `org.opencontainers.image.version: 24.04`, which is the base *operating
+# system*. A descriptor trusting that label would have recorded every Flink
+# result as version 24.04, and it would have looked entirely plausible.
+#
+# `pinned` is asserted against what is resolved, so a base-image bump refuses the
+# run rather than publishing a mislabelled number.
+strategy = "command"
+command  = ["sh", "-c", "ls /opt/flink/lib | sed -n 's/^flink-dist-\\(.*\\)\\.jar$/\\1/p'"]
 pinned   = "2.2.1"
 
 [build]

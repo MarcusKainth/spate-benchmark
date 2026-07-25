@@ -76,6 +76,19 @@ const DRAIN_MAX_S: u64 = 1800;
 const QUIESCE_MAX_S: u64 = 900;
 /// Sampler interval.
 const SAMPLE_INTERVAL_S: f64 = 1.0;
+/// Batches the correctness gate examines, counted down from the top of the range.
+///
+/// Bounded because exact-distinct needs a hash set proportional to cardinality,
+/// and running it over the full 150M-row corpus asked ClickHouse for 10.45 GiB
+/// against a 10.8 GiB limit and was killed — taking a completed, valid
+/// measurement down with it.
+///
+/// The slice is taken from the TOP of the range because that is the part
+/// produced during and after the measurement window, and it is still ten million
+/// rows: a system that drops, duplicates or mis-transforms does so
+/// systematically rather than once. The window is recorded in the record's note,
+/// so the gate is visibly a sample rather than silently one.
+const GATE_MAX_BATCHES: u64 = 100_000;
 
 /// Prepares infrastructure, schema, target tables and corpus.
 ///
@@ -443,11 +456,13 @@ fn measure(
         &ep.ch_user,
         &ep.ch_password,
         tier,
-        opts.batches,
-    );
+        GATE_MAX_BATCHES,
+    )
+    .map_err(|e| format!("{e}\nLogs:\n{logs}"))?;
     if let Some(why) = gates.failure() {
         return Err(format!("correctness gate failed: {why}\nLogs:\n{logs}"));
     }
+    note.push_str(&format!("; gate window {GATE_MAX_BATCHES} batches"));
 
     let mut report = Report::new(
         "kafka_avro_clickhouse",
@@ -690,7 +705,19 @@ fn build_specs(
         .as_ref()
         .ok_or("entrant has no envelope")?;
 
-    let group_id = format!("comparison-{}-{}", arm.entrant.id(), arm.variant.id);
+    // A FRESH consumer group per run, not a stable one per arm.
+    //
+    // Drain replays the prefilled corpus from offset zero, which `earliest` only
+    // does for a group with no committed offsets. A stable group id would commit
+    // at the end of rep 1, and rep 2 would then resume at the tail, consume
+    // nothing, and sit there until the drain deadline — reporting a timeout for
+    // an arm that is working perfectly.
+    let group_id = format!(
+        "comparison-{}-{}-{}",
+        arm.entrant.id(),
+        arm.variant.id,
+        uuid::Uuid::now_v7().simple()
+    );
     let container_names: BTreeMap<&str, String> = envelope
         .containers
         .iter()

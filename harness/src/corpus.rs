@@ -1027,10 +1027,14 @@ impl Gates {
 /// The slice is still tens of millions of rows; a framework that drops,
 /// duplicates or mis-transforms does so systematically, not once.
 ///
-/// # Panics
+/// # Errors
 /// If the table cannot be queried, or ClickHouse returns unparseable output — a
 /// gate that silently degrades to "passed" would be worse than no gate.
-#[must_use]
+///
+/// Returns rather than panicking because a sweep runs two dozen arms: a gate
+/// that cannot execute should refuse *that arm* and let the queue continue, not
+/// abort hours of work. This was a panic, and an out-of-memory gate query took
+/// the whole sweep down with it.
 pub fn run_gates(
     host: &str,
     port: u16,
@@ -1038,31 +1042,31 @@ pub fn run_gates(
     password: &str,
     tier: Tier,
     max_batches: u64,
-) -> Gates {
-    let sql = |q: &str| -> Vec<String> {
+) -> Result<Gates, String> {
+    let sql = |q: &str| -> Result<Vec<String>, String> {
         let body = crate::docker::clickhouse_sql(host, port, user, password, q)
-            .unwrap_or_else(|e| panic!("gate query failed ({q}): {e}"));
-        body.trim().split(['\t', '\n']).map(str::to_owned).collect()
+            .map_err(|e| format!("gate query failed ({q}): {e}"))?;
+        Ok(body.trim().split(['\t', '\n']).map(str::to_owned).collect())
     };
-    let num = |s: &str| -> i128 {
+    let num = |s: &str| -> Result<i128, String> {
         s.parse::<i128>()
-            .unwrap_or_else(|e| panic!("gate expected a number, got {s:?}: {e}"))
+            .map_err(|e| format!("gate expected a number, got {s:?}: {e}"))
     };
 
     let table = tier.table();
-    let bounds = sql(&format!("SELECT min(batch_id), max(batch_id) FROM {table}"));
-    assert!(
-        bounds.len() >= 2,
-        "gate bounds query returned {bounds:?} for {table}"
-    );
+    let bounds = sql(&format!("SELECT min(batch_id), max(batch_id) FROM {table}"))?;
+    if bounds.len() < 2 {
+        return Err(format!("gate bounds query returned {bounds:?} for {table}"));
+    }
     // An empty table yields 0/0 from min/max; treat it as a hard failure rather
     // than an empty-but-passing range.
-    let (min_batch, max_batch) = (num(&bounds[0]) as u64, num(&bounds[1]) as u64);
-    assert!(
-        max_batch > min_batch + 1,
-        "{table} holds too narrow a batch_id range ([{min_batch}, {max_batch}]) to gate; \
-         the arm produced almost nothing"
-    );
+    let (min_batch, max_batch) = (num(&bounds[0])? as u64, num(&bounds[1])? as u64);
+    if max_batch <= min_batch + 1 {
+        return Err(format!(
+            "{table} holds too narrow a batch_id range ([{min_batch}, {max_batch}]) to \
+             gate; the arm produced almost nothing"
+        ));
+    }
     // Bounded slice from the top of the range; see the doc comment.
     let hi = max_batch;
     let lo = (min_batch + 1).max(hi.saturating_sub(max_batches));
@@ -1070,11 +1074,13 @@ pub fn run_gates(
     let counts = sql(&format!(
         "SELECT count(), uniqExact((batch_id, event_seq)), uniqExact(batch_id) FROM {table} \
          WHERE batch_id >= {lo} AND batch_id < {hi}"
-    ));
-    assert!(counts.len() >= 3, "gate count query returned {counts:?}");
-    let rows = num(&counts[0]) as u64;
-    let distinct_ids = num(&counts[1]) as u64;
-    let distinct_batches = num(&counts[2]) as u64;
+    ))?;
+    if counts.len() < 3 {
+        return Err(format!("gate count query returned {counts:?}"));
+    }
+    let rows = num(&counts[0])? as u64;
+    let distinct_ids = num(&counts[1])? as u64;
+    let distinct_batches = num(&counts[2])? as u64;
 
     // The sums are taken over DEDUPLICATED rows, which is not a detail: these are
     // at-least-once systems, so a legitimate duplicate would otherwise inflate
@@ -1094,13 +1100,15 @@ pub fn run_gates(
     let sums = sql(&format!(
         "SELECT sum(toInt128(value)){scaled_sum} FROM \
          (SELECT DISTINCT {proj} FROM {table} WHERE batch_id >= {lo} AND batch_id < {hi})"
-    ));
-    assert!(!sums.is_empty(), "gate sum query returned {sums:?}");
-    let value_sum = num(&sums[0]);
-    let value_scaled_sum = if tier == Tier::B { num(&sums[1]) } else { 0 };
+    ))?;
+    if sums.is_empty() {
+        return Err(format!("gate sum query returned {sums:?}"));
+    }
+    let value_sum = num(&sums[0])?;
+    let value_scaled_sum = if tier == Tier::B { num(&sums[1])? } else { 0 };
 
     let exp = expected_range(lo, hi, tier);
-    Gates {
+    Ok(Gates {
         min_batch,
         max_batch,
         rows,
@@ -1112,7 +1120,7 @@ pub fn run_gates(
         rows_match: distinct_ids == exp.rows,
         value_sum_match: value_sum == exp.value_sum,
         value_scaled_match: value_scaled_sum == exp.value_scaled_sum,
-    }
+    })
 }
 
 /// Consume the first `sample` messages of `topic` and prove that what is

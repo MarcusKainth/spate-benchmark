@@ -347,8 +347,19 @@ fn cmd_build(root: &Path, args: &[String]) -> Result<(), String> {
             .as_ref()
             .ok_or_else(|| format!("{}: no [build] section", e.id()))?;
 
-        let context = e.dir.join(&build.context);
-        let dockerfile = e.dir.join(&build.dockerfile);
+        // Canonicalised before comparing: `[build].context` is relative to the
+        // entrant directory and is typically `../..`, which does not strip as a
+        // textual prefix even though it is genuinely an ancestor.
+        let context = e
+            .dir
+            .join(&build.context)
+            .canonicalize()
+            .map_err(|err| format!("{}: build context: {err}", e.id()))?;
+        let dockerfile = e
+            .dir
+            .join(&build.dockerfile)
+            .canonicalize()
+            .map_err(|err| format!("{}: dockerfile: {err}", e.id()))?;
         let dockerfile_rel = dockerfile
             .strip_prefix(&context)
             .map_err(|_| format!("{}: dockerfile is outside the build context", e.id()))?;
@@ -360,21 +371,27 @@ fn cmd_build(root: &Path, args: &[String]) -> Result<(), String> {
             "-t".into(),
             build.image.clone(),
         ];
+        let mut secret_env: Vec<(String, String)> = Vec::new();
         for s in &build.secrets {
-            // The private framework dependency. A secret rather than a build ARG:
-            // an ARG is baked into image history, and this repository's images
-            // must never carry a credential.
+            // The private framework dependency. A BuildKit secret rather than a
+            // build ARG: an ARG is baked into image history, and this
+            // repository's images must never carry a credential.
+            let (arg, env) = build_secret(s)?;
             argv.push("--secret".into());
-            argv.push(format!("id={s},src={}", credential_path(s)?));
+            argv.push(arg);
+            if let Some(kv) = env {
+                secret_env.push(kv);
+            }
         }
         argv.push(".".into());
 
         println!("building {} -> {}", e.id(), build.image);
-        let status = std::process::Command::new("docker")
-            .args(&argv)
-            .current_dir(&context)
-            .status()
-            .map_err(|err| format!("docker: {err}"))?;
+        let mut cmd = std::process::Command::new("docker");
+        cmd.args(&argv).current_dir(&context);
+        for (k, v) in &secret_env {
+            cmd.env(k, v);
+        }
+        let status = cmd.status().map_err(|err| format!("docker: {err}"))?;
         if !status.success() {
             return Err(format!("{}: docker build failed", e.id()));
         }
@@ -382,23 +399,46 @@ fn cmd_build(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Where a named build secret's material lives on this machine.
-fn credential_path(id: &str) -> Result<String, String> {
+/// Resolves a named build secret into a `--secret` argument, and the process
+/// environment it needs.
+///
+/// Prefers `env=` over `src=`, so a token can be handed to BuildKit without ever
+/// being written to disk. The `gh` path exists because that is how this machine
+/// actually authenticates — `gh` installs a credential *helper*, not a
+/// `.git-credentials` store, so the obvious file is absent on a machine that can
+/// nonetheless clone the repository perfectly well.
+///
+/// All of this disappears when the framework publishes to crates.io: there is no
+/// private fetch left to authenticate.
+fn build_secret(id: &str) -> Result<(String, Option<(String, String)>), String> {
     match id {
         "gitcred" => {
-            let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_owned())?;
-            let p = format!("{home}/.git-credentials");
-            if Path::new(&p).is_file() {
-                Ok(p)
-            } else {
-                Err(format!(
-                    "the Spate arm needs a credential for the private framework \
-                     repository, and {p} does not exist. Run `gh auth setup-git` \
-                     (or `git config --global credential.helper store` and \
-                     authenticate once). This disappears when the framework \
-                     publishes to crates.io."
-                ))
+            let home = std::env::var("HOME").unwrap_or_default();
+            let path = format!("{home}/.git-credentials");
+            if Path::new(&path).is_file() {
+                return Ok((format!("id={id},src={path}"), None));
             }
+            let token = std::process::Command::new("gh")
+                .args(["auth", "token"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| {
+                    "the Spate arm needs a credential for the private framework \
+                     repository. Either authenticate the GitHub CLI (`gh auth login`) \
+                     or create ~/.git-credentials. This requirement disappears when \
+                     the framework publishes to crates.io."
+                        .to_owned()
+                })?;
+            Ok((
+                format!("id={id},env=SPATE_GITCRED"),
+                Some((
+                    "SPATE_GITCRED".to_owned(),
+                    format!("https://x-access-token:{token}@github.com\n"),
+                )),
+            ))
         }
         other => Err(format!("unknown build secret {other:?}")),
     }
@@ -475,8 +515,29 @@ fn cmd_retract(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Flags that consume the following argument.
+///
+/// Needed because a selector is a positional argument, so the parser has to know
+/// which non-flag words are already spoken for. Without this, `--reps 1` offers
+/// `1` as a selector and the run fails with `no entrant "1"` — which is at least
+/// loud, but the same slip on `--topic x` would silently add an entrant-shaped
+/// word to the plan.
+const VALUED_FLAGS: [&str; 5] = ["--reps", "--env", "--topic", "--batches", "--trigger"];
+
 fn parse_selectors(args: &[String]) -> Result<Vec<Selector>, String> {
-    let raw: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    let mut raw: Vec<&String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if VALUED_FLAGS.contains(&a.as_str()) {
+            i += 2;
+            continue;
+        }
+        if !a.starts_with('-') {
+            raw.push(a);
+        }
+        i += 1;
+    }
     if raw.is_empty() {
         return Err("no selector given. Use '*' for everything.".to_owned());
     }
