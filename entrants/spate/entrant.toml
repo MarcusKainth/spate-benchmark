@@ -48,15 +48,20 @@ image      = "spate-bench-spate"
 # secret so no token is ever baked into an image layer.
 secrets    = ["gitcred"]
 
+# 16 GiB, the same as every other arm, and far more than this arm will use. The
+# point is that no system is memory-bound: a GC-managed runtime that has to
+# collect more often than it otherwise would is being measured on our allocation
+# choice rather than on its own design. Equal and generous is the only setting
+# where that objection cannot be raised in either direction.
 [envelope]
 cpus   = "4"
-memory = "4g"
+memory = "16g"
 
 [[envelope.container]]
 role   = "data-plane"
 name   = "sut"
 cpus   = "4"
-memory = "4g"
+memory = "16g"
 
 [guarantees]
 delivery    = "at-least-once"

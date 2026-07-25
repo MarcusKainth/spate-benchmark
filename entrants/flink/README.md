@@ -18,20 +18,20 @@ docker build -f entrants/flink/Dockerfile \
 # than nominal (see "Checkpoint storage" below).
 docker volume create spate-bench-flink-checkpoints
 
-# JobManager: 1 CPU / 1 GiB of the 4 CPU / 4 GiB envelope.
+# JobManager: 1 CPU / 2 GiB, control plane, allocated on top of the envelope.
 # `standalone-job` is Application Mode — the JobManager runs the job's main()
 # and submits it, so there is no separate `flink run` step.
 docker run -d --name spate-bench-flink-jm --network spate-bench-net \
-  --cpus 1 --memory 1g --memory-swap 1g \
+  --cpus 1 --memory 2g --memory-swap 2g \\
   -e JOB_MANAGER_RPC_ADDRESS=spate-bench-flink-jm \
   -e TIER=a \
   -v spate-bench-flink-checkpoints:/opt/flink/checkpoints \
   -p 18085:8081 \
   spate-bench-flink standalone-job
 
-# TaskManager: 3 CPUs / 3 GiB.
+# TaskManager: the full 4 CPU / 16 GiB data-plane envelope.
 docker run -d --name spate-bench-flink-tm --network spate-bench-net \
-  --cpus 3 --memory 3g --memory-swap 3g \
+  --cpus 4 --memory 16g --memory-swap 16g \\
   -e JOB_MANAGER_RPC_ADDRESS=spate-bench-flink-jm \
   -v spate-bench-flink-checkpoints:/opt/flink/checkpoints \
   spate-bench-flink taskmanager

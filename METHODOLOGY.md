@@ -62,12 +62,12 @@ site renders them beside the numbers.
 
 ## The resource envelope
 
-**4 CPUs and 4 GiB of _data plane_ per system.** A system's control plane — a
+**4 CPUs and 16 GiB of _data plane_ per system.** A system's control plane — a
 Flink JobManager, a Connect worker's coordinator — is allocated **on top** of that
 budget, and its **measured** consumption is published alongside the arm's total
 rather than pre-charged against it.
 
-This is a deviation from the more obvious rule ("4 CPU / 4 GiB total, control
+This is a deviation from the more obvious rule ("4 CPU / 16 GiB total, control
 plane included"), it is deliberate, and it is disclosed here and on the site
 because it favours the multi-process arms:
 
@@ -91,6 +91,36 @@ and asserts they match**. A mismatch fails the run; it does not warn.
 
 Swap is disabled (`--memory-swap` equals `--memory`) so memory pressure surfaces
 instead of hiding in a swapfile.
+
+### Why memory is generous, and what that does to the memory number
+
+CPU is the scarce resource here and memory is not. The reference host has 128 GiB
+with 72 GiB given to the Docker VM, one arm runs at a time, and no arm in this
+workload needs more than a couple of gigabytes to do its job. So every arm gets
+16 GiB — several times what any of them will touch.
+
+That is a fairness decision rather than a convenience. A garbage-collected
+runtime held to a tight heap collects more often, and the resulting pauses would
+be an artefact of *our* allocation choice rather than a property of the system.
+Sizing a JVM down until it strains and then publishing its pause distribution is
+a way to win an argument on purpose. The same allowance goes to every arm
+including the Rust one, which will leave most of it untouched.
+
+**The honest cost is that the memory figure stops being a requirement and becomes
+a revealed preference.** Under a tight cap, peak anonymous memory approximates
+what a system *needs*. Under a generous one it approximates what a system
+*chooses to use when nothing forces it to economise* — a JVM will grow its heap
+toward its maximum under load without ever being close to needing it. Both are
+real quantities, but they are different ones, and this suite measures the second.
+
+So the memory panel is labelled as what it is and is **not** presented as a
+minimum footprint. "How small can this run?" is a different question, and
+answering it properly means a separate sweep that tightens each arm until it
+degrades. That would be worth publishing; it is not what these numbers are.
+
+Every arm publishes `peak_anon` and `memory.peak`, and JVM arms publish
+configured versus actually-used heap, so the gap between allocation and use is
+visible rather than implied.
 
 Infrastructure sits **outside** that budget and is identical for every arm, and is
 declared per environment rather than passed on the command line: Redpanda

@@ -42,25 +42,25 @@ context    = "../.."
 dockerfile = "Dockerfile"
 image      = "spate-bench-flink"
 
-# Flink splits across two containers. The data plane gets the FULL 4 CPU / 4 GiB
+# Flink splits across two containers. The data plane gets the FULL 4 CPU / 16 GiB
 # envelope — the same budget the Spate arm gets — and the JobManager is
 # allocated on top as control plane. See [[deviations]] below.
 [envelope]
 cpus   = "4"
-memory = "4g"
+memory = "16g"
 
 [[envelope.container]]
 role   = "control-plane"
 name   = "jm"
 cpus   = "1"
-memory = "1g"
+memory = "2g"
 args   = ["standalone-job"]
 
 [[envelope.container]]
 role   = "data-plane"
 name   = "tm"
 cpus   = "4"
-memory = "4g"
+memory = "16g"
 args   = ["taskmanager"]
 
 [guarantees]
@@ -142,7 +142,7 @@ a beatable number in silence. A pro-Flink disclosure, never a competing headline
 
 [[deviations]]
 id      = "control-plane-outside-data-plane-budget"
-what    = "The JobManager receives 1 CPU / 1 GiB in ADDITION to the 4 CPU / 4 GiB data-plane envelope."
+what    = "The JobManager receives 1 CPU / 2 GiB in ADDITION to the 4 CPU / 16 GiB data-plane envelope."
 why     = """
 Charging a whole JobManager against a single TaskManager is an artefact of
 running one TaskManager; in production one JobManager serves an entire cluster.

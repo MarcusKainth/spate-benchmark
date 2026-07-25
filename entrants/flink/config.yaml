@@ -28,15 +28,18 @@ jobmanager:
   execution:
     failover-strategy: region
   memory:
-    # JobManager container is 1 CPU / 1 GiB of the 4 CPU / 4 GiB envelope. 960m
-    # leaves 64 MiB of container slack outside the JVM's own accounting.
-    #   960 - 256 (metaspace) - 192 (overhead, clamped to the 192m minimum)
-    #     = 512m total Flink memory
-    #   512 - 128 (off-heap) = 384m JM heap
+    # JobManager container is 1 CPU / 2 GiB, allocated as control plane on top of
+    # the data-plane envelope. 1920m leaves 128 MiB of container slack outside
+    # the JVM's own accounting.
+    #   1920 - 256 (metaspace) - 192 (overhead, clamped to the 192m minimum)
+    #     = 1472m total Flink memory
+    #   1472 - 128 (off-heap) = 1344m JM heap
     # A single stateless job with parallelism 8 and filesystem checkpoint storage
-    # keeps only checkpoint metadata here.
+    # keeps only checkpoint metadata here, so this is generous by a wide margin —
+    # which is the point: the JobManager must never be the thing that limits the
+    # arm, and its MEASURED cost is what gets published anyway.
     process:
-      size: 960m
+      size: 1920m
 
 taskmanager:
   bind-host: 0.0.0.0
@@ -46,24 +49,28 @@ taskmanager:
   # other, since the TaskManager has 4 CPUs.
   numberOfTaskSlots: 8
   memory:
-    # TaskManager container is the FULL 4 CPU / 4 GiB data-plane envelope, the
-    # same budget the Spate arm gets; the JobManager is allocated separately as
-    # control plane (METHODOLOGY.md, "The resource envelope"). process.size is
-    # the right knob inside a container: it is the total the JVM process may use,
-    # so Flink derives heap, direct and metaspace from the cgroup limit we set.
-    #   3900 - 256 (metaspace) - 390 (overhead, 10%) = 3254m total Flink memory
-    #   3254 - 325 (network, 10%) - 0 (managed) - 128 (framework heap)
-    #        - 128 (framework off-heap) - 128 (task off-heap) = 2545m task heap
-    # 196 MiB of the 4 GiB is left as container slack.
+    # TaskManager container is the FULL 4 CPU / 16 GiB data-plane envelope — the
+    # same budget the Spate arm gets. process.size is the right knob inside a
+    # container: it is the total the JVM process may use, so Flink derives heap,
+    # direct and metaspace from the cgroup limit we set.
+    #   15872 - 256 (metaspace) - 1587 (overhead, 10%) = 14029m total Flink memory
+    #   14029 - 1403 (network, 10%) - 0 (managed) - 128 (framework heap)
+    #         - 128 (framework off-heap) - 128 (task off-heap) = 12242m task heap
+    # 512 MiB of the 16 GiB is left as container slack.
+    #
+    # 16 GiB is deliberately far more than this job needs, and the generosity is
+    # the fairness argument rather than a concession. A JVM held to a tight heap
+    # collects more often, and the resulting pauses would be an artefact of OUR
+    # allocation choice rather than a property of Flink. The host has 128 GiB and
+    # the Docker VM 72 GiB, so there is no reason to make either arm economise.
     #
     # This was 2900m, sized for a 3 GiB container the driver had already stopped
     # starting: it ran the TaskManager with --memory=4g while the JVM was told it
     # could only use 2900m, so roughly 1.1 GiB of Flink's own allowance sat
-    # unused and undisclosed. That handicapped Flink in a comparison we publish,
-    # which is the direction of error this benchmark can least afford.
-    # `entrants_are_valid` now asserts these two numbers agree.
+    # unused and undisclosed. `entrants_are_valid` now asserts the JVM sizing and
+    # the declared container agree, so that cannot recur silently.
     process:
-      size: 3900m
+      size: 15872m
     managed:
       # THE most important line in this file. The default is 0.4, and managed
       # memory is *reserved* whether or not anything uses it. A stateless
