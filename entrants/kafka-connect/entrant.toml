@@ -1,0 +1,48 @@
+schema = 1
+
+[entrant]
+id       = "kafka-connect"
+name     = "Kafka Connect + clickhouse-kafka-connect"
+homepage = "https://github.com/ClickHouse/clickhouse-kafka-connect"
+repo     = "https://github.com/ClickHouse/clickhouse-kafka-connect"
+# The connector is Apache-2.0. The Confluent *images* commonly used to run
+# Connect are under the Confluent Community Licence, which is not OSI-approved —
+# see [planned].licence_gate.
+licence  = "Apache-2.0"
+vendor   = "clickhouse"
+kind     = "connector-runtime"
+language = ["java"]
+runtime  = "jvm"
+status   = "planned"
+
+[maintainer]
+who = "spate-benchmark"
+reviewed_upstream = false
+
+[display]
+order = 40
+hue   = 275
+short = "Connect"
+
+[planned]
+blockers = """
+`exactlyOnce=false` to match the at-least-once semantics every other arm runs;
+`AvroConverter` against the same registry; `bufferCount` and `bufferFlushTime`
+are the throughput knobs worth tuning (both added in 1.3.6).
+
+The interesting structural deviation, which rule 4 requires be published rather
+than smoothed over: Connect has no fan-out operator. One Kafka record cannot
+become a hundred ClickHouse rows inside it, so the arm must land the nested array
+and flatten with a ClickHouse materialized view. That is a legitimate real-world
+pattern and an interesting result in its own right, but it moves CPU to the
+server, where our cgroup sampler does not see it — so the comparison for this arm
+must lean on ClickHouse's own ProfileEvents, and the page must say why.
+"""
+
+licence_gate = """
+The Confluent-distributed Connect images are under the Confluent Community
+Licence, not an OSI-approved licence. This arm is built and run, but its numbers
+stay unpublished until the licence text has been read and the terms of publishing
+benchmark results from those images are understood. A permissively-licensed
+Connect distribution would remove the gate entirely.
+"""

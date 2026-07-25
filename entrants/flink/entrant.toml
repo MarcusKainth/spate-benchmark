@@ -1,0 +1,155 @@
+schema = 1
+
+[entrant]
+id       = "flink"
+name     = "Apache Flink"
+homepage = "https://flink.apache.org"
+repo     = "https://github.com/apache/flink"
+docs     = "https://nightlies.apache.org/flink/flink-docs-release-2.2/"
+licence  = "Apache-2.0"
+vendor   = "apache"
+kind     = "stream-processor"
+language = ["java"]
+runtime  = "jvm"
+status   = "active"
+
+[maintainer]
+# "spate-benchmark" means we wrote this arm. A third-party contributor puts their
+# own handle here, and the site shows who to contact when an arm breaks — the
+# absence of that routing is one of the things that made TechEmpower
+# unmaintainable at scale.
+who = "spate-benchmark"
+# Rule 7. Not yet sent upstream; the site shows this honestly rather than
+# implying a review that has not happened.
+reviewed_upstream = false
+review_url        = ""
+
+[display]
+order = 20
+hue   = 32
+short = "Flink"
+
+[version]
+# Read from the image rather than the config, so a base-image bump cannot leave
+# the recorded version behind. `pinned` is asserted against what is resolved: a
+# mismatch refuses the run rather than publishing a mislabelled number.
+strategy = "image-label"
+label    = "org.apache.flink.version"
+pinned   = "2.2.1"
+
+[build]
+context    = "../.."
+dockerfile = "Dockerfile"
+image      = "spate-bench-flink"
+
+# Flink splits across two containers. The data plane gets the FULL 4 CPU / 4 GiB
+# envelope — the same budget the Spate arm gets — and the JobManager is
+# allocated on top as control plane. See [[deviations]] below.
+[envelope]
+cpus   = "4"
+memory = "4g"
+
+[[envelope.container]]
+role   = "control-plane"
+name   = "jm"
+cpus   = "1"
+memory = "1g"
+args   = ["standalone-job"]
+
+[[envelope.container]]
+role   = "data-plane"
+name   = "tm"
+cpus   = "4"
+memory = "4g"
+args   = ["taskmanager"]
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "checkpoint"
+interval_ms = 5000
+notes = """
+AT_LEAST_ONCE explicitly, not the EXACTLY_ONCE default: every arm here is
+at-least-once, and the default would make Flink pay for aligned barriers no
+other arm pays for. Checkpointing is off entirely unless an interval is set, so
+omitting it would silently remove Flink's fault tolerance and flatter its number.
+"""
+
+[volumes]
+# Named volumes only, never host bind mounts: Docker Desktop shares bind-mounted
+# files over VirtioFS, which is materially slower, and this path is the
+# checkpoint directory — one of the things under measurement.
+named = ["spate-bench-flink-cp:/opt/flink/checkpoints"]
+
+# Flink's OWN vocabulary. Sending the Spate arm's variable names would leave
+# Flink on its defaults while the record claimed knob values that were never
+# applied — a silent misreport rather than a visible failure.
+[env]
+TIER                    = "{{tier}}"
+TOPIC                   = "{{topic}}"
+GROUP_ID                = "{{group_id}}"
+STARTING_OFFSETS        = "{{offset_reset}}"
+BOOTSTRAP               = "{{broker_internal}}"
+REGISTRY_URL            = "{{registry_internal}}"
+CLICKHOUSE_URL          = "{{clickhouse_internal}}"
+JOB_MANAGER_RPC_ADDRESS = "{{container:jm}}"
+SINK_LINGER_MS          = "{{knob:linger_ms}}"
+SINK_MAX_BATCH_ROWS     = "{{knob:max_rows}}"
+SINK_MAX_IN_FLIGHT      = "{{knob:inflight}}"
+
+[[variants]]
+id       = "tier-a"
+label    = "Flink 2.2.1 · RowBinary"
+tier     = "a"
+approach = "realistic"
+default  = true
+env      = { DESER = "shipped" }
+knobs    = { linger_ms = 1000, max_rows = 25000, inflight = 2 }
+reports  = { wire_format = "rowbinary_nt" }
+notes = """
+ClickHouse's official Flink connector forces RowBinaryWithNamesAndTypes: the
+Java client has no Native writer (clickhouse-java#2509, open). That is a gap in
+the Java client, not a Flink deficiency, and the page says so — it is not a win
+we claim.
+"""
+
+[[variants]]
+id       = "tier-b"
+label    = "Flink 2.2.1 · RowBinary · tier B"
+tier     = "b"
+approach = "realistic"
+env      = { DESER = "shipped" }
+knobs    = { linger_ms = 1000, max_rows = 25000, inflight = 2 }
+reports  = { wire_format = "rowbinary_nt" }
+
+[[variants]]
+id       = "tier-a-reusing"
+label    = "Flink 2.2.1 · reusing deserializer"
+tier     = "a"
+# `stripped`, so the site never shows this as the headline. This is the
+# anti-gaming valve working in Flink's favour rather than against it.
+approach = "stripped"
+env      = { DESER = "reusing" }
+knobs    = { linger_ms = 1000, max_rows = 25000, inflight = 2 }
+reports  = { wire_format = "rowbinary_nt" }
+notes = """
+ReusingAvroDeserializationSchema is code WE wrote; Flink does not ship it, so
+rule 1 bars it from the headline. Published as a secondary arm because the delta
+quantifies what Flink's shipped deserializer costs — it allocates a fresh
+GenericData.Record plus Utf8/ByteBuffer fields per message — and rule 2 obliges
+us to state that the cost is avoidable in about twenty lines rather than publish
+a beatable number in silence. A pro-Flink disclosure, never a competing headline.
+"""
+
+[[deviations]]
+id      = "control-plane-outside-data-plane-budget"
+what    = "The JobManager receives 1 CPU / 1 GiB in ADDITION to the 4 CPU / 4 GiB data-plane envelope."
+why     = """
+Charging a whole JobManager against a single TaskManager is an artefact of
+running one TaskManager; in production one JobManager serves an entire cluster.
+Measurement bears this out — the JobManager consumed 0.03 cores, so charging it a
+full core would have taxed Flink roughly 33x its real cost and the resulting
+"win" would have been an artefact of our own accounting. Its measured
+consumption is published instead, and every arm reports its data-plane figure
+alongside its total so a reader who prefers the stricter rule can apply it.
+"""
+affects = ["envelope"]

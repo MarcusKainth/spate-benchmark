@@ -22,6 +22,8 @@ spate-benchmark-harness = { workspace = true }
 
 apache-avro = { workspace = true }
 serde = { workspace = true }
+serde_yaml = { workspace = true }
+bytes = { workspace = true }
 
 # The framework under test. Only the four crates this pipeline actually uses —
 # not the facade — so the arm's dependency graph is the one a user integrating

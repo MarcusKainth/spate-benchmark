@@ -29,8 +29,25 @@ pub fn env_str(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
+/// `key` from the environment parsed as `u64`, else `default`.
+///
+/// # Panics
+///
+/// If the variable is set but does not parse. A typo in a knob must stop the
+/// run, not silently fall back to a default and record a value that was never
+/// applied.
+pub fn env_u64(key: &str, default: u64) -> u64 {
+    match std::env::var(key) {
+        Ok(v) => v
+            .parse()
+            .unwrap_or_else(|e| panic!("{key}={v:?} is not a u64: {e}")),
+        Err(_) => default,
+    }
+}
+
 pub mod corpus;
 pub mod docker;
+pub mod entrant;
 pub mod http;
 pub mod kafka;
 pub mod report;

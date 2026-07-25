@@ -1,0 +1,44 @@
+schema = 1
+
+[entrant]
+id       = "clickhouse-kafka-engine"
+name     = "ClickHouse Kafka table engine"
+homepage = "https://clickhouse.com/docs/engines/table-engines/integrations/kafka"
+repo     = "https://github.com/ClickHouse/ClickHouse"
+licence  = "Apache-2.0"
+vendor   = "clickhouse"
+kind     = "database-native"
+language = ["cpp"]
+runtime  = "native"
+status   = "planned"
+
+[maintainer]
+who = "spate-benchmark"
+reviewed_upstream = false
+
+[display]
+order = 50
+hue   = 55
+short = "CH Kafka"
+
+[planned]
+blockers = """
+The zero-framework baseline: ClickHouse consuming the topic itself, with no
+network hop between consumer and storage. It may well win outright, and it is
+published if it does.
+
+It does not fit the envelope the other arms are held to, and that has to be
+resolved honestly rather than fudged: the consumption happens *inside* the
+ClickHouse container, so its CPU is not separable from the server's by the cgroup
+sampler, and the shared infrastructure sits outside every arm's budget. Either
+this arm runs against a dedicated ClickHouse whose whole container is the
+envelope, or the comparison is reported on a different basis and labelled so.
+
+Configuration trap already identified: `kafka_num_consumers > 1` *requires*
+`kafka_thread_per_consumer = 1`, because one thread cannot consume from several
+partitions. Leaving the default silently cripples the arm, which would be a bug
+in our benchmark rather than a result.
+
+Not deprecated: ClickHouse still recommends the engine for self-hosted ingestion.
+ClickPipes is Cloud-only and so is not a valid comparator here.
+"""

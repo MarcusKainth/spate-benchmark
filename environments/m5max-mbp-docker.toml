@@ -1,0 +1,77 @@
+# The reference environment.
+#
+# An environment is the unit of comparability for hardware: records carry its id,
+# and the site never draws two environments on one axis. That is why this is a
+# committed file with a stable id rather than a hostname — `Marcuss-MBP` is not a
+# hardware disclosure, cannot be compared across machines, and tells a reader
+# nothing they can reproduce against.
+#
+# `env_digest` on every record is a hash of this file, so editing it later cannot
+# retroactively re-describe runs that already happened.
+
+id = "m5max-mbp-docker"
+
+# `indicative` or `authoritative`. The site renders the "not authoritative"
+# banner from THIS field, not from a string match on the OS — so when a bare-metal
+# Linux environment is added, the caveat disappears on its own rather than having
+# to be remembered.
+class = "indicative"
+
+[host]
+description = "Apple MacBook Pro, M5 Max"
+cpu         = "Apple M5 Max"
+cores       = 18
+core_layout = "heterogeneous: 6 performance + 12 efficiency"
+memory      = "128 GiB"
+os          = "macOS, Docker Desktop Linux VM"
+arch        = "aarch64"
+vm_cpus     = 18
+vm_memory   = "72 GiB"
+
+caveats = """
+Docker Desktop runs a Linux VM; a JVM inside it on arm64 is not a JVM on Linux
+bare metal, and no arm here should be read as one.
+
+The cores are heterogeneous and the hypervisor maps VM vCPUs across performance
+and efficiency cores non-deterministically. `--cpuset-cpus` would pin to VM
+vCPUs, not physical cores, so it does not help. This is an irreducible variance
+source: run-to-run spread reached 14.5% on throughput, which is why every chart
+shows spread and why three repetitions is the floor rather than a nicety.
+
+Benchmarking guidance we consulted recommended dropping macOS results from scope
+entirely. That was considered and declined, so these numbers are published as
+indicative and labelled as such in their own right rather than in a footnote.
+"""
+
+# Shared infrastructure. OUTSIDE every arm's envelope and identical for all of
+# them. Declared here rather than passed on the command line because that split
+# is exactly what went wrong before: a runner script, the driver's defaults and
+# the written methodology stated three different envelopes, and no record said
+# which had been in force. One source, applied and then read back from the
+# running containers.
+[infra]
+partitions = 8
+
+[infra.broker]
+kind   = "redpanda"
+image  = "redpandadata/redpanda:v26.1.13"
+cpus   = "8"
+memory = "8g"
+# Redpanda's built-in Confluent-compatible Schema Registry, rather than a
+# separate Confluent container: it removes a second JVM from the measurement
+# environment and returns a CPU and a GiB to the infra budget, which is headroom
+# the ceiling pass needs.
+registry = "redpanda-builtin"
+
+[infra.clickhouse]
+image  = "clickhouse/clickhouse-server:26.3"
+cpus   = "5"
+memory = "12g"
+
+# The measured consume ceiling this environment gates against, in messages per
+# second. An arm above 70% of it is infra-bound and cannot be published as a
+# system comparison — at that point we are measuring the shared consume path, not
+# the system. See ceilings/m5max-mbp-docker.json for how it was measured and why
+# it is stored in messages rather than rows.
+[ceiling]
+file = "ceilings/m5max-mbp-docker.json"

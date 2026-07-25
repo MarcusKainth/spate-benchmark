@@ -1,0 +1,148 @@
+schema = 1
+
+[entrant]
+id       = "spate"
+name     = "Spate"
+homepage = "https://github.com/MarcusKainth/spate-etl"
+repo     = "https://github.com/MarcusKainth/spate-etl"
+licence  = "Apache-2.0"
+# `self` is what marks this as the vendor's own entry. The site renders a
+# disclosure on every row of an entrant with this value, and nothing in the site
+# branches on the literal id "spate" — a CI lint enforces that, so the neutrality
+# claim is checkable rather than asserted.
+vendor   = "self"
+kind     = "etl-framework"
+language = ["rust"]
+runtime  = "native"
+status   = "active"
+
+[maintainer]
+who = "spate-benchmark"
+# Trivially true: we are upstream. The site renders "n/a" rather than a tick, so
+# this does not read as external validation we have not earned.
+reviewed_upstream = true
+
+[display]
+order = 10
+# A hue ANGLE, not a hex colour. The site owns contrast in light and dark themes,
+# and an entrant supplying #ff0000 would fail one of them — while a site that
+# overrode the value would make the field a lie.
+hue   = 210
+short = "Spate"
+
+[version]
+# Resolved by running the built image, so the recorded version is the one that
+# was linked rather than one a human typed. The pattern captures (version,
+# commit); `main.rs::version_line` produces it and the two must move together.
+strategy = "command"
+command  = ["/usr/local/bin/spate-arm", "--version"]
+pattern  = '^spate-arm ([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?) \(([0-9a-f]{7,40})\)$'
+
+[build]
+# The repository root: the arm is a cargo workspace member and needs the
+# workspace manifest and lockfile.
+context    = "../.."
+dockerfile = "Dockerfile"
+image      = "spate-bench-spate"
+# Private git dependency until the framework publishes. Passed as a BuildKit
+# secret so no token is ever baked into an image layer.
+secrets    = ["gitcred"]
+
+[envelope]
+cpus   = "4"
+memory = "4g"
+
+[[envelope.container]]
+role   = "data-plane"
+name   = "sut"
+cpus   = "4"
+memory = "4g"
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "offset-commit"
+interval_ms = 5000
+notes = """
+Offsets are committed every 5s and never past unacknowledged data. Matched to
+Flink's 5s AT_LEAST_ONCE checkpoint interval so both arms pay for the same
+guarantee at the same cadence.
+"""
+
+[env]
+BOOTSTRAP      = "{{broker_internal}}"
+REGISTRY_URL   = "{{registry_internal}}"
+CLICKHOUSE_URL = "{{clickhouse_internal}}"
+TOPIC          = "{{topic}}"
+GROUP_ID       = "{{group_id}}"
+OFFSET_RESET   = "{{offset_reset}}"
+TIER           = "{{tier}}"
+THREADS        = "{{knob:threads}}"
+SHARDS         = "{{knob:shards}}"
+INFLIGHT       = "{{knob:inflight}}"
+LINGER_MS      = "{{knob:linger_ms}}"
+MAX_ROWS       = "{{knob:max_rows}}"
+
+# Two orthogonal axes — wire format and decode path — times two tiers. Named
+# variants rather than one smashed-together string: ClickBench encodes these as
+# sibling directory names (`duckdb-parquet-partitioned`), which stops composing
+# the moment the axes are independent.
+
+[[variants]]
+id       = "tier-a-native"
+label    = "Spate · Native"
+tier     = "a"
+approach = "realistic"
+default  = true
+env      = { FORMAT = "native", DESER = "value" }
+knobs    = { threads = 4, shards = 4, inflight = 4, linger_ms = 500, max_rows = 262144 }
+reports  = { wire_format = "native" }
+notes    = "What a real deployment runs."
+
+[[variants]]
+id       = "tier-a-rowbinary"
+label    = "Spate · RowBinary"
+tier     = "a"
+approach = "realistic"
+env      = { FORMAT = "rowbinary", DESER = "value" }
+knobs    = { threads = 4, shards = 4, inflight = 4, linger_ms = 500, max_rows = 262144 }
+reports  = { wire_format = "rowbinary" }
+notes = """
+The wire-format control, and the arm that should be read against Flink. It
+separates "the framework is faster" from "we chose a faster wire format".
+ClickHouse's official Flink connector can only write RowBinaryWithNamesAndTypes
+because the Java client has no Native writer (clickhouse-java#2509), so this is
+the like-for-like row.
+"""
+
+[[variants]]
+id       = "tier-a-native-typed"
+label    = "Spate · Native · typed decode"
+tier     = "a"
+approach = "realistic"
+env      = { FORMAT = "native", DESER = "typed" }
+knobs    = { threads = 4, shards = 4, inflight = 4, linger_ms = 500, max_rows = 262144 }
+reports  = { wire_format = "native" }
+notes = """
+`build_serde`, the ergonomic shipped deserializer. Our own documentation notes it
+decodes each record twice, and it measured +34% CPU per row for no throughput
+gain. Published because rule 1 requires the same treatment of our own shipped
+APIs that we give everyone else's — we do not get to show only the fast one.
+"""
+
+[[variants]]
+id       = "tier-b-native"
+label    = "Spate · Native · tier B"
+tier     = "b"
+approach = "realistic"
+env      = { FORMAT = "native", DESER = "value" }
+knobs    = { threads = 4, shards = 4, inflight = 4, linger_ms = 500, max_rows = 262144 }
+reports  = { wire_format = "native" }
+
+[[variants]]
+id       = "tier-b-rowbinary"
+label    = "Spate · RowBinary · tier B"
+tier     = "b"
+approach = "realistic"
+env      = { FORMAT = "rowbinary", DESER = "value" }
+knobs    = { threads = 4, shards = 4, inflight = 4, linger_ms = 500, max_rows = 262144 }
+reports  = { wire_format = "rowbinary" }

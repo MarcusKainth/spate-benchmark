@@ -1,0 +1,43 @@
+schema = 1
+
+[entrant]
+id       = "redpanda-connect"
+name     = "Redpanda Connect"
+homepage = "https://docs.redpanda.com/redpanda-connect/about/"
+repo     = "https://github.com/redpanda-data/connect"
+# BSL 1.1 for the core plus a Community Licence for parts of the connector set.
+# Not OSI-approved; see [planned].licence_gate.
+licence  = "BUSL-1.1"
+vendor   = "redpanda-data"
+kind     = "stream-processor"
+language = ["go"]
+runtime  = "go"
+status   = "planned"
+
+[maintainer]
+who = "spate-benchmark"
+reviewed_upstream = false
+
+[display]
+order = 60
+hue   = 320
+short = "RP Connect"
+
+[planned]
+blockers = """
+It has no native ClickHouse output at all, so the arm goes through `sql_insert`
+with the Go driver. That is a third distinct insert path — not Native, not
+RowBinary — and rule 5 requires it appear in the results table, because it is not
+the same amount of server-side work.
+
+Batching defaults to disabled (count, size and period all zero). Running it
+unbatched would produce a meaninglessly bad number, and publishing that would be
+the failure rule 2 exists to prevent: a slow competitor arm is a bug in our
+benchmark, not a result.
+"""
+
+licence_gate = """
+BSL 1.1 with a Community Licence over parts of the connector set. Built and run,
+but numbers stay unpublished until the licence text has been read — specifically
+whether it constrains publishing comparative benchmark results.
+"""

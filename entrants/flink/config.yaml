@@ -43,19 +43,27 @@ taskmanager:
   # 8, to match the topic's 8 partitions: one Kafka partition per subtask, so no
   # subtask multiplexes partitions and none idles. See README.md — this is also
   # the one setting where the envelope and the partition count pull against each
-  # other, since the TaskManager has 3 CPUs.
+  # other, since the TaskManager has 4 CPUs.
   numberOfTaskSlots: 8
   memory:
-    # TaskManager container is 3 CPUs / 3 GiB. process.size is the right knob
-    # inside a container: it is the total the JVM process may use, so Flink can
-    # derive heap, direct and metaspace from the cgroup limit we set.
-    #   2900 - 256 (metaspace) - 290 (overhead, 10%) = 2354m total Flink memory
-    #   2354 - 235 (network, 10%) - 0 (managed) - 128 (framework heap)
-    #        - 128 (framework off-heap) - 128 (task off-heap) = 1735m task heap
-    #   => -Xmx 1863m, -XX:MaxDirectMemorySize 491m
-    # 172 MiB of the 3 GiB is left as container slack.
+    # TaskManager container is the FULL 4 CPU / 4 GiB data-plane envelope, the
+    # same budget the Spate arm gets; the JobManager is allocated separately as
+    # control plane (METHODOLOGY.md, "The resource envelope"). process.size is
+    # the right knob inside a container: it is the total the JVM process may use,
+    # so Flink derives heap, direct and metaspace from the cgroup limit we set.
+    #   3900 - 256 (metaspace) - 390 (overhead, 10%) = 3254m total Flink memory
+    #   3254 - 325 (network, 10%) - 0 (managed) - 128 (framework heap)
+    #        - 128 (framework off-heap) - 128 (task off-heap) = 2545m task heap
+    # 196 MiB of the 4 GiB is left as container slack.
+    #
+    # This was 2900m, sized for a 3 GiB container the driver had already stopped
+    # starting: it ran the TaskManager with --memory=4g while the JVM was told it
+    # could only use 2900m, so roughly 1.1 GiB of Flink's own allowance sat
+    # unused and undisclosed. That handicapped Flink in a comparison we publish,
+    # which is the direction of error this benchmark can least afford.
+    # `entrants_are_valid` now asserts these two numbers agree.
     process:
-      size: 2900m
+      size: 3900m
     managed:
       # THE most important line in this file. The default is 0.4, and managed
       # memory is *reserved* whether or not anything uses it. A stateless
