@@ -1,0 +1,37 @@
+[package]
+name = "spate-benchmark-harness"
+description = "Driver and CLI for the Spate streaming ETL benchmark."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# The measurement harness depends on NO system under test, and that is a
+# property CI asserts rather than a coincidence. It is what lets a competitor
+# audit how they were measured without having to trust our crates, and it makes
+# the Spate arm structurally symmetric with the Flink arm, which likewise owns
+# its own row types.
+[dependencies]
+apache-avro = { workspace = true }
+bytes = { workspace = true }
+rdkafka = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+
+[build-dependencies]
+sha2 = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+test = false

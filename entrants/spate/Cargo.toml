@@ -1,0 +1,29 @@
+[package]
+name = "spate-arm"
+description = "The Spate arm of the streaming ETL benchmark."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# This crate is a plain consumer of the framework's public API — the same shapes
+# a user writes — plus the row types and flatten functions for this workload.
+#
+# Those row types live HERE rather than in the harness on purpose. The harness
+# computes expectations and encodes Avro; it never serialises a row. Keeping
+# `RowA`/`RowB` in the arm is what removes the harness's last dependency on the
+# framework, and it makes this arm structurally symmetric with the Flink arm,
+# which owns its own `SensorRow.java`.
+[dependencies]
+spate-benchmark-harness = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "spate-arm"
+path = "src/main.rs"
+test = false

@@ -1,0 +1,59 @@
+# Generator constants for the one canonical workload.
+#
+# These live in a data file rather than in Rust source for one reason:
+# `dataset_version` is *derived* from the content of this file plus the Avro
+# schema and the ClickHouse DDL. A change to what the data actually is therefore
+# cannot be made without the version moving, and two result sets generated from
+# different corpora can never be silently compared.
+#
+# `harness/build.rs` reads this and generates the Rust constants, so this file is
+# the single source of truth and not a duplicate that can drift.
+#
+# The field derivations that use these constants are specified in METHODOLOGY.md,
+# which is normative and which the competitor implementations were written
+# against. If the two disagree, the code is wrong.
+
+schema_version = 1
+
+[generator]
+# Events per message, and therefore the fan-out factor: one Kafka message becomes
+# this many ClickHouse rows.
+#
+# Raised from 20 to 100 deliberately, for headroom in the dimension that was
+# actually binding. A raw single-process consumer on the reference host tops out
+# near 305k messages/s over 8 partitions, and the best arm needed 241k of them —
+# 79% of that ceiling, above the 70% limit the methodology sets, so the
+# comparison would have been measuring the shared consume path rather than the
+# systems. At 100 events per message the same row throughput needs a fifth of the
+# messages, taking the arm to ~16% of the ceiling.
+#
+# It costs nothing in fidelity: the Avro `events` array is unbounded, so no
+# schema and no competitor implementation changes, and a hundred readings per
+# message is if anything more representative of real batched telemetry than
+# twenty. It does increase per-message fan-out work, which is the point — the
+# benchmark should be bound by the pipeline, not by message accounting.
+events_per_batch = 100
+
+# Distinct `sensor` values. Low enough to be a sane LowCardinality(String) and a
+# sane ordering key.
+sensors = 1024
+
+# Distinct metric names.
+names = 32
+
+# Distinct tag values.
+tags = 16
+
+# Units. Index 3 is the tier-B filter sentinel, so one unit in eight is dropped
+# by the transform.
+units = ["count", "bytes", "ms", "drop", "ratio", "celsius", "volts", "rpm"]
+
+# The unit value tier B filters out. Must appear in `units`; asserted at build.
+drop_unit = "drop"
+
+# Tier B drops rows whose `quality` is non-null and below this.
+quality_floor = 0.2
+
+# Base event timestamp, epoch milliseconds. Fixed rather than "now" so a
+# regenerated corpus is byte-identical months later on a different machine.
+base_ts_ms = 1772000000000
