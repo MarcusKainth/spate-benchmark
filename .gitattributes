@@ -1,0 +1,21 @@
+# Result files are an append-only record log: each line is a self-contained,
+# immutable measurement keyed by a globally unique `run_id`, and line order
+# carries no meaning. Two branches that each append distinct records are not in
+# conflict — the correct resolution is the union of both, which is what git
+# cannot infer on its own and would otherwise escalate to a manual merge on
+# every concurrent run.
+#
+# Scoped to exactly these files, deliberately. `merge=union` on structured text
+# (JSON, YAML, TOML, source) silently produces syntactically broken output by
+# interleaving hunks, so this must never be widened to a directory that holds
+# anything but JSONL. It is safe here only because every line stands alone.
+#
+# Backstop: `results_are_valid` asserts `run_id` uniqueness across the whole
+# tree, so if a union merge ever double-applies a line, CI says so rather than
+# the duplicate being silently medianed into a published number.
+results/**/*.jsonl merge=union
+
+# Keep line endings stable for the fixtures the golden tests compare byte-wise.
+*.jsonl text eol=lf
+*.avsc  text eol=lf
+*.sql   text eol=lf

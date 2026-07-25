@@ -1,0 +1,12 @@
+# Pinned, and the pin is part of a published benchmark's provenance rather than
+# hygiene: codegen changes between compiler releases move throughput numbers, so
+# an arm rebuilt on a different toolchain is not strictly comparable to one
+# already recorded.
+#
+# This must stay equal to the `FROM rust:<version>` in `entrants/spate/Dockerfile`.
+# The image tag alone is not enough — a Docker tag can be re-pushed, and the host
+# gates would then be running a different compiler from the arm they are checking.
+# `entrants_are_valid` asserts the two agree.
+[toolchain]
+channel = "1.97"
+components = ["rustfmt", "clippy"]

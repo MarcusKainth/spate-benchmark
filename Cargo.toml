@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = [
+    "harness",
+    # The Flink entrant is a Maven project, not a workspace member. Rust entrants
+    # are members so one `cargo build --locked` covers them and one lockfile
+    # pins their transitive graph.
+    "entrants/spate",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+authors = ["Marcus Kainth <marcus@kainth.dev>"]
+repository = "https://github.com/MarcusKainth/spate-benchmark"
+
+[workspace.dependencies]
+spate-benchmark-harness = { version = "=0.1.0", path = "harness" }
+
+# The framework under test.
+#
+# A git dependency pinned to a rev, not a path dependency, and the reason is the
+# whole point of this repository: a path dep records nothing about what was
+# measured and breaks on any clone, whereas a rev lands in Cargo.lock, travels
+# into `sut.commit` on every record, and keeps `--locked` meaningful. A benchmark
+# whose result cannot say which code produced it is not evidence.
+#
+# The crates are still named `etl-*` because the framework's rename sweep has not
+# landed. That is deliberate: this repository uses the `spate` brand in prose,
+# entrant ids and records from day one, and only the Cargo dependency names lag.
+# When the sweep lands these become `spate-*` and the rev moves, in one PR whose
+# diff IS the provenance change.
+#
+# After 0.1.0 publishes, `git`/`rev` becomes `version = "0.1.0"` and this comment
+# shrinks to nothing.
+etl-core = { git = "https://github.com/MarcusKainth/etl-rs", rev = "f41280d51165a971acc21384d3e58484c1e31535" }
+etl-avro = { git = "https://github.com/MarcusKainth/etl-rs", rev = "f41280d51165a971acc21384d3e58484c1e31535" }
+etl-kafka = { git = "https://github.com/MarcusKainth/etl-rs", rev = "f41280d51165a971acc21384d3e58484c1e31535" }
+etl-clickhouse = { git = "https://github.com/MarcusKainth/etl-rs", rev = "f41280d51165a971acc21384d3e58484c1e31535" }
+
+apache-avro = "0.21"
+bytes = "1.11.1"
+rdkafka = "0.39"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+serde_yaml = { package = "yaml_serde", version = "0.10" }
+sha2 = "0.11"
+toml = "0.9"
+uuid = { version = "1.18.1", default-features = false, features = ["v7", "std"] }
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[profile.release]
+lto = "thin"

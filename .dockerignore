@@ -1,0 +1,14 @@
+# The Rust entrant builds with the repository root as its context, because the
+# arm is a workspace member and cargo needs the workspace manifest and lockfile.
+# That makes an explicit exclusion list load-bearing rather than tidy: without
+# it, every committed result and the entire site tree are uploaded to the Docker
+# daemon on each build.
+.git
+.github
+results
+website
+docs
+target
+**/target
+*.md
+.DS_Store

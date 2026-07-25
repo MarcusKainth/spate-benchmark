@@ -1,0 +1,20 @@
+/target
+**/target
+.DS_Store
+/.claude/*
+!/.claude/commands/
+
+# Maven build output for the Flink entrant.
+entrants/*/target
+
+# Docusaurus site (website/)
+website/node_modules
+website/build
+website/.docusaurus
+website/.cache-loader
+npm-debug.log*
+yarn-error.log
+
+# Tier C result shards are GENERATED from results/ at build time. The JSONL in
+# results/ is the source of truth and is committed; the sharded copies are not.
+website/static/bench
