@@ -16,4 +16,22 @@
 //! the document is what the competitor implementations were written against, so
 //! the code is wrong.
 
+// The driver narrates progress on stderr by design: a 30-hour sweep that says
+// nothing until it finishes is unusable.
+#![allow(clippy::print_stderr, clippy::print_stdout)]
+
+/// `key` from the environment, else `default`.
+///
+/// Deliberately rare in this crate: the measurement envelope comes from an
+/// environment profile, not from ambient variables. This exists for the few
+/// values that genuinely are ambient — local credentials, an image override.
+pub fn env_str(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+pub mod corpus;
+pub mod docker;
+pub mod http;
+pub mod kafka;
 pub mod report;
+pub mod sampler;

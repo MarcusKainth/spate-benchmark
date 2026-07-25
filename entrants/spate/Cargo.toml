@@ -20,9 +20,28 @@ repository.workspace = true
 [dependencies]
 spate-benchmark-harness = { workspace = true }
 
+apache-avro = { workspace = true }
+serde = { workspace = true }
+
+# The framework under test. Only the four crates this pipeline actually uses —
+# not the facade — so the arm's dependency graph is the one a user integrating
+# these connectors would get.
+etl-avro = { workspace = true }
+etl-clickhouse = { workspace = true }
+etl-core = { workspace = true }
+etl-kafka = { workspace = true }
+
 [lints]
 workspace = true
 
+[lib]
+name = "spate_arm"
+path = "src/lib.rs"
+
+# `test = false` on the bin, deliberately, with the tests living in the lib. A
+# `#[cfg(test)]` module inside a `test = false` binary is never compiled or run,
+# so tests placed there are silently dead — and the flatten this arm performs is
+# logic the published numbers depend on.
 [[bin]]
 name = "spate-arm"
 path = "src/main.rs"
