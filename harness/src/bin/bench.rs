@@ -17,9 +17,10 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use spate_benchmark_harness::driver::{self, Mode, RunOptions};
 use spate_benchmark_harness::entrant::{self, Entrant, Status};
 use spate_benchmark_harness::environment::Environment;
-use spate_benchmark_harness::report::{DATASET_VERSION, HARNESS_VERSION};
+use spate_benchmark_harness::report::{DATASET_VERSION, HARNESS_VERSION, Trigger};
 use spate_benchmark_harness::results;
 use spate_benchmark_harness::select::{self, Selector};
 
@@ -44,7 +45,9 @@ fn main() -> ExitCode {
         "build" => cmd_build(&root, rest),
         "stale" => cmd_stale(&root),
         "retract" => cmd_retract(&root, rest),
-        "prefill" | "ceiling" | "run" => Err(not_yet(cmd)),
+        "prefill" => cmd_prefill(&root, rest),
+        "ceiling" => cmd_ceiling(&root, rest),
+        "run" => cmd_run(&root, rest),
         "-h" | "--help" | "help" => {
             usage();
             return ExitCode::SUCCESS;
@@ -92,17 +95,118 @@ results file."
     );
 }
 
-fn not_yet(cmd: &str) -> String {
-    format!(
-        "`{cmd}` is not implemented yet.\n\n\
-         This is a deliberate hard failure rather than a silent fall back to \
-         something adjacent. The measurement protocol — envelope read-back, \
-         steady-state detection, the quiesce before gating, and the refusal \
-         paths — is what makes a number publishable, and a partial version of it \
-         would produce numbers that look fine and are not.\n\n\
-         Working today: `bench list`, `bench validate`, `bench build`, \
-         `bench stale`, `bench retract`."
-    )
+/// Flag parsing. Deliberately hand-rolled and strict: an unrecognised flag is an
+/// error rather than something ignored, because a typo'd `--reps` that silently
+/// ran once instead of three times would produce a result whose repetition count
+/// nobody questioned.
+fn opts_from(args: &[String], root: &Path) -> Result<RunOptions, String> {
+    let mut o = RunOptions {
+        reps: 3,
+        mode: Mode::Drain,
+        env_id: default_env(root)?,
+        trigger: Trigger::Manual,
+        dry_run: false,
+        reuse_infra: false,
+        fail_fast: false,
+        topic: "comparison-sensor-batches".to_owned(),
+        batches: 1_500_000,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if !a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        let mut value = || -> Result<String, String> {
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| format!("{} needs a value", args[i - 1]))
+        };
+        match a.as_str() {
+            "--reps" => o.reps = value()?.parse().map_err(|e| format!("--reps: {e}"))?,
+            "--env" => o.env_id = value()?,
+            "--topic" => o.topic = value()?,
+            "--batches" => o.batches = value()?.parse().map_err(|e| format!("--batches: {e}"))?,
+            "--trigger" => {
+                o.trigger = match value()?.as_str() {
+                    "nightly" => Trigger::Nightly,
+                    "manual" => Trigger::Manual,
+                    "pr" => Trigger::Pr,
+                    "release" => Trigger::Release,
+                    other => return Err(format!("unknown --trigger {other:?}")),
+                }
+            }
+            "--dry-run" => o.dry_run = true,
+            "--reuse-infra" => o.reuse_infra = true,
+            "--fail-fast" => o.fail_fast = true,
+            other => return Err(format!("unknown flag {other:?}. Try `bench help`.")),
+        }
+        i += 1;
+    }
+    Ok(o)
+}
+
+/// The environment to use when none is named.
+///
+/// Refuses when there is more than one rather than picking: an ambient default
+/// that silently selects hardware is exactly the class of thing this harness
+/// exists to remove.
+fn default_env(root: &Path) -> Result<String, String> {
+    let dir = root.join("environments");
+    let mut ids: Vec<String> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("read environments: {e}"))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
+        .collect();
+    ids.sort();
+    match ids.len() {
+        1 => Ok(ids.remove(0)),
+        0 => Err("no environment profiles in environments/".to_owned()),
+        _ => Err(format!(
+            "several environments exist ({}); name one with --env. Guessing which \
+             hardware a number describes is not something this tool does.",
+            ids.join(", ")
+        )),
+    }
+}
+
+fn cmd_prefill(root: &Path, args: &[String]) -> Result<(), String> {
+    driver::prefill(root, &opts_from(args, root)?)
+}
+
+fn cmd_ceiling(root: &Path, args: &[String]) -> Result<(), String> {
+    let opts = opts_from(args, root)?;
+    let env = Environment::load(&root.join("environments"), &opts.env_id)?;
+    let ceiling = env.ceiling()?;
+    println!(
+        "{}: proven consume ceiling {} msgs/s",
+        env.spec.id, ceiling.consume_msgs_per_s
+    );
+    println!(
+        "an arm above {:.0}% of that is infra-bound and is recorded as such rather \
+         than published",
+        spate_benchmark_harness::environment::HEADROOM_LIMIT * 100.0
+    );
+    println!(
+        "\nRe-measuring the ceiling needs the raw consume rig, which has not been \
+         ported into this repository yet. The committed figure was measured on \
+         this environment's broker at its declared cap; see \
+         environments/ceilings/ for how, and treat it as provenance rather than \
+         something this command produced."
+    );
+    Ok(())
+}
+
+fn cmd_run(root: &Path, args: &[String]) -> Result<(), String> {
+    let entrants = load_entrants(root)?;
+    let selectors = parse_selectors(args)?;
+    let arms = select::expand(&entrants, &selectors)?;
+    let opts = opts_from(args, root)?;
+    driver::run(root, &arms, &opts)
 }
 
 /// The repository root, from this binary's compile-time location.
