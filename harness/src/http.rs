@@ -24,7 +24,10 @@ fn decode(raw: &str) -> String {
         .split_once("\r\n\r\n")
         .map(|(_, b)| b.to_owned())
         .unwrap_or_default();
-    if raw.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    if raw
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         let mut out = String::new();
         let mut rest = body.as_str();
         while let Some((size_line, tail)) = rest.split_once("\r\n") {

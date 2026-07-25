@@ -404,10 +404,9 @@ pub fn load_all(dir: &Path) -> Result<Vec<Entrant>, Vec<String>> {
 }
 
 fn load_one(dir: &Path, path: &Path) -> Result<Entrant, Vec<String>> {
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| vec![format!("read {}: {e}", path.display())])?;
-    let spec: Spec =
-        toml::from_str(&src).map_err(|e| vec![format!("{}: {e}", path.display())])?;
+    let src =
+        std::fs::read_to_string(path).map_err(|e| vec![format!("read {}: {e}", path.display())])?;
+    let spec: Spec = toml::from_str(&src).map_err(|e| vec![format!("{}: {e}", path.display())])?;
     let entrant = Entrant {
         dir: dir.to_path_buf(),
         spec,
@@ -449,7 +448,9 @@ fn validate(e: &Entrant) -> Vec<String> {
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
-        errs.push(at("id must be lowercase ascii, digits and hyphens".to_owned()));
+        errs.push(at(
+            "id must be lowercase ascii, digits and hyphens".to_owned()
+        ));
     }
     if e.spec.entrant.licence.trim().is_empty() {
         errs.push(at("licence is empty".to_owned()));
@@ -467,7 +468,9 @@ fn validate(e: &Entrant) -> Vec<String> {
     if !e.spec.entrant.status.is_runnable() {
         // A planned entrant must say why, or it is an empty promise.
         if e.spec.planned.is_none() {
-            errs.push(at("status is not runnable but [planned] is absent".to_owned()));
+            errs.push(at(
+                "status is not runnable but [planned] is absent".to_owned()
+            ));
         }
         return errs;
     }
@@ -531,7 +534,10 @@ fn validate_envelope(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) ->
             "data-plane containers total {sum_mem} bytes but [envelope].memory is {} ({want})",
             env.memory
         ))),
-        None => errs.push(at(format!("[envelope].memory {:?} unparseable", env.memory))),
+        None => errs.push(at(format!(
+            "[envelope].memory {:?} unparseable",
+            env.memory
+        ))),
     }
 
     // A control-plane container outside the budget is legitimate, but it is a
@@ -573,7 +579,10 @@ fn validate_variants(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) ->
             )));
         }
         if !matches!(v.tier.as_str(), "a" | "b") {
-            errs.push(at(format!("variant {:?} has tier {:?}, expected a|b", v.id, v.tier)));
+            errs.push(at(format!(
+                "variant {:?} has tier {:?}, expected a|b",
+                v.id, v.tier
+            )));
         }
         // Rule 5: the insert format is not the same server-side work across
         // systems, so a results table that omits it is indefensible.

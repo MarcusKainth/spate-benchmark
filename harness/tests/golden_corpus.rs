@@ -44,7 +44,10 @@ fn encoded_datums_are_byte_identical_to_the_original_harness() {
     let mut h = FNV_OFFSET;
     let mut total = 0usize;
     for id in 0..BATCHES {
-        let b = encode_batch(id, 1_772_000_000_000_000_i64 + i64::try_from(id).expect("fits i64"));
+        let b = encode_batch(
+            id,
+            1_772_000_000_000_000_i64 + i64::try_from(id).expect("fits i64"),
+        );
         total += b.len();
         h = fnv(h, &b);
     }
@@ -96,5 +99,8 @@ fn the_dataset_version_matches_the_committed_workload() {
     // without noticing is impossible: this test fails and points at the change.
     // Updating it is correct — but it must happen in the same commit as the
     // corpus change, which is the review artefact worth having.
-    assert_eq!(spate_benchmark_harness::report::DATASET_VERSION, "d1-9aeec63b4931");
+    assert_eq!(
+        spate_benchmark_harness::report::DATASET_VERSION,
+        "d1-9aeec63b4931"
+    );
 }

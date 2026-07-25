@@ -54,3 +54,4 @@ pub mod kafka;
 pub mod report;
 pub mod results;
 pub mod sampler;
+pub mod select;

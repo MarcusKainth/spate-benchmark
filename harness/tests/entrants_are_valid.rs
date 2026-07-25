@@ -57,7 +57,10 @@ fn the_vendor_entry_is_unique_and_present() {
 #[test]
 fn every_active_entrant_has_a_realistic_default() {
     let entrants = entrant::load_all(&entrants_dir()).expect("descriptors valid");
-    for e in entrants.iter().filter(|e| e.spec.entrant.status.is_runnable()) {
+    for e in entrants
+        .iter()
+        .filter(|e| e.spec.entrant.status.is_runnable())
+    {
         let d = e.default_variant().expect("a default variant");
         assert_eq!(
             d.approach,
@@ -105,7 +108,11 @@ fn flink_jvm_sizing_fits_its_declared_container() {
 
     let config = std::fs::read_to_string(flink.dir.join("config.yaml")).expect("read config.yaml");
     let sizes = process_sizes(&config);
-    assert_eq!(sizes.len(), 2, "expected a JobManager and a TaskManager size");
+    assert_eq!(
+        sizes.len(),
+        2,
+        "expected a JobManager and a TaskManager size"
+    );
 
     let envelope = flink.spec.envelope.as_ref().expect("envelope");
     for container in &envelope.containers {
@@ -141,7 +148,8 @@ fn the_rust_toolchain_pin_matches_the_arm_image() {
     // actually builds the measured binary. Codegen moves throughput, so a silent
     // divergence would make the recorded toolchain wrong.
     let root = repo_root();
-    let pin = std::fs::read_to_string(root.join("rust-toolchain.toml")).expect("rust-toolchain.toml");
+    let pin =
+        std::fs::read_to_string(root.join("rust-toolchain.toml")).expect("rust-toolchain.toml");
     let channel = pin
         .lines()
         .find_map(|l| l.trim().strip_prefix("channel = "))

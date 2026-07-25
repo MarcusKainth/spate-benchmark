@@ -45,7 +45,12 @@ pub fn path_for(root: &Path, env_id: &str, entrant: &str, ts_ms: u64) -> PathBuf
 /// If the directory cannot be created, the file cannot be opened for append, or
 /// the write fails.
 pub fn append(root: &Path, report: &Report) -> std::io::Result<PathBuf> {
-    let path = path_for(root, &report.run.env_id, &report.sut.entrant, report.run.ts_ms);
+    let path = path_for(
+        root,
+        &report.run.env_id,
+        &report.sut.entrant,
+        report.run.ts_ms,
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

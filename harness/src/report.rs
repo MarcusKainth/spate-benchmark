@@ -353,7 +353,12 @@ pub fn now_ms() -> u64 {
 impl RunMeta {
     /// Builds run provenance around an environment and the infrastructure that
     /// was observed for it.
-    pub fn new(env_id: impl Into<String>, env_digest: impl Into<String>, trigger: Trigger, infra: Infra) -> Self {
+    pub fn new(
+        env_id: impl Into<String>,
+        env_digest: impl Into<String>,
+        trigger: Trigger,
+        infra: Infra,
+    ) -> Self {
         Self {
             ts_ms: now_ms(),
             env_id: env_id.into(),
@@ -422,7 +427,13 @@ pub struct Report {
 
 impl Report {
     /// A new record for one arm of one repetition.
-    pub fn new(bench: impl Into<String>, kind: Kind, status: Status, sut: Sut, run: RunMeta) -> Self {
+    pub fn new(
+        bench: impl Into<String>,
+        kind: Kind,
+        status: Status,
+        sut: Sut,
+        run: RunMeta,
+    ) -> Self {
         Self {
             schema: SCHEMA_VERSION,
             bench: bench.into(),

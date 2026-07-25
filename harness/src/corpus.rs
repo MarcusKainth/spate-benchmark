@@ -279,7 +279,6 @@ pub struct Event {
     pub tags: Vec<String>,
 }
 
-
 /// Tier A columns, positional — used to build the Native schema and the sink
 /// `columns` list from one definition.
 pub const COLUMNS_A: &[(&str, &str)] = &[
@@ -1116,7 +1115,6 @@ pub fn run_gates(
     }
 }
 
-
 /// Consume the first `sample` messages of `topic` and prove that what is
 /// actually on the wire matches the contract.
 ///
@@ -1348,7 +1346,6 @@ mod tests {
             }
         }
     }
-
 
     /// A range's expectation must be the difference of two prefixes, or the
     /// sustained gates and the drain gates would disagree about the same rows.

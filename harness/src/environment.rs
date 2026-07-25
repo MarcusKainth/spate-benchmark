@@ -149,10 +149,9 @@ impl Environment {
     /// silently merge two hardware configurations into one comparison group.
     pub fn load(dir: &Path, id: &str) -> Result<Self, String> {
         let path = dir.join(format!("{id}.toml"));
-        let src = std::fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        let spec: Profile =
-            toml::from_str(&src).map_err(|e| format!("{}: {e}", path.display()))?;
+        let src =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let spec: Profile = toml::from_str(&src).map_err(|e| format!("{}: {e}", path.display()))?;
         if spec.id != id {
             return Err(format!(
                 "{}: declares id {:?} but is named {id:?}",
@@ -175,8 +174,8 @@ impl Environment {
     /// If the referenced file is missing or does not parse.
     pub fn ceiling(&self) -> Result<Ceiling, String> {
         let path = self.dir.join(&self.spec.ceiling.file);
-        let src = std::fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let src =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         serde_json::from_str(&src).map_err(|e| format!("{}: {e}", path.display()))
     }
 
@@ -193,8 +192,12 @@ impl Environment {
         short_digest(
             format!(
                 "{}|{}|{}|{}|{}|{}",
-                i.broker.kind, i.broker.cpus, i.broker.memory, i.clickhouse.cpus,
-                i.clickhouse.memory, i.partitions
+                i.broker.kind,
+                i.broker.cpus,
+                i.broker.memory,
+                i.clickhouse.cpus,
+                i.clickhouse.memory,
+                i.partitions
             )
             .as_bytes(),
         )
@@ -211,7 +214,11 @@ impl Environment {
 fn short_digest(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    h.finalize().iter().take(6).map(|b| format!("{b:02x}")).collect()
+    h.finalize()
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]

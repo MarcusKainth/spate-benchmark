@@ -18,7 +18,9 @@
 use apache_avro::types::Value as AvroValue;
 use etl_clickhouse::{DateTime64Micros, DateTime64Millis};
 use serde::Serialize;
-use spate_benchmark_harness::corpus::{DROP_UNIT, QUALITY_FLOOR, SensorBatch, ascii_upper, value_scaled_of};
+use spate_benchmark_harness::corpus::{
+    DROP_UNIT, QUALITY_FLOOR, SensorBatch, ascii_upper, value_scaled_of,
+};
 
 // ---------------------------------------------------------------------------
 // Output rows. Field order IS the wire contract for RowBinary and Native, and
