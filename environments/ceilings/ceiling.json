@@ -1,0 +1,44 @@
+{
+  "_comment": [
+    "Measured infrastructure ceilings for the cross-framework comparison. The",
+    "driver reads this so the 70%-of-ceiling headroom rule is ENFORCED rather than",
+    "checked by hand — an arm above the limit is refused, not warned about.",
+    "",
+    "Stored in MESSAGES per second, deliberately, not rows per second. The ceiling",
+    "is a property of the consume path, which moves messages; rows per second",
+    "depends on EVENTS_PER_BATCH. Storing rows would mean that changing the fan-out",
+    "silently invalidated this file, which is exactly the class of mistake that",
+    "produced several retracted numbers already. The driver multiplies by the",
+    "current EVENTS_PER_BATCH itself.",
+    "",
+    "Re-measure with:",
+    "  KAFKA_CPUS=8 PARTITIONS=8 PAYLOAD=840 MESSAGES=3000000 kafka_topology produce",
+    "  KAFKA_CPUS=8 PARTITIONS=8 PAYLOAD=840 DURATION_S=8 MODE=split INSTANCES=1 \\",
+    "    THREADS=4 kafka_topology consume",
+    "DURATION_S must be short enough that the backlog outlasts the pass, or the rig",
+    "refuses with DRAINED."
+  ],
+  "consume_msgs_per_s": 305554,
+  "consume_mb_per_s": 256.7,
+  "measured": {
+    "date": "2026-07-25",
+    "shape": "MODE=split INSTANCES=1 THREADS=4 — the shape etl-kafka itself uses",
+    "partitions": 8,
+    "payload_bytes": 840,
+    "broker": "redpandadata/redpanda:v26.1.13, 8 CPU, smp 8",
+    "host": "Apple Silicon, Docker Desktop, 18 vCPU, arm64"
+  },
+  "notes": [
+    "This is a single-process CLIENT ceiling, not the broker's serving limit.",
+    "Doubling the broker 4 -> 8 CPU moved it ~1% (302,334 -> 305,554 msgs/s split;",
+    "333,444 -> 337,694 perthread), and matching REDPANDA_SMP to the cap changed",
+    "nothing. With only 8 partitions one consumer has only 8 fetch streams, so this",
+    "figure is largely partition parallelism.",
+    "For scale: this framework sustains 1.4M msgs/s at ~1 GB/s against a",
+    "200-partition topic on a 32-core staging host with CPU fully saturated. Raise",
+    "PARTITIONS if a future arm needs more headroom than the fan-out can buy.",
+    "The perthread figure (337,694) is deliberately NOT used as the denominator: no",
+    "arm runs four independent consumers, so it would be a ceiling nothing could",
+    "reach, which would make the headroom rule weaker rather than stricter."
+  ]
+}

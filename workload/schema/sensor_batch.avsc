@@ -1,0 +1,81 @@
+{
+  "type": "record",
+  "name": "SensorBatch",
+  "namespace": "rs.etl.bench",
+  "doc": "One Kafka message. Registered under subject `sensor-batches-value` and produced Confluent-framed (0x00 + BE u32 schema id + Avro datum). Every framework in the comparison decodes THIS file — nobody re-declares the schema inline.",
+  "fields": [
+    {
+      "name": "batch_id",
+      "type": "long",
+      "doc": "Dense, monotonic from 0. With `event_seq` this forms the row identity the correctness gate counts, so it must survive the pipeline unmodified."
+    },
+    {
+      "name": "sensor",
+      "type": "string",
+      "doc": "Low-cardinality by construction (1024 distinct values), so it maps onto LowCardinality(String) and is a sane sharding/ordering key."
+    },
+    {
+      "name": "region",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Deliberately a nullable union, and deliberately null ~10% of the time: it forces every implementation through a real union-decode path, and the tier-B transform must coalesce null to the empty string. The ClickHouse column is LowCardinality(String), NOT LowCardinality(Nullable(String)) — our Native encoder rejects a non-String inner, and that trap is the reason the coalesce is part of the specified work rather than an incidental detail."
+    },
+    {
+      "name": "batch_ts_ms",
+      "type": "long",
+      "doc": "Event timestamp, epoch milliseconds. Lands in a DateTime64(3) column."
+    },
+    {
+      "name": "send_ts_us",
+      "type": "long",
+      "doc": "Epoch MICROSECONDS, and specifically the producer's INTENDED send time on its fixed open-loop schedule, never the actual send time. This is the whole coordinated-omission defence: if the generator falls behind, the delay it caused appears in the latency percentiles instead of vanishing from them. Lands in a DateTime64(6) column; end-to-end latency is computed server-side as ingest_ts - send_ts."
+    },
+    {
+      "name": "events",
+      "doc": "The fan-out. One message becomes `events.length` rows, so every implementation must perform a real flat_map/flatMap rather than a pass-through — which is the point: a 1:1 pipe would be a benchmark of nothing.",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "Event",
+          "fields": [
+            {
+              "name": "seq",
+              "type": "int",
+              "doc": "Position within `events`, 0-based, assigned by the producer. Carried explicitly rather than derived from array position so that an implementation which reorders during flatten cannot silently pass the row-identity gate."
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "doc": "Low-cardinality metric name (32 distinct values)."
+            },
+            {
+              "name": "unit",
+              "type": "string",
+              "doc": "Low-cardinality unit (8 distinct values). One value, `\"drop\"`, is the tier-B filter sentinel."
+            },
+            {
+              "name": "value",
+              "type": "long",
+              "doc": "Deterministic function of (batch_id, seq) — see METHODOLOGY.md. Because it is reproducible from the row identity alone, the driver can compute the expected checksum in closed form and prove that two frameworks did the same arithmetic, not merely that they moved the same number of rows."
+            },
+            {
+              "name": "quality",
+              "type": ["null", "double"],
+              "default": null,
+              "doc": "Second nullable union. The tier-B filter drops rows where this is non-null and below a threshold."
+            },
+            {
+              "name": "tags",
+              "type": {
+                "type": "array",
+                "items": "string"
+              },
+              "doc": "Inner array-of-string, 0-3 elements. This is the second nesting level; it maps to Array(LowCardinality(String)) and exists so the decode path cannot be a flat-struct fast case."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

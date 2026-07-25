@@ -1,0 +1,172 @@
+# Flink 2.2.1 configuration for the cross-framework comparison arm.
+#
+# Flink 2.x reads config.yaml ONLY — flink-conf.yaml was removed in 2.0, so a
+# file by that name is silently ignored.
+#
+# This file REPLACES /opt/flink/conf/config.yaml in the image. That means it must
+# carry forward the entries the base image needs, not just our tuning; the
+# Dockerfile fails the build if `env.java.opts.all` here has drifted from the
+# value flink:2.2.1-java17 ships, because losing those --add-opens breaks Flink on
+# Java 17 in ways that look like our bug.
+#
+# The container entrypoint additionally patches jobmanager.rpc.address,
+# blob.server.port and query.server.port in place at start-up, so the values here
+# are placeholders for those three keys.
+#
+# Every non-default value below is justified in README.md. The short version:
+# nothing here weakens fault tolerance, and nothing here is a knob a competent
+# Flink operator would not also reach for.
+
+# ---------------------------------------------------------------------------
+# Cluster topology
+# ---------------------------------------------------------------------------
+jobmanager:
+  bind-host: 0.0.0.0
+  rpc:
+    address: localhost          # overwritten by the entrypoint
+    port: 6123
+  execution:
+    failover-strategy: region
+  memory:
+    # JobManager container is 1 CPU / 1 GiB of the 4 CPU / 4 GiB envelope. 960m
+    # leaves 64 MiB of container slack outside the JVM's own accounting.
+    #   960 - 256 (metaspace) - 192 (overhead, clamped to the 192m minimum)
+    #     = 512m total Flink memory
+    #   512 - 128 (off-heap) = 384m JM heap
+    # A single stateless job with parallelism 8 and filesystem checkpoint storage
+    # keeps only checkpoint metadata here.
+    process:
+      size: 960m
+
+taskmanager:
+  bind-host: 0.0.0.0
+  # 8, to match the topic's 8 partitions: one Kafka partition per subtask, so no
+  # subtask multiplexes partitions and none idles. See README.md — this is also
+  # the one setting where the envelope and the partition count pull against each
+  # other, since the TaskManager has 3 CPUs.
+  numberOfTaskSlots: 8
+  memory:
+    # TaskManager container is 3 CPUs / 3 GiB. process.size is the right knob
+    # inside a container: it is the total the JVM process may use, so Flink can
+    # derive heap, direct and metaspace from the cgroup limit we set.
+    #   2900 - 256 (metaspace) - 290 (overhead, 10%) = 2354m total Flink memory
+    #   2354 - 235 (network, 10%) - 0 (managed) - 128 (framework heap)
+    #        - 128 (framework off-heap) - 128 (task off-heap) = 1735m task heap
+    #   => -Xmx 1863m, -XX:MaxDirectMemorySize 491m
+    # 172 MiB of the 3 GiB is left as container slack.
+    process:
+      size: 2900m
+    managed:
+      # THE most important line in this file. The default is 0.4, and managed
+      # memory is *reserved* whether or not anything uses it. A stateless
+      # streaming job on the default hashmap state backend uses none of it: no
+      # RocksDB/ForSt block cache, no batch sorter, no Python. At 0.4 of 2354m
+      # that is ~940 MiB of the 3 GiB budget allocated and never touched, which
+      # would make this comparison unfair to Flink rather than to us.
+      fraction: 0.0
+    task:
+      off-heap:
+        # The ClickHouse sink is the only component here doing socket I/O from
+        # user code, and -XX:MaxDirectMemorySize is derived from framework
+        # off-heap + task off-heap + network. 128m buys headroom for the HTTP
+        # client's NIO buffers so a burst surfaces as backpressure rather than as
+        # "OutOfMemoryError: Direct buffer memory", which would read as a Flink
+        # defect. Costs 128m of task heap; nothing else.
+        size: 128m
+  network:
+    memory:
+      buffer-debloat:
+        # OFF (the default, stated explicitly). Debloating trades throughput for
+        # lower checkpoint latency by shrinking in-flight data; this arm is being
+        # measured on throughput and already runs unaligned-free 5s checkpoints.
+        enabled: false
+
+# Parallelism == partitions. A ninth subtask would never receive a split.
+parallelism:
+  default: 8
+
+rest:
+  address: 0.0.0.0
+  bind-address: 0.0.0.0
+
+blob:
+  server:
+    port: '6124'                # overwritten by the entrypoint
+query:
+  server:
+    port: '6125'                # overwritten by the entrypoint
+
+# ---------------------------------------------------------------------------
+# Execution
+# ---------------------------------------------------------------------------
+execution:
+  buffer-timeout:
+    # The documented maximum-throughput setting: never flush a network buffer
+    # because a timer fired, only when it is full. Latency then depends on buffer
+    # fill rate, which at this throughput is sub-millisecond.
+    #
+    # NOTE for anyone porting this back to 1.x: `execution.buffer-timeout` no
+    # longer exists as a duration in 2.x. It split into `.enabled` (default true)
+    # and `.interval` (default 100ms), and setting the old key here would be
+    # accepted-but-deprecated rather than doing what you meant.
+    enabled: false
+  checkpointing:
+    # 5s, matched to the Spate arm's 5s Kafka offset-commit interval, so the two
+    # arms pay for the same at-least-once guarantee at the same cadence.
+    # Checkpointing is OFF entirely unless an interval is set — a missing line
+    # here would silently remove Flink's fault tolerance and flatter its numbers.
+    interval: 5s
+    # AT_LEAST_ONCE, because the comparison is at-least-once for every arm. The
+    # default is EXACTLY_ONCE, which would make Flink pay for a guarantee no
+    # other arm provides (aligned barriers, and the buffer-blocking that comes
+    # with them). This is the one place where reading the default as "safe" would
+    # have handicapped Flink.
+    mode: AT_LEAST_ONCE
+    # The AsyncSink checkpoints its buffered request entries, so checkpoint state
+    # is proportional to SINK_MAX_BUFFERED_ROWS, not to zero. The default
+    # `jobmanager` storage caps state at 5 MiB and would start failing
+    # checkpoints under load, so state goes to a filesystem path. Mount the same
+    # volume at this path in the JobManager and TaskManager containers (see
+    # README.md) and recovery genuinely works; the write cost is paid either way.
+    storage: filesystem
+    dir: file:///opt/flink/checkpoints
+
+pipeline:
+  # Chained operators hand the same object reference downstream instead of
+  # copying it. FlattenTierA/FlattenTierB are written for this: they re-use one
+  # output row across the fan-out, and the ClickHouse element converter copies
+  # every field out before returning.
+  object-reuse: true
+  operator-chaining:
+    # ON — the default, stated because it is load-bearing rather than incidental.
+    # Source, flatMap and sink writer form ONE chain, so no GenericRecord and no
+    # output row is ever serialized. Breaking the chain would add an
+    # Avro-serializer round trip per message for nothing.
+    enabled: true
+
+state:
+  backend:
+    # hashmap: heap state, no RocksDB and no ForSt. This job's only state is
+    # Kafka offsets plus the sink's buffered entries, so a disk-backed backend
+    # would add compaction and native memory for no benefit. This is also why
+    # managed memory above can be zero.
+    type: hashmap
+
+# ---------------------------------------------------------------------------
+# JVM
+# ---------------------------------------------------------------------------
+env:
+  java:
+    opts:
+      # VERBATIM from flink:2.2.1-java17. Flink needs these module opens on Java
+      # 17; dropping them produces InaccessibleObjectException at start-up. The
+      # Dockerfile diffs this string against the base image's and fails the build
+      # if they diverge.
+      all: --add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED --add-exports=java.security.jgss/sun.security.krb5=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.text=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
+      # G1 stays the default for the headline number: it is what a Flink 2.x
+      # deployment on Java 17 gets unless someone changes it, and swapping in
+      # ZGC/Shenandoah would be tuning past what the framework ships. These flags
+      # only make the collector's behaviour observable — the driver reads
+      # /opt/flink/log/gc.log, the job reports nothing about itself.
+      taskmanager: -Xlog:gc*:file=/opt/flink/log/gc.log:uptime,level,tags
+      jobmanager: -Xlog:gc*:file=/opt/flink/log/gc-jm.log:uptime,level,tags
