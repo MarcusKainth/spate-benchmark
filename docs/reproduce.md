@@ -1,0 +1,67 @@
+---
+id: reproduce
+title: Reproducing this
+description: How to build the arms and run the benchmark yourself.
+---
+
+Everything here runs from a clone of
+[the repository](https://github.com/MarcusKainth/spate-benchmark). No number on
+this site comes from anywhere else.
+
+## What you need
+
+- Docker, with enough headroom for the infrastructure and one arm at a time.
+  The reference environment gives the Docker VM 18 CPUs and 72 GiB.
+- A Rust toolchain. The version is pinned in `rust-toolchain.toml` and must match
+  the arm image's base — a test asserts it, because codegen moves throughput and
+  a silent divergence would make the recorded toolchain wrong.
+
+## The commands
+
+```sh
+bench list                      # systems, variants, and when each was last measured
+bench validate                  # what CI checks, runnable locally
+bench build '*'                 # build every entrant image
+bench prefill                   # populate the topic once per corpus
+bench ceiling                   # prove the infrastructure is not the bottleneck
+bench run '*' --reps 3          # every arm, interleaved
+bench run spate --reps 3        # one system; nothing else is touched
+bench run '*' --dry-run         # print the plan without running it
+```
+
+`--dry-run` is worth using before any full sweep. It prints the exact execution
+list with resolved image digests, which is how you check that "only Spate" really
+means only Spate before spending hours finding out.
+
+## Two properties worth knowing
+
+**Runs are interleaved, not batched.** `bench run` alternates between arms rather
+than completing all of one and then all of the next. This is not fastidiousness:
+running arms in sequence has already manufactured a fake 30% difference in a
+related project, because the machine is not in the same state at the end of a
+long run as at the start.
+
+**Nothing appends over anything.** `bench run` only ever appends, and there is no
+code path in it that truncates a results file. Re-running one system produces a
+diff confined to that system's file. A wrong number is retracted with
+`bench retract`, which marks it superseded and leaves it visible.
+
+## If you get a different number
+
+That is useful and I would like to know. The most likely causes, in order:
+
+1. **A different environment.** These results are from a single macOS host with
+   heterogeneous cores. Add your own environment profile rather than comparing
+   across; the site will refuse to draw them on one axis, which is the intended
+   behaviour rather than an obstacle.
+2. **A busy machine.** Run-to-run spread reached 14.5% on throughput even on a
+   quiet host.
+3. **A real defect in the harness.** Open an issue. A benchmark that cannot be
+   reproduced is a claim, not evidence.
+
+## Current gap
+
+The Spate arm's image needs credentials for the framework's repository, which is
+private until it publishes. Every other arm builds from a clean clone. This
+weakens reproducibility on precisely the arm that is ours, and it resolves when
+the framework goes public.

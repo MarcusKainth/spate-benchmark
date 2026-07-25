@@ -1,0 +1,66 @@
+---
+id: index
+title: Spate Benchmark
+description: A reproducible comparison of streaming ETL systems on one fixed pipeline — Kafka to Avro to ClickHouse.
+sidebar_label: Results
+slug: /
+---
+
+import Results from '@site/src/components/Results';
+
+A reproducible comparison of streaming ETL systems on one fixed pipeline:
+**Kafka → Avro → ClickHouse**.
+
+Every system consumes the same topic of Confluent-framed Avro, flattens each
+message's `events` array into one row per event, and inserts those rows into
+ClickHouse. Same bytes, same envelope, same hardware, same delivery guarantee.
+
+:::warning This benchmark is run by the author of one of the systems in it
+
+Spate is measured here, and Spate is mine. That is a conflict of interest, and
+the only useful response to one is to make it impossible to hide.
+
+- **No published number is reported by the system that produced it.** Throughput
+  is `SELECT count()` against ClickHouse. CPU and memory are cgroup v2 counters
+  read by a sidecar container. Latency is computed inside ClickHouse from a
+  materialized ingest timestamp. A system's own metrics are available for
+  debugging and are never read as results.
+- Every competitor configuration is in the repository, in full.
+- Where Spate loses, that is published with the same prominence as where it wins.
+  A comparison containing only wins is read as marketing and convinces nobody.
+
+If you think an arm is configured badly, that is a bug and I want the pull
+request.
+
+:::
+
+<Results />
+
+## How to read a number here
+
+Every result carries the version of the system that produced it, the exact image
+digest, the environment it ran on, and the date. None of that is optional and
+none of it is typed in by hand — a run whose image digest cannot be read is
+recorded as failed rather than published.
+
+Three things invalidate comparison outright, and this site refuses to draw
+records across them rather than quietly averaging:
+
+| If this differs | Then |
+|---|---|
+| `harness_version` | The measurement protocol changed. Not comparable. |
+| `dataset_version` | The corpus or schema changed. Not comparable. |
+| `env_id` | Different hardware. Not comparable. |
+
+Softer differences — a ClickHouse patch release, a compiler version — are
+recorded and shown as a footnote rather than treated as disqualifying.
+
+**Results are never deleted.** A run found to be wrong is retracted by appending
+a marker; the record stays visible, struck through, with the reason. Re-running
+one system does not re-run or overwrite any other.
+
+## What this does not tell you
+
+Read [the limitations](./limitations.md) before citing anything here. The short
+version: one workload, one machine, one shape of data, and a benchmark whose
+author has a stake in the outcome.

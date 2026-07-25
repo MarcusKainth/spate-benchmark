@@ -1,0 +1,108 @@
+/* Colour is emphasis, not identity.
+ *
+ * A ranked list already carries identity in position, name and value label, so
+ * spending hue on "which system is this" re-encodes what the row order shows and
+ * buys nothing — while guaranteeing indistinguishable pairs once there are more
+ * than a handful of entrants. One accent for the mark, one validated grey for
+ * de-emphasis, and text in ink tokens.
+ *
+ * Spate's own accent is chrome only: navbar, links, focus. It is never a mark
+ * colour, so no entrant is visually privileged by the site's own branding.
+ */
+:root {
+  --ifm-color-primary: #1f6feb;
+  --ifm-color-primary-dark: #1b63d3;
+  --ifm-color-primary-darker: #195dc7;
+  --ifm-color-primary-darkest: #154da4;
+  --ifm-color-primary-light: #3780ee;
+  --ifm-color-primary-lighter: #4489ef;
+  --ifm-color-primary-lightest: #6ba1f2;
+  --ifm-code-font-size: 92%;
+
+  --bench-bar: #2a78d6;
+  --bench-muted: #8a8781;
+  --bench-track: rgba(0, 0, 0, 0.06);
+  --bench-rule: var(--ifm-color-emphasis-300);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #6ba1f2;
+  --ifm-color-primary-dark: #4a8bef;
+  --ifm-color-primary-darker: #3a80ee;
+  --ifm-color-primary-darkest: #1662e0;
+  --ifm-color-primary-light: #8cb7f5;
+  --ifm-color-primary-lighter: #9dc2f6;
+  --ifm-color-primary-lightest: #cfe0fb;
+  --ifm-background-color: #16181d;
+  --ifm-background-surface-color: #1c1f26;
+
+  /* Selected, not flipped: Infima swaps token sets rather than inverting, and a
+   * mark colour that only works in one theme is a bug in the other. */
+  --bench-bar: #3987e5;
+  --bench-muted: #8a8781;
+  --bench-track: rgba(255, 255, 255, 0.07);
+}
+
+.bench-empty {
+  border: 1px dashed var(--bench-rule);
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+  background: var(--ifm-background-surface-color);
+}
+
+.bench-empty h3 {
+  margin-top: 0;
+}
+
+.bench-roster {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0 2rem;
+  font-size: 0.94rem;
+}
+
+.bench-roster th,
+.bench-roster td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--bench-rule);
+  vertical-align: top;
+}
+
+.bench-roster th {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.bench-pill {
+  display: inline-block;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--bench-rule);
+  white-space: nowrap;
+}
+
+/* Deliberately not red. A red badge on a competitor's row reads as "this system
+ * is bad" — an insinuation. Staleness and vendor disclosure are OUR bookkeeping,
+ * so they are stated in muted ink with literal text. */
+.bench-pill--muted {
+  color: var(--bench-muted);
+}
+
+.bench-pill--vendor {
+  border-color: var(--ifm-color-primary);
+  color: var(--ifm-color-primary);
+}
+
+.bench-note {
+  color: var(--bench-muted);
+  font-size: 0.88rem;
+}
+
+/* Wide content scrolls inside its own container; the page body never scrolls
+ * horizontally. */
+.bench-scroll {
+  overflow-x: auto;
+}

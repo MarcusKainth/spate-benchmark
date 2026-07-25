@@ -18,3 +18,7 @@ yarn-error.log
 # Tier C result shards are GENERATED from results/ at build time. The JSONL in
 # results/ is the source of truth and is committed; the sharded copies are not.
 website/static/bench
+
+# Generated into the docs tree at build time from the root METHODOLOGY.md
+# by website/scripts/sync-docs.mjs. Edit the root file, not the copy.
+docs/methodology.md
