@@ -48,7 +48,9 @@ pub fn env_u64(key: &str, default: u64) -> u64 {
 pub mod corpus;
 pub mod docker;
 pub mod entrant;
+pub mod environment;
 pub mod http;
 pub mod kafka;
 pub mod report;
+pub mod results;
 pub mod sampler;
