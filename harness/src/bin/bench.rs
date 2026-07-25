@@ -78,7 +78,7 @@ bench — the Spate Benchmark driver
   bench build <selector>...      build the selected entrants' images
   bench stale                    arms whose measurement has fallen behind
   bench retract <run_id> --reason <text>
-  bench prefill                  populate the topic once per corpus
+  bench prefill                  populate the topic once per corpus (do this first)
   bench ceiling                  prove the infrastructure is not the bottleneck
   bench run <selector>... [--reps N] [--dry-run] [--env <id>]
 
@@ -106,7 +106,7 @@ fn opts_from(args: &[String], root: &Path) -> Result<RunOptions, String> {
         env_id: default_env(root)?,
         trigger: Trigger::Manual,
         dry_run: false,
-        reuse_infra: false,
+        fresh_infra: false,
         fail_fast: false,
         topic: "comparison-sensor-batches".to_owned(),
         batches: 1_500_000,
@@ -139,7 +139,7 @@ fn opts_from(args: &[String], root: &Path) -> Result<RunOptions, String> {
                 }
             }
             "--dry-run" => o.dry_run = true,
-            "--reuse-infra" => o.reuse_infra = true,
+            "--fresh-infra" => o.fresh_infra = true,
             "--fail-fast" => o.fail_fast = true,
             other => return Err(format!("unknown flag {other:?}. Try `bench help`.")),
         }

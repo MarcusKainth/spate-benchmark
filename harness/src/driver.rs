@@ -59,8 +59,20 @@ pub struct RunOptions {
     pub trigger: Trigger,
     /// Print the plan and stop.
     pub dry_run: bool,
-    /// Reuse running infrastructure rather than recreating it.
-    pub reuse_infra: bool,
+    /// Recreate the infrastructure instead of reusing what is running.
+    ///
+    /// Off by default, and that default is load-bearing rather than a
+    /// convenience: **the prefilled corpus lives inside the broker**, so
+    /// recreating it destroys the thing every arm is about to replay. Doing so
+    /// once cost a sweep ten minutes of Flink failing against a topic that no
+    /// longer existed.
+    ///
+    /// Reuse is safe here precisely because it is not trusted: the caps are read
+    /// back from the running containers' cgroups and asserted, and the broker and
+    /// ClickHouse versions are recorded on every record. A container running
+    /// under a different envelope fails the run rather than quietly producing a
+    /// number.
+    pub fresh_infra: bool,
     /// Abandon the sweep on the first refusal. Off by default: one bad arm must
     /// not cost a thirty-hour sweep.
     pub fail_fast: bool,
@@ -97,7 +109,7 @@ const GATE_MAX_BATCHES: u64 = 100_000;
 /// If infrastructure cannot be brought up, or the corpus does not verify.
 pub fn prefill(root: &Path, opts: &RunOptions) -> Result<(), String> {
     let env = Environment::load(&root.join("environments"), &opts.env_id)?;
-    let (ep, _infra, _flags) = infra::bring_up(&env, opts.reuse_infra)?;
+    let (ep, _infra, _flags) = infra::bring_up(&env, !opts.fresh_infra)?;
 
     let schema_id = corpus::register_schema(&ep.registry_host, ep.registry_port);
     eprintln!("registered {} as schema id {schema_id}", corpus::SUBJECT);
@@ -172,7 +184,7 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     // would each measure the other.
     let _lock = ArmLock::acquire("bench run").map_err(|e| format!("REFUSED: {e}"))?;
 
-    let (ep, infra, mut base_flags) = infra::bring_up(&env, opts.reuse_infra)?;
+    let (ep, infra, mut base_flags) = infra::bring_up(&env, !opts.fresh_infra)?;
     if !env.is_publishable() {
         base_flags.push(Flag::ThirdPartyHardware);
     }
@@ -183,6 +195,21 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
             .map_err(|e| format!("DDL failed: {e}"))?;
     }
     let _ = schema_id;
+
+    // Verify the corpus BEFORE starting anything. Without this, a missing or
+    // short topic is discovered one arm at a time, each failing only at the drain
+    // deadline — thirty minutes to learn what a metadata call answers instantly.
+    let depth = corpus::topic_message_count(&ep.bootstrap, &opts.topic, env.spec.infra.partitions);
+    if depth != opts.batches {
+        return Err(format!(
+            "REFUSED: topic {:?} holds {depth} messages, expected {}. Run \
+             `bench prefill` first.\n\nIf you just recreated the infrastructure, \
+             that is why: the corpus lives inside the broker, so `--fresh-infra` \
+             discards it and the prefill has to be repeated.",
+            opts.topic, opts.batches
+        ));
+    }
+    eprintln!("corpus: {depth} messages on {}", opts.topic);
 
     let corpus_rows_a = corpus::expected(opts.batches, Tier::A).rows;
     let corpus_rows_b = corpus::expected(opts.batches, Tier::B).rows;
