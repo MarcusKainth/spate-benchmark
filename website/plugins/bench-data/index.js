@@ -30,6 +30,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+const TOML = require('smol-toml');
+
 const PLUGIN = 'bench-data';
 
 /** Repository root, relative to `website/`. */
@@ -38,128 +40,32 @@ function repoRoot(siteDir) {
 }
 
 /**
- * A deliberately small TOML reader.
+ * Reads one descriptor or environment profile.
  *
- * The descriptors are read by the Rust harness with a real parser, and that is
- * the authority — `entrants_are_valid` fails the build if a descriptor is
- * malformed, so by the time the site sees one it has already been validated.
- * This only needs the subset the site renders, and pulling a TOML dependency
- * into the site's tree to re-do work that is already gated is not worth the
- * supply-chain surface.
+ * A real TOML parser, not the hand-rolled subset that used to live here. This is
+ * the seam where the site has to agree with the harness about what a descriptor
+ * says, and the two were parsing the same files with different implementations:
+ * the Rust side uses the `toml` crate with `deny_unknown_fields`, while this side
+ * mis-read an inline `key = "x" # note` as the value `x" # note`, reattached a
+ * nested `[a.b]` under an open `[[array]]` to the root, and carried a
+ * write-only `arrayMode` flag that betrayed the confusion. Anything mis-parsed
+ * here is rendered beside a published number, and `entrants_are_valid` cannot
+ * catch it because that test validates the other parser.
+ *
+ * `smol-toml` is dependency-free and build-time only, so the supply-chain
+ * argument the old comment made against a real parser does not apply: it never
+ * reaches a visitor's browser.
+ *
+ * A file that does not parse throws rather than yielding a partial object. A
+ * silently half-read descriptor is how a system ends up on the page with its
+ * guarantees missing.
  */
-function parseToml(src) {
-  const root = {};
-  let cursor = root;
-  let arrayMode = false;
-
-  const setPath = (obj, keys, value) => {
-    let o = obj;
-    for (const k of keys.slice(0, -1)) {
-      o[k] = o[k] || {};
-      o = o[k];
-    }
-    o[keys[keys.length - 1]] = value;
-  };
-
-  const scalar = (raw) => {
-    const v = raw.trim();
-    if (v === 'true') return true;
-    if (v === 'false') return false;
-    if (/^-?\d+$/.test(v)) return Number(v);
-    if (/^-?\d*\.\d+$/.test(v)) return Number(v);
-    if (v.startsWith('[')) {
-      const inner = v.slice(1, v.lastIndexOf(']'));
-      if (!inner.trim()) return [];
-      return inner.split(',').map((x) => scalar(x)).filter((x) => x !== '');
-    }
-    if (v.startsWith('{')) {
-      const out = {};
-      const inner = v.slice(1, v.lastIndexOf('}'));
-      for (const pair of splitTopLevel(inner)) {
-        const eq = pair.indexOf('=');
-        if (eq > 0) out[pair.slice(0, eq).trim()] = scalar(pair.slice(eq + 1));
-      }
-      return out;
-    }
-    return v.replace(/^["']|["']$/g, '');
-  };
-
-  const lines = src.split('\n');
-  for (let i = 0; i < lines.length; i += 1) {
-    let line = lines[i];
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-
-    const arrayHeader = trimmed.match(/^\[\[(.+)\]\]$/);
-    if (arrayHeader) {
-      const keys = arrayHeader[1].split('.');
-      let o = root;
-      for (const k of keys.slice(0, -1)) {
-        o[k] = o[k] || {};
-        o = o[k];
-      }
-      const last = keys[keys.length - 1];
-      o[last] = o[last] || [];
-      cursor = {};
-      o[last].push(cursor);
-      arrayMode = true;
-      continue;
-    }
-    const header = trimmed.match(/^\[(.+)\]$/);
-    if (header) {
-      const keys = header[1].split('.');
-      let o = root;
-      for (const k of keys) {
-        o[k] = o[k] || {};
-        o = o[k];
-      }
-      cursor = o;
-      arrayMode = false;
-      continue;
-    }
-
-    const eq = line.indexOf('=');
-    if (eq < 0) continue;
-    const key = line.slice(0, eq).trim();
-    let value = line.slice(eq + 1);
-
-    // Multi-line basic strings. Descriptors use them heavily for the `notes` and
-    // `why` fields, which are the most valuable content in the file.
-    if (value.trim().startsWith('"""')) {
-      const parts = [value.trim().slice(3)];
-      while (i + 1 < lines.length && !parts.join('\n').includes('"""')) {
-        i += 1;
-        parts.push(lines[i]);
-      }
-      const joined = parts.join('\n');
-      setPath(arrayMode ? cursor : cursor, [key], joined.slice(0, joined.indexOf('"""')).trim());
-      continue;
-    }
-    setPath(cursor, [key], scalar(value));
+function readToml(file) {
+  try {
+    return TOML.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    throw new Error(`${file}: ${e.message}`);
   }
-  return root;
-}
-
-/** Splits on commas that are not inside brackets or quotes. */
-function splitTopLevel(s) {
-  const out = [];
-  let depth = 0;
-  let quote = null;
-  let start = 0;
-  for (let i = 0; i < s.length; i += 1) {
-    const c = s[i];
-    if (quote) {
-      if (c === quote) quote = null;
-    } else if (c === '"' || c === "'") quote = c;
-    else if (c === '[' || c === '{') depth += 1;
-    else if (c === ']' || c === '}') depth -= 1;
-    else if (c === ',' && depth === 0) {
-      out.push(s.slice(start, i));
-      start = i + 1;
-    }
-  }
-  out.push(s.slice(start));
-  return out.map((x) => x.trim()).filter(Boolean);
 }
 
 function readDirSafe(dir) {
@@ -176,8 +82,13 @@ function loadEntrants(root) {
     .filter((e) => e.isDirectory())
     .map((e) => path.join(dir, e.name, 'entrant.toml'))
     .filter((p) => fs.existsSync(p))
-    .map((p) => parseToml(fs.readFileSync(p, 'utf8')))
-    .filter((s) => s.entrant && s.entrant.id)
+    .map((p) => {
+      const spec = readToml(p);
+      if (!spec.entrant || !spec.entrant.id) {
+        throw new Error(`${p}: no [entrant].id — every system must say what it is`);
+      }
+      return spec;
+    })
     .sort((a, b) => (a.display?.order ?? 0) - (b.display?.order ?? 0));
 }
 
@@ -185,8 +96,12 @@ function loadEnvironments(root) {
   const dir = path.join(root, 'environments');
   return readDirSafe(dir)
     .filter((e) => e.isFile() && e.name.endsWith('.toml'))
-    .map((e) => parseToml(fs.readFileSync(path.join(dir, e.name), 'utf8')))
-    .filter((s) => s.id);
+    .map((e) => {
+      const p = path.join(dir, e.name);
+      const spec = readToml(p);
+      if (!spec.id) throw new Error(`${p}: no id — an environment is the unit of comparability`);
+      return spec;
+    });
 }
 
 function walkJsonl(dir, out) {
@@ -226,14 +141,50 @@ function loadRecords(root) {
   return { records, counts };
 }
 
-/** The key that decides what may share an axis. */
+/**
+ * The key that decides what may share an axis.
+ *
+ * The first four components are provenance: two records that differ in any of
+ * them describe different experiments, and methodology/ makes three of them
+ * hard splits.
+ *
+ * `tier` is here for a different reason and it is not optional. A tier-B arm
+ * decodes the same messages but drops the `drop` unit and the low-quality rows,
+ * emits 73.5% as many rows, computes two derived columns and writes to a
+ * different table. Ranking rows/s across tiers is not a close call — it compares
+ * two different amounts of work — and before this was a group component the page
+ * drew all eight arms on one axis with one bar normaliser, so a tier-B arm's
+ * smaller row count read as a slower system.
+ */
 function groupKey(rec) {
   return [
     rec.run?.env_id,
     rec.run?.harness_version,
     rec.run?.dataset_version,
     rec.run?.infra?.digest,
+    `tier-${rec.variant?.tier ?? '?'}`,
+    // `mode` for the same reason as `tier`, and it is the sharper of the two.
+    // `rows_per_s` means "how fast can this go" in drain and "the rate we asked
+    // for" in sustained, so two arms of wildly different capacity report the
+    // same number; the efficiency figures were taken with the broker serving
+    // writes and reads at once and a generator competing for cores, which is
+    // the whole argument drain exists for; and latency is single-mode by
+    // construction. A row is not an axis, and it is the axis that misleads.
+    `mode-${rec.variant?.mode ?? '?'}`,
   ].join('|');
+}
+
+/**
+ * A stable fingerprint of an arm's configuration.
+ *
+ * Every knob the driver recorded, in sorted order. Two records that differ here
+ * were not the same experiment and must not be medianed together, however close
+ * in time they were: `--batches 150000` and `--batches 1500000` are a tenth of
+ * the corpus apart and produce entirely different cache behaviour.
+ */
+function variantKey(rec) {
+  const v = rec.variant ?? {};
+  return JSON.stringify(v, Object.keys(v).sort());
 }
 
 function median(xs) {
@@ -243,28 +194,97 @@ function median(xs) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+/** Statuses that carry publishable numbers. Mirrors `Status::carries_metrics`. */
+const CARRIES_METRICS = new Set(['ok', 'infra_bound']);
+
 /**
- * One summary row per (group, entrant, variant, version).
+ * Severity order for aggregating a repetition's status up to its row.
+ *
+ * A row takes the WORST status among the repetitions behind it, never the newest
+ * one. An arm that crossed the 70% headroom limit on one repetition of three
+ * demonstrably crossed it, and the aggregate of those three cannot be published
+ * as a system comparison just because the last repetition happened to come in
+ * under.
+ */
+const STATUS_SEVERITY = {ok: 0, infra_bound: 1};
+
+/**
+ * Severity of a status this build does not recognise.
+ *
+ * Above every known value, so an unknown status always wins and the row is never
+ * ranked. Scoring it 0 — which this did — made it tie with `ok` and lose, so a
+ * status added by a newer harness would have been silently published as sound by
+ * an older site. That is the same fail-open mistake `approach` used to make, and
+ * it fails in the same direction: towards publishing something we cannot vouch
+ * for.
+ */
+const UNKNOWN_SEVERITY = Number.MAX_SAFE_INTEGER;
+
+const severity = (status) => STATUS_SEVERITY[status] ?? UNKNOWN_SEVERITY;
+
+function worstStatus(recs) {
+  return recs.map((r) => r.status).reduce((a, b) => (severity(b) > severity(a) ? b : a), 'ok');
+}
+
+/**
+ * One summary row per (group, entrant, variant, configuration, version).
  *
  * Repetitions within a single invocation are aggregated by median. Runs from
- * DIFFERENT sittings are not: they get their own rows, keyed by `run_id`'s
- * sitting via the record's own group. That is the correction to the framework
- * site's aggregator, which hashes only variant keys and so silently medians a
- * re-run months later into the original figure while captioning it with the
- * newest date.
+ * DIFFERENT sittings are not: they get their own rows. That is the correction to
+ * the framework site's aggregator, which hashes only variant keys and so
+ * silently medians a re-run months later into the original figure while
+ * captioning it with the newest date.
+ *
+ * Three properties this function is responsible for, each of which it previously
+ * got wrong:
+ *
+ * - **`infra_bound` records are kept.** They were dropped here by a
+ *   `status !== 'ok'` filter, which made "we ran it and it blew the headroom
+ *   limit" render identically to "we never ran it" — the exact distinction
+ *   `Status::InfraBound` exists to preserve. They are kept, carried through with
+ *   their status, and the page refuses to rank them.
+ * - **Configuration is part of the identity.** The key omitted `variant`
+ *   entirely, so two sweeps of the same arm at different knob settings on the
+ *   same day were medianed into one number captioned as run-to-run spread.
+ *
+ * Known remaining limitation: a "sitting" is still approximated by UTC calendar
+ * day, so a sweep straddling midnight splits into two rows and two sweeps of an
+ * identical configuration on one day merge. Fixing it properly needs an
+ * invocation id on the record, which is a harness change rather than a site one.
  */
 function summarise(records) {
   const byKey = new Map();
+  const attempts = [];
   for (const rec of records) {
-    if (rec.status !== 'ok') continue;
+    if (!CARRIES_METRICS.has(rec.status)) {
+      // Attempted and produced no publishable number. Surfaced as an explicit
+      // gap rather than an absence a reader would read as "not tried".
+      attempts.push({
+        group: groupKey(rec),
+        entrant: rec.sut?.entrant,
+        variant_id: rec.sut?.variant_id,
+        tier: rec.variant?.tier ?? null,
+        status: rec.status,
+        note: rec.note ?? null,
+        ts_ms: rec.run?.ts_ms ?? 0,
+      });
+      continue;
+    }
     const key = [
       groupKey(rec),
       rec.sut?.entrant,
       rec.sut?.variant_id,
       rec.sut?.version ?? rec.sut?.commit ?? '?',
+      variantKey(rec),
       // Distinct sittings stay distinct. Without this, a re-run silently joins
       // the original and the archive stops being a history.
-      new Date(rec.run?.ts_ms ?? 0).toISOString().slice(0, 10),
+      //
+      // `invocation_id` is minted once per `bench run` from harness 2 on, so a
+      // sitting is now identified exactly rather than approximated. The calendar
+      // day remains the fallback for records written before the field existed,
+      // and it is only an approximation: a sweep crossing midnight UTC split
+      // into two published rows, and two sweeps on one day merged into one.
+      rec.run?.invocation_id || new Date(rec.run?.ts_ms ?? 0).toISOString().slice(0, 10),
     ].join('|');
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(rec);
@@ -273,18 +293,51 @@ function summarise(records) {
   const rows = [];
   for (const [key, reps] of byKey) {
     const newest = reps.reduce((a, b) => (a.run.ts_ms >= b.run.ts_ms ? a : b));
+
+    const counted = reps;
+
     const metrics = {};
-    const names = new Set(reps.flatMap((r) => Object.keys(r.metrics || {})));
+    const names = new Set(counted.flatMap((r) => Object.keys(r.metrics || {})));
     for (const name of names) {
-      const vals = reps.map((r) => r.metrics?.[name]?.value).filter((v) => typeof v === 'number');
+      const vals = counted.map((r) => r.metrics?.[name]?.value).filter((v) => typeof v === 'number');
       if (!vals.length) continue;
-      const proto = reps.find((r) => r.metrics?.[name])?.metrics[name];
+      const proto = counted.find((r) => r.metrics?.[name])?.metrics[name];
+      const sorted = [...vals].sort((a, b) => a - b);
+      const mid = median(vals);
       metrics[name] = {
-        value: median(vals),
+        value: mid,
         unit: proto.unit,
         higher_is_better: proto.higher_is_better,
         n: vals.length,
-        spread: vals.length > 1 ? (Math.max(...vals) - Math.min(...vals)) / median(vals) : 0,
+        // The measured extremes, not merely the distance between them.
+        //
+        // `spread` alone cannot place an interval on a chart. The median of
+        // three repetitions is the middle MEASUREMENT, not the midpoint of the
+        // range, so a site drawing `value ± spread / 2` would draw an interval
+        // whose ends the harness never observed — and would do it worst exactly
+        // where the repetitions are most skewed, which is where a reader most
+        // needs the truth. The environment's own caveat records run-to-run
+        // spread reaching 14.5%, which is wider than most of the differences
+        // this page exists to show, so the interval is not decoration.
+        //
+        // At three repetitions `lo`, `value` and `hi` ARE the three
+        // measurements; `values` carries them explicitly so the site keeps
+        // drawing every repetition if `reps` ever rises. Cost is bounded by
+        // arms x metrics x reps — the same order as the metrics map it sits in.
+        lo: sorted[0],
+        hi: sorted[sorted.length - 1],
+        values: sorted,
+        // Relative range, or `null` when it has no meaning.
+        //
+        // This was `(max - min) / median` unguarded, and every all-zero metric
+        // — `duplicate_rows` on a clean run, which is every published run —
+        // computed 0/0 = NaN. NaN is not representable in JSON, so Docusaurus's
+        // global data serialised it to `null`, and the component's
+        // `(spread * 50).toFixed(1)` then rendered it as "±0.0%": a precision
+        // claim about a quantity that was never measurable. Undefined is said
+        // rather than implied.
+        spread:
+          vals.length < 2 ? 0 : mid === 0 ? null : (sorted[sorted.length - 1] - sorted[0]) / mid,
       };
     }
     rows.push({
@@ -299,13 +352,31 @@ function summarise(records) {
       harness_version: newest.run.harness_version,
       dataset_version: newest.run.dataset_version,
       ts_ms: newest.run.ts_ms,
-      flags: newest.flags || [],
-      superseded_by: newest.superseded_by || null,
+      // Carried so the page can honour the contract without re-deriving any of
+      // it: `approach` decides headline eligibility, `status` decides whether an
+      // arm may be ranked at all, and `wire_format` is required beside every
+      // number by rule 5.
+      status: worstStatus(counted),
+      tier: newest.variant?.tier ?? null,
+      mode: newest.variant?.mode ?? null,
+      // Fail closed. A record that does not say what it is cannot be
+      // headline-eligible: defaulting to `realistic` meant a foreign or
+      // hand-edited record was ranked by default, which is the wrong direction
+      // for the valve rule 3 exists to be.
+      approach: newest.variant?.approach ?? 'undeclared',
+      wire_format: newest.variant?.wire_format ?? null,
+      reps_counted: counted.length,
+      // The union across repetitions, not the newest one's. A caveat that
+      // applied to any repetition applies to the number they were medianed into
+      // — a throttled rep does not stop being throttled because the next one
+      // was not.
+      flags: [...new Set(counted.flatMap((r) => r.flags || []))].sort(),
       metrics,
     });
   }
   rows.sort((a, b) => b.ts_ms - a.ts_ms);
-  return rows;
+  attempts.sort((a, b) => b.ts_ms - a.ts_ms);
+  return { rows, attempts };
 }
 
 module.exports = function benchData(context) {
@@ -326,17 +397,22 @@ module.exports = function benchData(context) {
       const entrants = loadEntrants(root);
       const environments = loadEnvironments(root);
       const { records, counts } = loadRecords(root);
-      const rows = summarise(records);
+      const { rows, attempts } = summarise(records);
 
-      const groups = [...new Set(rows.map((r) => r.group))].map((g) => {
-        const any = rows.find((r) => r.group === g);
-        return {
-          key: g,
-          env_id: any.env_id,
-          harness_version: any.harness_version,
-          dataset_version: any.dataset_version,
-        };
-      });
+      const groups = [...new Set(rows.map((r) => r.group))]
+        .map((g) => {
+          const any = rows.find((r) => r.group === g);
+          return {
+            key: g,
+            env_id: any.env_id,
+            harness_version: any.harness_version,
+            dataset_version: any.dataset_version,
+            tier: any.tier,
+          };
+        })
+        // Ordered by tier so the page reads A then B, rather than by whichever
+        // arm happened to be measured last.
+        .sort((a, b) => String(a.tier).localeCompare(String(b.tier)));
 
       // Build determinism: derived from the newest record rather than the wall
       // clock, so rebuilding an unchanged tree produces an identical site and a
@@ -345,7 +421,7 @@ module.exports = function benchData(context) {
         ? new Date(Math.max(...records.map((r) => r.run?.ts_ms ?? 0))).toISOString()
         : null;
 
-      return { entrants, environments, rows, groups, counts, generatedAt, root };
+      return { entrants, environments, rows, attempts, groups, counts, generatedAt, root };
     },
 
     async contentLoaded({ content, actions }) {
@@ -353,10 +429,50 @@ module.exports = function benchData(context) {
         entrants: content.entrants,
         environments: content.environments,
         rows: content.rows,
+        attempts: content.attempts,
         groups: content.groups,
         counts: content.counts,
         generatedAt: content.generatedAt,
       });
+
+      // One profile page per declared system, generated from the descriptors.
+      //
+      // CONTRIBUTING.md promises that "adding entrant N+1 touches exactly one
+      // new directory. There is no central registry to update." A hand-written
+      // page per system would quietly break that: the twenty-first vendor would
+      // owe the site a page as well as a descriptor, and pages written at
+      // different times drift into flattering some systems more carefully than
+      // others. So the route is derived, and every system gets the same shape.
+      //
+      // The module carries only the id. Everything else is already in global
+      // data on every page, and shipping a second copy of a system's rows here
+      // would put the same numbers in the bundle twice — which is exactly the
+      // payload problem the header comment on `summarise` is about.
+      //
+      // Note what does NOT happen here: no entrant id appears as a literal.
+      // They come from the descriptors that were just parsed, which is what
+      // keeps `plugins/neutrality.test.js` green and the neutrality claim
+      // checkable rather than asserted.
+      for (const e of content.entrants) {
+        const id = e.entrant.id;
+        const profile = await actions.createData(
+          `system-${id}.json`,
+          JSON.stringify({ id }),
+        );
+        actions.addRoute({
+          path: `${context.baseUrl}systems/${id}`,
+          component: '@site/src/components/Results/system.tsx',
+          modules: { profile },
+          exact: true,
+        });
+      }
     },
   };
 };
+
+// Test-only. The plugin's contract is the Docusaurus hook above; these are the
+// pure decisions inside it, exposed so `index.test.js` can pin behaviour that is
+// not reachable through `loadContent` today — a status this build does not know
+// is filtered out upstream by `CARRIES_METRICS`, so the fail-closed severity
+// rule can only be exercised directly. Not part of the public surface.
+module.exports.__testonly = {worstStatus, severity, groupKey, variantKey, UNKNOWN_SEVERITY};

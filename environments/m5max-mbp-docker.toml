@@ -49,13 +49,28 @@ indicative and labelled as such in their own right rather than in a footnote.
 # the written methodology stated three different envelopes, and no record said
 # which had been in force. One source, applied and then read back from the
 # running containers.
+#
+# THE SPLIT BETWEEN THESE TWO WAS SEARCHED FOR, NOT CHOSEN. Every allocation in
+# range was measured against both containers' own cgroup counters, and this is
+# the smallest ClickHouse cap at which no arm is infra-bound. These are not
+# preferences: moving either number silently re-gates every published record,
+# because `Ceilings::gate` drops any ceiling whose recorded envelope is not this
+# one. Re-measure with `bench ceiling --measure --write` after any change.
+#
+# The host is the constraint on the split. 18 vCPU, an arm envelope of 4 and one
+# vCPU left for the driver and the sampler give `broker + clickhouse <= 13`, and
+# a drain run has all three busy at once.
 [infra]
 partitions = 8
 
 [infra.broker]
 kind   = "redpanda"
 image  = "redpandadata/redpanda:v26.1.13"
-cpus   = "8"
+# Four. Read 40x faster than the fastest arm reads it, the broker uses 2.11 of
+# these — 53% of its cap, throttled in zero CFS periods — so it is not the
+# constraint. The drain demand it has to clear is 40,562 messages a second,
+# against a measured consume ceiling of 1,774,998.
+cpus   = "4"
 memory = "8g"
 # Redpanda's built-in Confluent-compatible Schema Registry, rather than a
 # separate Confluent container: it removes a second JVM from the measurement
@@ -65,7 +80,14 @@ registry = "redpanda-builtin"
 
 [infra.clickhouse]
 image  = "clickhouse/clickhouse-server:26.3"
-cpus   = "5"
+# Nine, up from five. RowBinary is transposed server-side, so for the two arms
+# that write it ClickHouse was the constraint rather than the engine: at five
+# cores it absorbed 3.7M tier-B rows/s against an arm offering 2.97M. The ingest
+# ceiling is close to linear in this cap up to nine (785k, 797k, 792k, 788k
+# tier-A rows per core per second at 5, 7, 8 and 9) and starts to roll off past
+# it, which is what a CPU-bound target looks like. Nine is the SMALLEST cap that
+# puts every arm under half of its ceiling; eight leaves the binding arm at 52%.
+cpus   = "9"
 memory = "12g"
 
 # The measured consume ceiling this environment gates against, in messages per

@@ -1,15 +1,23 @@
 # Generator constants for the one canonical workload.
 #
 # These live in a data file rather than in Rust source for one reason:
-# `dataset_version` is *derived* from the content of this file plus the Avro
-# schema and the ClickHouse DDL. A change to what the data actually is therefore
-# cannot be made without the version moving, and two result sets generated from
+# `dataset_version` is *derived* from what this file says, alongside the Avro
+# schema, the ClickHouse DDL and the marked generator region of
+# `harness/src/corpus.rs`. A change to what the data actually is therefore cannot
+# be made without the version moving, and two result sets generated from
 # different corpora can never be silently compared.
+#
+# Note "what this file says" and not "the bytes of this file". `harness/build.rs`
+# hashes the PARSED values, so `1772000000000` and `1_772_000_000_000` are one
+# corpus and a rewritten comment is not a new one. That distinction was earned:
+# under the previous scheme, correcting a stale comment in the DDL re-versioned
+# the dataset and would have split every published record from the tree — which
+# does not get the comment fixed, it gets it left wrong.
 #
 # `harness/build.rs` reads this and generates the Rust constants, so this file is
 # the single source of truth and not a duplicate that can drift.
 #
-# The field derivations that use these constants are specified in METHODOLOGY.md,
+# The field derivations that use these constants are specified in methodology/,
 # which is normative and which the competitor implementations were written
 # against. If the two disagree, the code is wrong.
 

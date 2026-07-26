@@ -23,10 +23,12 @@ bench list                      # systems, variants, and when each was last meas
 bench validate                  # what CI checks, runnable locally
 bench build '*'                 # build every entrant image
 bench prefill                   # populate the topic once per corpus
-bench ceiling                   # prove the infrastructure is not the bottleneck
+bench ceiling                   # report the ceilings, and refuse if none is gateable
+bench ceiling --measure --write # re-measure them against this corpus and record it
 bench run '*' --reps 3          # every arm, interleaved
 bench run spate --reps 3        # one system; nothing else is touched
 bench run '*' --dry-run         # print the plan without running it
+bench run spate --mode sustained --rate 40000    # latency; has to be asked for
 ```
 
 `--dry-run` is worth using before any full sweep. It prints the exact execution
@@ -43,8 +45,8 @@ long run as at the start.
 
 **Nothing appends over anything.** `bench run` only ever appends, and there is no
 code path in it that truncates a results file. Re-running one system produces a
-diff confined to that system's file. A wrong number is retracted with
-`bench retract`, which marks it superseded and leaves it visible.
+diff confined to that system's file, and a number later found to be wrong is
+corrected in a commit of its own.
 
 ## If you get a different number
 

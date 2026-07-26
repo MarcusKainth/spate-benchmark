@@ -16,6 +16,18 @@
 results/**/*.jsonl merge=union
 
 # Keep line endings stable for the fixtures the golden tests compare byte-wise.
+#
+# These rules were once load-bearing for `dataset_version` and now mostly are
+# not, which is worth recording so nobody restores the old argument. `build.rs`
+# used to hash the raw bytes of `workload.toml`, the Avro schema and the DDL, so
+# a `core.autocrlf=true` clone re-versioned the corpus. It now hashes parsed TOML
+# values, normalised SQL and a normalised region of `harness/src/corpus.rs`, all
+# of which are line-ending-insensitive by construction. The exception is the
+# `.avsc`, whose bytes genuinely are the corpus: the file is POSTed to the schema
+# registry, and the id that comes back is written into bytes 1..5 of every
+# message. So `*.avsc` below is still the real thing; the rest is hygiene, and
+# the golden fixtures the byte-wise tests compare.
 *.jsonl text eol=lf
 *.avsc  text eol=lf
 *.sql   text eol=lf
+*.toml  text eol=lf

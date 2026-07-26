@@ -23,7 +23,7 @@ import java.util.Map;
  * Avro topic, flatten each message's {@code events} array, insert one row per event
  * into ClickHouse.
  *
- * <p>{@code METHODOLOGY.md} is normative and this job conforms to
+ * <p>{@code methodology/} is normative and this job conforms to
  * it. Three consequences worth stating where they are easy to check:
  *
  * <ul>
@@ -60,12 +60,18 @@ import java.util.Map;
  *       {@code SINK_MAX_BATCH_BYTES}, {@code SINK_LINGER_MS},
  *       {@code SINK_MAX_IN_FLIGHT}, {@code SINK_MAX_ROW_BYTES} — the sink's batch
  *       shape. See README.md for why each default is what it is.</li>
+ *   <li>{@code EXPECT_PARALLELISM} — an <em>assertion</em>, never a setting. See
+ *       {@link #assertParallelism}.</li>
  * </ul>
  *
  * <p>Parallelism, object reuse, buffer timeout, checkpoint interval and mode, and
  * all memory sizing are deliberately <em>not</em> set here: they live in
  * {@code config.yaml} so a reviewer can read the whole tuning surface in one file
- * without decompiling a jar.
+ * without decompiling a jar. The driver reaches {@code parallelism.default} at run
+ * time through the official image's own {@code FLINK_PROPERTIES} contract rather
+ * than through a {@code setParallelism} call here, so that tuning it stays
+ * configuration — which rule 1 permits without limit — instead of becoming code
+ * we wrote that silently overrides the file a reviewer was sent to read.
  */
 public final class ComparisonJob {
 
@@ -86,18 +92,27 @@ public final class ComparisonJob {
         final String defaultTable = "a".equals(tier) ? "sensor_events" : "sensor_events_t";
         final String table = Cfg.str("CLICKHOUSE_TABLE", defaultTable);
 
-        System.out.printf(
-                "flink arm: tier=%s deser=%s table=%s startingOffsets=%s format=%s%n",
-                tier, deser, table, startingOffsets, ClickHouseFormat.RowBinaryWithNamesAndTypes);
-
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        assertParallelism(env);
+
+        System.out.printf(
+                "flink arm: tier=%s deser=%s table=%s startingOffsets=%s format=%s parallelism=%d%n",
+                tier,
+                deser,
+                table,
+                startingOffsets,
+                ClickHouseFormat.RowBinaryWithNamesAndTypes,
+                env.getParallelism());
 
         final KafkaSource<GenericRecord> source =
                 kafkaSource(schema, schemaJson, deser, startingOffsets);
 
         // No per-operator setParallelism anywhere in this job: every operator runs
-        // at parallelism.default from config.yaml, which is what keeps the whole
-        // pipeline FORWARD-connected and therefore in one chain.
+        // at the cluster's resolved parallelism.default — config.yaml's value, or
+        // the driver's override of it — which is what keeps the whole pipeline
+        // FORWARD-connected and therefore in one chain. A per-operator value here
+        // would break the chain and cost an Avro serialization round trip per
+        // message; it would also be a second place parallelism is decided.
         final DataStreamSource<GenericRecord> batches =
                 env.fromSource(source, WatermarkStrategy.noWatermarks(), "kafka-sensor-batches");
         batches.uid("kafka-sensor-batches");
@@ -119,6 +134,55 @@ public final class ComparisonJob {
         }
 
         env.execute("comparison-flink-tier-" + tier + "-" + deser);
+    }
+
+    /**
+     * Refuses the job when the parallelism the cluster resolved is not the one the driver asked
+     * for.
+     *
+     * <p>{@code EXPECT_PARALLELISM} sets nothing. Parallelism is configuration and is set as
+     * configuration: the driver writes {@code parallelism.default} and
+     * {@code taskmanager.numberOfTaskSlots} into {@code config.yaml} through the official image's
+     * {@code FLINK_PROPERTIES} and {@code TASK_MANAGER_NUMBER_OF_TASK_SLOTS} variables, which the
+     * entrypoint applies with Flink's own config parser before either process starts.
+     *
+     * <p>This exists because that mechanism can stop working without anything looking wrong. If a
+     * base-image bump renamed the hook, or the variable were dropped from the descriptor, every
+     * cell of a parallelism sweep would run at whatever {@code config.yaml} ships while every
+     * record claimed the value that was asked for — and the sweep would conclude, with dozens of
+     * consistent measurements behind it, that parallelism does not affect this arm. That is the
+     * one failure this benchmark cannot afford: not a crash, but a plausible number that is
+     * quietly false. A mismatch here fails at job submission, before a single row is consumed.
+     *
+     * <p>The image's own default is declared in the {@code Dockerfile} and must equal
+     * {@code parallelism.default} in {@code config.yaml}, so a container run by hand asserts the
+     * truth about itself rather than being exempt; {@code entrants_are_valid} checks that the two
+     * files agree.
+     */
+    private static void assertParallelism(StreamExecutionEnvironment env) {
+        final int expected = Cfg.i("EXPECT_PARALLELISM", 0);
+        if (expected <= 0) {
+            // Absent is a failure and not a licence to skip the check. A check
+            // that disables itself when its input goes missing is not a check.
+            throw new IllegalStateException(
+                    "EXPECT_PARALLELISM is unset or not positive. It is not optional: without it"
+                            + " nothing verifies that the parallelism this job runs at is the one"
+                            + " it was configured with, and a sweep would record values it never"
+                            + " ran at. The image sets a default matching config.yaml; the driver"
+                            + " sets it from the descriptor's `parallelism` knob.");
+        }
+        final int actual = env.getParallelism();
+        if (actual != expected) {
+            throw new IllegalStateException(
+                    "EXPECT_PARALLELISM="
+                            + expected
+                            + " but the cluster resolved parallelism.default="
+                            + actual
+                            + ". The driver sets parallelism through FLINK_PROPERTIES and"
+                            + " TASK_MANAGER_NUMBER_OF_TASK_SLOTS; if that no longer reaches"
+                            + " config.yaml, this job would run at the image's default while"
+                            + " every record claimed the value that was asked for.");
+        }
     }
 
     // OffsetResetStrategy is deprecated in kafka-clients 4.x (superseded by
@@ -176,9 +240,24 @@ public final class ComparisonJob {
                 Cfg.str("CLICKHOUSE_DATABASE", "default"),
                 table);
 
-        // Matches the Spate arm's `settings: { async_insert: "0" }`. It is also the
-        // server default, and is set explicitly so the two arms cannot diverge if a
-        // future ClickHouse release changes that default under both of them.
+        // Matches the Spate arm's `settings: { async_insert: "0" }`, and it is NOT
+        // belt and braces: the server this suite measures against defaults
+        // `async_insert=1`, so an arm that did not pin it would be running a
+        // different experiment from the one next to it on the chart.
+        //
+        // Three things change under an asynchronous insert, and all three flatter
+        // whichever arm gets them. The INSERT returns once the rows are buffered
+        // rather than once they are written, so the sink's back-pressure signal
+        // stops describing the target. `written_rows` comes back as 0, so nothing
+        // downstream can tell a landed batch from a queued one. And the write is
+        // charged to a background flush that leaves no `system.query_log` row, so
+        // the server-side CPU-per-row figure METHODOLOGY publishes would be
+        // systematically smaller for identical work. The durability promise is
+        // weaker too — buffered rows are lost on a server restart — and the
+        // methodology compares guarantee for guarantee.
+        //
+        // Set explicitly on both arms rather than left to the server, so that a
+        // ClickHouse upgrade cannot move the comparison under either of them.
         final Map<String, String> serverSettings = new LinkedHashMap<>();
         serverSettings.put("async_insert", "0");
         clientConfig.setServerSettings(serverSettings);
@@ -195,10 +274,24 @@ public final class ComparisonJob {
         final int maxBufferedRows = Cfg.i("SINK_MAX_BUFFERED_ROWS", 50_000);
         if (maxBufferedRows <= maxBatchRows) {
             // AsyncSinkWriter enforces this, but its message names neither knob.
+            //
+            // The LAST line of defence rather than the first. A combination this
+            // rejects is refused by the harness before a container starts — the
+            // rule is declared in `[[constraints]]` in entrant.toml and applied by
+            // `bench run`, because a sweep walks the product of these two knobs and
+            // will reach the impossible cell, and discovering it here costs two
+            // container starts and a JVM per cell. This copy exists because the
+            // image can also be run by hand, and because a knob that is capped in
+            // silence is worse than one that refuses: an unreachable
+            // SINK_MAX_BUFFERED_ROWS is precisely what held this arm's insert batch
+            // below 50,000 rows while the arm beside it used 262,144.
             throw new IllegalArgumentException(
                     "SINK_MAX_BUFFERED_ROWS (" + maxBufferedRows
                             + ") must be strictly greater than SINK_MAX_BATCH_ROWS ("
-                            + maxBatchRows + ")");
+                            + maxBatchRows
+                            + "). Raise the `buffered_rows` knob with `max_rows`: it also"
+                            + " bounds this subtask's checkpoint state and its retained"
+                            + " payload memory.");
         }
 
         return ClickHouseAsyncSink.<T>builder()

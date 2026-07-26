@@ -1,18 +1,58 @@
 # The Spate arm
 
 Kafka → Confluent-framed Avro → `flat_map` → ClickHouse, held to
-[`../../METHODOLOGY.md`](../../METHODOLOGY.md), which is normative. Read that
-first; this file records only what is specific to Spate.
+[the fairness contract](../../methodology/), which is normative. Read that first;
+this file records only what is specific to Spate.
+
+Delivery is **at-least-once**, with offsets committed every 5 s and never past
+unacknowledged data. Two wire formats are published — `native` and `rowbinary` —
+because they are not the same amount of server-side work, and two decode paths,
+because rule 1 requires the same treatment of our own shipped APIs that we give
+everyone else's.
 
 **This is the vendor's own entrant.** Everything below is written to be attacked.
-If a competitor's arm is tuned worse than this one, that is a bug in the
-benchmark — open an issue.
+If a competitor's arm is tuned worse than this one, that is a bug in the benchmark
+— open an issue.
 
-## Build and run
+## Configuration
+
+Every knob is set by the driver from the descriptor, and the record carries what
+was in force.
+
+| Knob | Value | What it controls |
+|---|---|---|
+| `threads` | **4** | Hot-path threads, one per CPU in the envelope. The arm scales cleanly to 4 and then stops; oversubscription raises CFS-throttled time while *lowering* cores used. |
+| `shards` | **8** | Independent workers, each with its own queue, encoder and in-flight permits. Several shards against one server is how a single-node target gets concurrent inserts, and width buys more than depth: sixteen concurrent INSERTs as 8 × 2 are worth **52% more** than the same sixteen as 2 × 8. |
+| `inflight` | **4** | Concurrent INSERTs per shard, so 32 in total. Where the curve flattens; 8 and 16 measure the same rate and hold more rows in flight. |
+| `linger_ms` | **500** | Batch timer, and a hard p99 floor in sustained mode. At these knobs a batch fills in ~364 ms, so it seals on rows and the timer does not fire. |
+| `max_rows` | **262144** | Rows per INSERT. The largest batch this arm actually seals on **rows** — it achieves 99.7% of the cap. Above roughly 380,000 the linger timer seals the batch instead, so a larger cap would declare a number that never takes effect. |
+
+Fixed by the contract rather than chosen: `commit_interval` is **5 s**, matched to
+Flink's `AT_LEAST_ONCE` checkpoint interval so both arms pay for the same
+guarantee at the same cadence. `async_insert` is **0**, matching every other arm —
+async inserts would move batching into the server and make the comparison one of
+ClickHouse settings rather than of frameworks. `metrics.exporter` is **none**;
+nothing this arm reports about itself is used for any published number.
+
+Three values are the framework's and are **not reachable from any descriptor**, so
+no record reports them:
+
+| Setting | Value | Why it matters |
+|---|---|---|
+| `io_threads` | 2 | That runtime owns every sink writer and the LZ4 compression of every insert body. It is material and no descriptor can set it. |
+| `chunk.target_bytes` | 64 KiB (framework default) | Under `native` this is the ClickHouse **block** size, so at ~57 bytes per row a block is about 1,150 rows and one 261,323-row INSERT is roughly 230 concatenated blocks. |
+| `compression` | `lz4` (framework default) | This arm compresses each block inside ClickHouse's checksummed frame. |
+| `max_inflight_bytes` | derived | Scales with `shards × inflight × max_rows`, so widening egress cannot backpressure on a budget *we* chose. Sound here only because rows bind long before bytes do. |
+
+The last two are why the committed **Native ingest ceilings are an upper bound**:
+the ceiling rig POSTs one large uncompressed block per request where this arm
+seals many smaller compressed ones, and the ceilings file records that on every
+Native figure.
+
+## Build
 
 ```sh
 bench build spate
-bench run spate --reps 3
 ```
 
 The build context is the repository root: the arm is a cargo workspace member and
@@ -20,66 +60,71 @@ needs the workspace manifest and lockfile. While the framework is a private git
 dependency the build also needs a credential, passed as a BuildKit secret so no
 token is ever baked into an image layer.
 
-## Configuration, and why each value
+## Run
 
-| Setting | Value | Reason |
-|---|---|---|
-| `commit_interval` | `5s` | Matched to Flink's 5s `AT_LEAST_ONCE` checkpoint interval. Both arms pay for the same guarantee at the same cadence; making ours cheaper would be exactly the fault rule 3 forbids. |
-| `threads` | 4 | One per CPU in the envelope. |
-| `shards` × `inflight` | 4 × 4 | Egress concurrency. Several shards against one server is how a single-node target gets concurrent inserts: each shard is an independent worker with its own in-flight permits. Measured: widening this from 2 to 32 moved drain throughput 3.25M → 4.81M rows/s, so it is a real lever and leaving it at the default would have under-reported the framework. |
-| `linger` | `500ms` | Not a throughput constraint at these rates — `max_rows` fills in ~279ms at 940k rows/s, so the batch seals on rows first. It **is** a hard p99 floor at low rates, so latency runs should lower it rather than raise it. |
-| `max_rows` | 262144 | The batch size at which the sink stops being per-insert-overhead-bound. |
-| `max_inflight_bytes` | derived | Scales with `shards × inflight × max_rows`. Fixed here it would cap the pipeline on a number *we chose* while a sweep concluded that egress concurrency does not help. |
-| `async_insert` | `0` | Off, matching every other arm. Async inserts would move batching into the server and make the comparison one of ClickHouse settings rather than of frameworks. |
-| `metrics.exporter` | `none` | Nothing this arm reports about itself is used for any published number. |
+```sh
+bench run spate --reps 3
+```
 
-## Deviations
+One container, the full 4 CPU / 16 GiB data-plane envelope, no control plane.
+`FORMAT` selects `native` or `rowbinary`, `DESER` selects `value` or `typed`, and
+`TIER` selects `a` or `b`; the five knobs above arrive as `THREADS`, `SHARDS`,
+`INFLIGHT`, `LINGER_MS` and `MAX_ROWS`.
 
-None. This arm implements the specification directly: it has a fan-out operator,
-a Native encoder, and a Kafka source with offset commits, so nothing in the
-workload has to be worked around.
+## Versions
 
-That is worth stating plainly rather than leaving as an empty section, because it
-is an *advantage* of being the system the benchmark was designed alongside. The
-Kafka Connect arm has no fan-out operator and must flatten in a materialized
-view; that deviation is real work the workload forces on it and not on us.
+Resolved by running the built image — `spate-arm --version` — so the recorded
+version is the one that was linked rather than one a human typed. The Rust
+toolchain is pinned in `rust-toolchain.toml` and a test asserts the image's base
+matches it, because codegen moves throughput and a silent divergence would make
+the recorded toolchain wrong.
 
-## Where this arm may still be unfair — to us or to others
+## Differences worth knowing
 
+- **This arm sends `insert_deduplication_token` and no other arm does.**
+  `etl-clickhouse`'s writer sets it, so the behaviour arrives with the framework
+  under test rather than from anything in this directory — which is why it is easy
+  to miss and why it is written down here. The target sets
+  `non_replicated_deduplication_window = 1000` identically for every arm, so
+  ClickHouse skips hashing this arm's blocks and hashes everybody else's. That is
+  real server-side work avoided by the arm the benchmark's author wrote. Any
+  framework could send tokens and none of the others currently does; the cost it
+  avoids belongs in the published server-side figure rather than in a footnote.
 - **The workload suits us.** Kafka → Avro → ClickHouse is the pipeline this
-  framework was built for, and the benchmark was written by its author. A
-  workload chosen by someone else would be a stronger test, which is why the
-  contract invites competitor pull requests and why the corpus, DDL and rules are
-  all committed rather than described.
-- **`native` is not like-for-like with Flink.** It is what a real deployment
-  runs, so it is published — but the arm to read against Flink is
-  `tier-a-rowbinary`, because ClickHouse's official Flink connector can only
-  write `RowBinaryWithNamesAndTypes`. Native measured 1.58× RowBinary, and that
-  gap is server-side parse and wire volume, not our encoder: client CPU per row
-  is nearly equal between the two. Presenting Native against Flink would be
-  claiming credit for a gap in the Java client.
-- **The typed decode path is published even though it loses.** `build_serde` cost
-  +34% CPU per row for no throughput gain, held at both 20 and 100 events per
-  message. Rule 1 requires the same treatment of our own shipped APIs that we
+  framework was built for, and the benchmark was written by its author. A workload
+  chosen by someone else would be a stronger test, which is why the corpus, the
+  DDL and the rules are all committed rather than described.
+- **`native` is not like-for-like with Flink.** It is what a real deployment runs,
+  so it is published — but the arm to read against Flink is `tier-a-rowbinary`,
+  because ClickHouse's official Flink connector can only write
+  `RowBinaryWithNamesAndTypes`. The gap between the two is server-side rather than
+  in our encoder: client CPU per row is near enough equal, while ClickHouse's own
+  cost differs by more than 3×. Presenting Native against Flink would be claiming
+  credit for a gap in the Java client.
+- **The typed decode path is published even though it loses.** `build_serde` is
+  the ergonomic shipped deserializer and our own documentation notes that it
+  decodes each record twice — "choose it for the clean typed API, not for
+  throughput". Rule 1 requires the same treatment of our own shipped APIs that we
   give everyone else's, so both are shown.
-- **Tier B has not been run.** All current records are tier A.
+- **`tier-a-rowbinary` sits closest to the headroom limit.** Above 70% of the
+  measured ingest ceiling a number describes ClickHouse rather than the framework,
+  and the harness records such a run as `infra_bound` rather than publishing it.
+  Pinning that variant to a slower configuration to duck the gate would be tuning
+  around the gate, so it is left where the search put it and the gate is allowed
+  to fire.
 
-## Why was throughput X and not 2X?
+## What this arm shares with the harness, and what it must not
 
-**Rule 6, and it is currently unanswered for this arm.**
+The Avro decode is shared: `SensorBatch` comes from the harness, because the
+schema is the wire contract every arm reads off the same registry, and the Flink
+arm parses the same committed `.avsc`. Sharing a decoder for it shares nothing an
+arm is supposed to write.
 
-At its ceiling the arm ran at roughly 0.6 µs of CPU per row against a 4-CPU
-budget — about 3 of 4 cores — which is the healthy picture of a pipeline that is
-near CPU-bound rather than blocked on something. But "near" is not an answer, and
-the remaining core is not accounted for.
-
-<!-- TODO(bench): fill this in from the next recorded run. Candidates, in the
-     order they should be eliminated:
-       - egress round-trip: shards x inflight sealed batches pending against a
-         single ClickHouse; the insert acknowledgement latency bounds it.
-       - the consume path: 8 partitions gives 8 fetch streams to one process.
-       - server-side parse: measurable directly from ClickHouse ProfileEvents.
-       - allocator pressure in the flatten, which is the one thing here that is
-         our own code rather than a boundary.
-     The results table publishes this sentence per arm; an empty one is a gap in
-     the evidence, not a formatting problem. -->
+**The transform is not shared.** The tier-B filter, the ASCII uppercase, the
+scaled-value arithmetic and both constants are restated here rather than imported
+from `spate_benchmark_harness::corpus` — the module that computes the closed-form
+expectations the correctness gate holds every arm to. Were they imported, this arm
+and the marking scheme could not disagree by construction, while the Flink arm,
+which reimplements all of it in Java, could.
+`harness/tests/each_arm_restates_the_transform.rs` fails if that import returns or
+if either arm's constants drift from `workload/workload.toml`.

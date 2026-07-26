@@ -19,9 +19,10 @@ Two deliberate design points:
   cgroup v2 scopes that reset to the fd: a write resets the value only for
   subsequent reads through the *same* fd, while a fresh open still returns the
   cgroup's lifetime peak. Holding the fd therefore gives an exact peak over the
-  sampling window with no sampling gap. The driver starts this sampler at the
-  detected steady-state boundary, which is what makes that window the measurement
-  window — no signalling between driver and sampler is needed.
+  sampling window with no sampling gap. The driver starts this sampler when the
+  arm's container starts and stops it the moment the drain completes, and that
+  interval IS the measurement window — every published rate divides by it — so no
+  signalling between driver and sampler is needed.
 * **`anon` is the headline memory figure, not `memory.current`.** `memory.current`
   includes page cache, which on a Kafka-consuming container is mostly the
   kernel's doing rather than the framework's, and would let a framework look

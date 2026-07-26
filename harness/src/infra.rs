@@ -33,7 +33,22 @@ pub struct Endpoints {
     /// Host-side Kafka bootstrap.
     pub bootstrap: String,
     /// Bootstrap as a container on [`NETWORK`] must dial it.
+    ///
+    /// What the ceiling pass's consumer is given, and never
+    /// [`Endpoints::bootstrap`]. The published port is the thing the consume pass
+    /// stopped using: measured on this host, the same corpus, broker, partition
+    /// count and window served 72,349 messages a second through it and 1,719,373
+    /// container-to-container.
     pub bootstrap_internal: String,
+    /// The broker container's name, which is also the hostname a container on
+    /// [`NETWORK`] reaches it by.
+    ///
+    /// Carried beside [`Endpoints::bootstrap_internal`] rather than parsed back
+    /// out of it, for the same reason [`Endpoints::ch_container`] is carried
+    /// beside `ch_internal`: it is the container whose cgroup the consume pass
+    /// reads, via [`cgroup_cpu`], to say whether the broker was at its cap while
+    /// it was being measured — which is what tells a ceiling from a floor.
+    pub broker_container: String,
     /// Host-side registry.
     pub registry_host: String,
     /// Host-side registry port.
@@ -50,10 +65,31 @@ pub struct Endpoints {
     pub ch_password: String,
     /// ClickHouse URL for a container on [`NETWORK`].
     pub ch_internal: String,
+    /// The ClickHouse container's name, which is also the hostname a container
+    /// on [`NETWORK`] reaches it by.
+    ///
+    /// Carried beside [`Endpoints::ch_internal`] rather than parsed back out of
+    /// it. A client that opens its own socket needs a host and a port, not a
+    /// URL, and the ceiling pass's inserter is exactly that client: it runs in a
+    /// container on [`NETWORK`] so that its POSTs cross the same boundary an
+    /// arm's inserts cross, which is none. It is also the container whose cgroup
+    /// that pass reads, via [`cgroup_cpu`], to say whether the target was at its
+    /// cap while it was being measured.
+    pub ch_container: String,
+    /// ClickHouse's HTTP port as seen from inside [`NETWORK`].
+    ///
+    /// Not the published one. The published port is the thing the ingest pass
+    /// stopped using: measured on this host, the same statement at the same
+    /// concurrency ran roughly ten times faster container-to-container than
+    /// through it.
+    pub ch_internal_port: u16,
 }
 
 const BROKER: &str = "spate-bench-redpanda";
 const CLICKHOUSE: &str = "spate-bench-clickhouse";
+/// ClickHouse's HTTP port inside the container. Published as 18123 on the host,
+/// and reached unpublished at this number from anywhere on [`NETWORK`].
+const CLICKHOUSE_HTTP_PORT: u16 = 8123;
 
 /// Brings up the infrastructure this environment declares.
 ///
@@ -72,23 +108,50 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
     let b = &env.spec.infra.broker;
     let c = &env.spec.infra.clickhouse;
 
-    if reuse && running(BROKER) && running(CLICKHOUSE) {
-        flags.push(Flag::ReusedInfra);
-        eprintln!(
-            "reusing the running infrastructure. Its caps are still read back and \
-             asserted below, so a container started under a different envelope \
-             will fail the run rather than quietly produce a number."
-        );
+    // Reuse is decided **per container**, not for the pair.
+    //
+    // It used to ask one question — are both running? — and recreate both when the
+    // answer was no. Changing ClickHouse's caps means removing the ClickHouse
+    // container, because `assert_cap` below correctly refuses to run against a
+    // container whose applied caps disagree with the profile; so under the old
+    // shape the only way to move ClickHouse's cap also recreated the broker and
+    // **destroyed the prefilled corpus inside it**. Six gigabytes and several
+    // minutes, lost to a command that had nothing to do with the broker, and lost
+    // precisely during an envelope search — the one job whose whole method is to
+    // move one container's caps at a time.
+    //
+    // Splitting the question weakens nothing. Both containers' caps are read back
+    // out of their cgroups and asserted below whether they were reused or freshly
+    // started, so a container left running under a stale envelope still fails the
+    // run rather than quietly producing a number. What changes is only which
+    // containers a stale one takes down with it: itself, rather than its
+    // neighbour's data.
+    let reused_broker = reuse && running(BROKER);
+    let reused_clickhouse = reuse && running(CLICKHOUSE);
+    if reused_broker {
         docker::attach_to_network(BROKER);
-        docker::attach_to_network(CLICKHOUSE);
     } else {
         start_broker(b)?;
+    }
+    if reused_clickhouse {
+        docker::attach_to_network(CLICKHOUSE);
+    } else {
         start_clickhouse(c)?;
+    }
+    if reused_broker || reused_clickhouse {
+        flags.push(Flag::ReusedInfra);
+        eprintln!(
+            "reusing the running {}. Caps are still read back and asserted below, so a \
+             container started under a different envelope will fail the run rather than \
+             quietly produce a number.",
+            reused_description(reused_broker, reused_clickhouse)
+        );
     }
 
     let endpoints = Endpoints {
         bootstrap: "localhost:9092".to_owned(),
         bootstrap_internal: format!("{BROKER}:29092"),
+        broker_container: BROKER.to_owned(),
         registry_host: "localhost".to_owned(),
         registry_port: 18081,
         registry_internal: format!("http://{BROKER}:8081"),
@@ -96,7 +159,9 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
         ch_port: 18123,
         ch_user: "default".to_owned(),
         ch_password: "bench".to_owned(),
-        ch_internal: format!("http://{CLICKHOUSE}:8123"),
+        ch_internal: format!("http://{CLICKHOUSE}:{CLICKHOUSE_HTTP_PORT}"),
+        ch_container: CLICKHOUSE.to_owned(),
+        ch_internal_port: CLICKHOUSE_HTTP_PORT,
     };
 
     wait_for_registry(&endpoints)?;
@@ -112,8 +177,37 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
     assert_cap(CLICKHOUSE, "cpus", &c.cpus, &ch_cpus)?;
     assert_cap(CLICKHOUSE, "memory", &c.memory, &ch_memory)?;
 
-    let ceiling = env.ceiling().map_or(0, |c| c.consume_msgs_per_s);
-    if ceiling == 0 {
+    // Both consume ceilings, and every reason one of them was refused.
+    //
+    // The refusals are printed rather than discarded because **a refused ceiling
+    // is the mechanism working**. `crate::ceiling` drops a figure that does not
+    // describe this corpus or this envelope instead of scaling it, and the
+    // reason it dropped it is the only thing that tells an operator what to do
+    // about it — "re-measure with `bench ceiling --measure`" is actionable,
+    // whereas a flag on a record somebody reads a week later is not.
+    //
+    // What this replaced was `env.ceiling().map_or(0, |c| c.consume_msgs_per_s)`,
+    // which threw `Ceiling::refusals` away entirely. That made "no ceiling has
+    // ever been measured for this environment" and "the measured ceiling
+    // describes a message this corpus no longer produces" produce identical
+    // output: a zero, and a flag that says neither.
+    let (ceiling_msgs_per_s, ceiling_bytes_per_s) = match env.ceiling() {
+        Ok(c) => {
+            for why in c.refusals() {
+                eprintln!("REFUSED ceiling: {why}");
+            }
+            (c.consume_msgs_per_s, c.consume_bytes_per_s)
+        }
+        // A ceilings file that does not parse is a different problem from a
+        // stale measurement in one that does, and it is reported as one rather
+        // than failing the bring-up: `bench prefill` needs no ceiling at all,
+        // and `driver::run` refuses the sweep over it before a container starts.
+        Err(why) => {
+            eprintln!("REFUSED ceiling: {why}");
+            (0, 0)
+        }
+    };
+    if ceiling_msgs_per_s == 0 {
         flags.push(Flag::HeadroomUnproven);
     }
 
@@ -130,7 +224,14 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
         clickhouse_memory: ch_memory,
         partitions: env.spec.infra.partitions,
         registry: b.registry.clone(),
-        ceiling_msgs_per_s: ceiling,
+        ceiling_msgs_per_s,
+        ceiling_bytes_per_s,
+        // Left at zero here, and that is the honest value at this point rather
+        // than a placeholder: the ClickHouse ceiling is measured per insert
+        // format and per tier, and no arm has been chosen yet. `driver::measure`
+        // fills it in on each record, where the arm's declared `wire_format` is
+        // known. See `report::Infra::ceiling_rows_per_s`.
+        ceiling_rows_per_s: 0,
     };
 
     Ok((endpoints, infra, flags))
@@ -138,6 +239,22 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
 
 fn running(name: &str) -> bool {
     docker::docker_try(&["inspect", "-f", "{{.State.Running}}", name]).is_ok_and(|s| s == "true")
+}
+
+/// Which containers were reused, for the line an operator reads.
+///
+/// Named rather than counted, because "reusing the running infrastructure" and
+/// "reusing the running broker while ClickHouse was recreated under new caps" are
+/// different states and the second is what an envelope search spends its whole
+/// time in.
+fn reused_description(broker: bool, clickhouse: bool) -> &'static str {
+    match (broker, clickhouse) {
+        (true, true) => "infrastructure",
+        (true, false) => "broker, with ClickHouse recreated",
+        (false, true) => "ClickHouse, with the broker recreated",
+        // Not reached: the caller only asks when at least one was reused.
+        (false, false) => "infrastructure",
+    }
 }
 
 fn start_broker(b: &crate::environment::Broker) -> Result<(), String> {
@@ -285,12 +402,108 @@ fn cgroup_caps(container: &str) -> Result<(String, String), String> {
     Ok((cpu.trim().to_owned(), mem.trim().to_owned()))
 }
 
+/// What a container's cgroup says it has spent, read at one instant.
+///
+/// The counters `/sys/fs/cgroup/cpu.stat` carries, unaltered. They are
+/// cumulative, so a single reading says nothing and a *pair* of readings across
+/// a known interval says how many cores the container occupied over it — which
+/// is the one question a measurement pass has to be able to answer about the
+/// system it is measuring: was the target at its cap, or was something else the
+/// constraint?
+///
+/// Read here rather than through [`crate::sampler::Sampler`] because the ceiling
+/// pass needs the interval to be **exactly** one rung of its concurrency sweep.
+/// A sidecar samples on its own timer and starts when its container boots, so
+/// the seconds before the rung began would land inside the window and drag the
+/// mean down; two `docker exec`s taken either side of the rung cannot. The
+/// sidecar remains right for an arm, whose window is the sampler's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuStat {
+    /// Cumulative CPU time charged to the cgroup, microseconds.
+    pub usage_us: u64,
+    /// User-mode share of it.
+    pub user_us: u64,
+    /// Kernel-mode share of it.
+    pub system_us: u64,
+    /// CFS periods the cgroup has been scheduled in.
+    pub nr_periods: u64,
+    /// Periods in which it was throttled by its own cap.
+    pub nr_throttled: u64,
+    /// Cumulative time spent throttled, microseconds.
+    pub throttled_us: u64,
+}
+
+impl CpuStat {
+    /// Mean cores occupied between two readings taken `wall_s` apart.
+    ///
+    /// Directly comparable to the container's `--cpus` cap, so a figure at the
+    /// cap says the target was CPU-bound without any inference. A negative or
+    /// zero interval yields zero rather than an absurdity: the counters are
+    /// monotonic, so the only way to get one is a clock or a caller that read
+    /// them out of order, and neither is evidence of a busy server.
+    #[must_use]
+    pub fn cores_between(before: Self, after: Self, wall_s: f64) -> f64 {
+        if wall_s <= 0.0 {
+            return 0.0;
+        }
+        after.usage_us.saturating_sub(before.usage_us) as f64 / (wall_s * 1e6)
+    }
+
+    /// The delta between two readings, field by field.
+    #[must_use]
+    pub fn since(self, before: Self) -> Self {
+        Self {
+            usage_us: self.usage_us.saturating_sub(before.usage_us),
+            user_us: self.user_us.saturating_sub(before.user_us),
+            system_us: self.system_us.saturating_sub(before.system_us),
+            nr_periods: self.nr_periods.saturating_sub(before.nr_periods),
+            nr_throttled: self.nr_throttled.saturating_sub(before.nr_throttled),
+            throttled_us: self.throttled_us.saturating_sub(before.throttled_us),
+        }
+    }
+}
+
+/// A container's cgroup CPU counters right now, or `None` if they cannot be
+/// read.
+///
+/// `None` rather than an error, and deliberately: this is evidence *about* a
+/// measurement, not the measurement itself, and a pass that failed because a
+/// diagnostic was unavailable would trade a number for a footnote.
+#[must_use]
+pub fn cgroup_cpu(container: &str) -> Option<CpuStat> {
+    let raw = docker::docker_try(&["exec", container, "cat", "/sys/fs/cgroup/cpu.stat"]).ok()?;
+    parse_cpu_stat(&raw)
+}
+
+/// Parses `cpu.stat`'s `key value` lines. Absent keys read as zero, because a
+/// kernel that reports no throttling omits the throttling keys entirely.
+fn parse_cpu_stat(raw: &str) -> Option<CpuStat> {
+    let field = |key: &str| -> Option<u64> {
+        raw.lines()
+            .find_map(|l| l.strip_prefix(key)?.trim().parse().ok())
+    };
+    Some(CpuStat {
+        usage_us: field("usage_usec ")?,
+        user_us: field("user_usec ").unwrap_or(0),
+        system_us: field("system_usec ").unwrap_or(0),
+        nr_periods: field("nr_periods ").unwrap_or(0),
+        nr_throttled: field("nr_throttled ").unwrap_or(0),
+        throttled_us: field("throttled_usec ").unwrap_or(0),
+    })
+}
+
 /// Fails the run when the applied cap disagrees with the declared one.
+///
+/// Memory goes through `entrant::parse_memory` rather than through a copy kept
+/// here. There were four copies of that parser and they had drifted, which is
+/// how a suffix this one accepted became a suffix the arm's own cap assertion
+/// refused.
 fn assert_cap(container: &str, what: &str, declared: &str, applied: &str) -> Result<(), String> {
     let ok = match what {
         "cpus" => cpu_max_cores(applied)
             .is_some_and(|c| declared.parse::<f64>().is_ok_and(|d| (c - d).abs() < 0.01)),
-        _ => memory_bytes(declared).is_some_and(|d| applied.parse::<u64>().is_ok_and(|a| a == d)),
+        _ => crate::entrant::parse_memory(declared)
+            .is_some_and(|d| applied.parse::<u64>().is_ok_and(|a| a == d)),
     };
     if ok {
         return Ok(());
@@ -313,18 +526,6 @@ fn cpu_max_cores(cpu_max: &str) -> Option<f64> {
         return None;
     }
     Some(quota.parse::<f64>().ok()? / period)
-}
-
-/// Parses `8g`, `512m`, `1024` into bytes.
-fn memory_bytes(s: &str) -> Option<u64> {
-    let s = s.trim();
-    let (digits, mult) = match s.chars().last()? {
-        'g' | 'G' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
-        'm' | 'M' => (&s[..s.len() - 1], 1024 * 1024),
-        'k' | 'K' => (&s[..s.len() - 1], 1024),
-        _ => (s, 1),
-    };
-    digits.trim().parse::<u64>().ok().map(|n| n * mult)
 }
 
 /// The image a container is running, by content id. A tag can be re-pushed; an
@@ -388,11 +589,83 @@ mod tests {
         assert!(assert_cap("c", "cpus", "8", "800000 100000").is_ok());
     }
 
+    /// The counters the ingest pass reads either side of every rung, so it can
+    /// say whether the target was at its cap while it was being measured.
+    #[test]
+    fn a_cgroup_cpu_stat_parses_into_its_counters_and_tolerates_absent_throttling_keys() {
+        let full = "usage_usec 129007508\nuser_usec 129003510\nsystem_usec 3998\n\
+                    nr_periods 660\nnr_throttled 12\nthrottled_usec 602643\n";
+        let s = parse_cpu_stat(full).expect("cpu.stat parses");
+        assert_eq!(s.usage_us, 129_007_508);
+        assert_eq!(s.user_us, 129_003_510);
+        assert_eq!(s.nr_throttled, 12);
+        assert_eq!(s.throttled_us, 602_643);
+
+        // A kernel with nothing to report omits the throttling keys, which is
+        // not the same as failing to read them.
+        let quiet = parse_cpu_stat("usage_usec 5\nuser_usec 4\nsystem_usec 1\n")
+            .expect("a cpu.stat without throttling keys still parses");
+        assert_eq!(quiet.nr_throttled, 0);
+        assert_eq!(quiet.throttled_us, 0);
+
+        // No usage at all is not a reading of zero usage.
+        assert!(parse_cpu_stat("nr_periods 4\n").is_none());
+    }
+
+    /// Mean cores over the rung's own interval, which is the whole point of
+    /// taking the two readings by hand instead of from a sidecar's timer.
+    #[test]
+    fn mean_cores_are_the_cpu_delta_over_the_interval_the_rung_actually_ran_for() {
+        let zero = CpuStat {
+            usage_us: 0,
+            user_us: 0,
+            system_us: 0,
+            nr_periods: 0,
+            nr_throttled: 0,
+            throttled_us: 0,
+        };
+        // Four CPU-seconds over one wall second is four cores.
+        let after = CpuStat {
+            usage_us: 4_000_000,
+            user_us: 3_000_000,
+            system_us: 1_000_000,
+            nr_periods: 10,
+            nr_throttled: 3,
+            throttled_us: 500,
+        };
+        assert!((CpuStat::cores_between(zero, after, 1.0) - 4.0).abs() < 1e-9);
+        assert!((CpuStat::cores_between(zero, after, 8.0) - 0.5).abs() < 1e-9);
+        // A window of no length is not a busy server.
+        assert!((CpuStat::cores_between(zero, after, 0.0)).abs() < f64::EPSILON);
+        assert_eq!(after.since(zero), after);
+        assert_eq!(after.since(after).usage_us, 0);
+    }
+
+    /// The line an operator reads has to distinguish the state an envelope search
+    /// lives in — broker reused, ClickHouse recreated under new caps — from a
+    /// wholesale reuse, because under the previous shape that state did not exist:
+    /// recreating ClickHouse recreated the broker and destroyed the corpus.
+    #[test]
+    fn reusing_one_container_says_which_one_rather_than_claiming_the_whole_infrastructure() {
+        assert_eq!(reused_description(true, true), "infrastructure");
+        assert_eq!(
+            reused_description(true, false),
+            "broker, with ClickHouse recreated"
+        );
+        assert_eq!(
+            reused_description(false, true),
+            "ClickHouse, with the broker recreated"
+        );
+    }
+
     #[test]
     fn memory_caps_compare_in_bytes() {
         assert!(assert_cap("c", "memory", "8g", "8589934592").is_ok());
         assert!(assert_cap("c", "memory", "8g", "8589934591").is_err());
         // "max" is not a number, so an uncapped container fails the assertion.
         assert!(assert_cap("c", "memory", "8g", "max").is_err());
+        // Every suffix the shared parser accepts has to reach this comparison,
+        // which is what the four drifted copies could not guarantee.
+        assert!(assert_cap("c", "memory", "8388608k", "8589934592").is_ok());
     }
 }

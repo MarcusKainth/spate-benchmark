@@ -14,10 +14,8 @@ runtime  = "jvm"
 status   = "active"
 
 [maintainer]
-# "spate-benchmark" means we wrote this arm. A third-party contributor puts their
-# own handle here, and the site shows who to contact when an arm breaks — the
-# absence of that routing is one of the things that made TechEmpower
-# unmaintainable at scale.
+# `spate-benchmark` means we wrote this arm. A third-party contributor puts their
+# own handle here, and the site shows who to contact when an arm breaks.
 who = "spate-benchmark"
 # Rule 7. Not yet sent upstream; the site shows this honestly rather than
 # implying a review that has not happened.
@@ -30,17 +28,11 @@ hue   = 32
 short = "Flink"
 
 [version]
-# Read from the SHIPPED DISTRIBUTION JAR, which is as close to the truth as this
-# gets: it is the artefact that actually runs.
-#
-# An image label was the obvious choice and is wrong here. `flink:2.2.1-java17`
-# carries no `org.apache.flink.version` label at all — its only version label is
-# `org.opencontainers.image.version: 24.04`, which is the base *operating
-# system*. A descriptor trusting that label would have recorded every Flink
-# result as version 24.04, and it would have looked entirely plausible.
-#
-# `pinned` is asserted against what is resolved, so a base-image bump refuses the
-# run rather than publishing a mislabelled number.
+# Read from the shipped distribution jar, which is the artefact that actually
+# runs. The image label is not usable: `flink:2.2.1-java17` carries no Flink
+# version label, only `org.opencontainers.image.version: 24.04` for the base
+# operating system. `pinned` is asserted against what is resolved, so a
+# base-image bump refuses the run rather than publishing a mislabelled number.
 strategy = "command"
 command  = ["sh", "-c", "ls /opt/flink/lib | sed -n 's/^flink-dist-\\(.*\\)\\.jar$/\\1/p'"]
 pinned   = "2.2.1"
@@ -50,9 +42,10 @@ context    = "../.."
 dockerfile = "Dockerfile"
 image      = "spate-bench-flink"
 
-# Flink splits across two containers. The data plane gets the FULL 4 CPU / 16 GiB
-# envelope — the same budget the Spate arm gets — and the JobManager is
-# allocated on top as control plane. See [[deviations]] below.
+# Flink splits across two containers. The data plane gets the full 4 CPU / 16 GiB
+# envelope — the same budget every other arm gets — and the JobManager is
+# allocated on top as control plane. Its measured consumption (0.07–0.11 cores)
+# is published beside the arm's total rather than pre-charged against it.
 [envelope]
 cpus   = "4"
 memory = "16g"
@@ -75,12 +68,6 @@ args   = ["taskmanager"]
 delivery    = "at-least-once"
 durability  = "checkpoint"
 interval_ms = 5000
-notes = """
-AT_LEAST_ONCE explicitly, not the EXACTLY_ONCE default: every arm here is
-at-least-once, and the default would make Flink pay for aligned barriers no
-other arm pays for. Checkpointing is off entirely unless an interval is set, so
-omitting it would silently remove Flink's fault tolerance and flatter its number.
-"""
 
 [volumes]
 # Named volumes only, never host bind mounts: Docker Desktop shares bind-mounted
@@ -88,9 +75,8 @@ omitting it would silently remove Flink's fault tolerance and flatter its number
 # checkpoint directory — one of the things under measurement.
 named = ["spate-bench-flink-cp:/opt/flink/checkpoints"]
 
-# Flink's OWN vocabulary. Sending the Spate arm's variable names would leave
-# Flink on its defaults while the record claimed knob values that were never
-# applied — a silent misreport rather than a visible failure.
+# Flink's own vocabulary. Sending another arm's variable names would leave Flink
+# on its defaults while the record claimed knob values that were never applied.
 [env]
 TIER                    = "{{tier}}"
 TOPIC                   = "{{topic}}"
@@ -102,7 +88,40 @@ CLICKHOUSE_URL          = "{{clickhouse_internal}}"
 JOB_MANAGER_RPC_ADDRESS = "{{container:jm}}"
 SINK_LINGER_MS          = "{{knob:linger_ms}}"
 SINK_MAX_BATCH_ROWS     = "{{knob:max_rows}}"
+SINK_MAX_BUFFERED_ROWS  = "{{knob:buffered_rows}}"
 SINK_MAX_IN_FLIGHT      = "{{knob:inflight}}"
+
+# Parallelism, through the official image's own configuration contract. Both
+# variables are fed to Flink's `bin/config-parser-utils.sh`, which rewrites the
+# entry in `config.yaml` in place — so the value in force is a real `config.yaml`
+# entry a reviewer can read out of the running container. One knob drives both
+# keys because they are one decision: with a single TaskManager, a subtask needs
+# a slot, so parallelism above the slot count does not schedule and slots above
+# the parallelism are reserved and idle.
+FLINK_PROPERTIES                  = "parallelism.default: {{knob:parallelism}}"
+TASK_MANAGER_NUMBER_OF_TASK_SLOTS = "{{knob:parallelism}}"
+
+# The assertion, not the setting. `ComparisonJob` compares this against the
+# parallelism the cluster actually resolved and refuses the job if they differ,
+# so a cell that silently ran at the wrong width fails loudly instead of
+# producing a plausible number.
+EXPECT_PARALLELISM = "{{knob:parallelism}}"
+
+# `AsyncSinkWriter` requires its buffered-request bound to be strictly greater
+# than its batch size, so `buffered_rows = max_rows` is not a slow configuration
+# but a job that will not start. Declared here so the driver refuses it before
+# any container starts; `ComparisonJob` keeps its own copy of the check, because
+# the image can also be run by hand.
+[[constraints]]
+knob    = "buffered_rows"
+exceeds = "max_rows"
+why     = """
+Flink's AsyncSinkWriter requires maxBufferedRequests > maxBatchSize and refuses
+to construct otherwise, so the job fails at submission rather than running
+slowly. Raise buffered_rows with max_rows: it is also the bound on checkpoint
+state, since the sink checkpoints its buffered entries, and on retained payload
+memory across every subtask.
+"""
 
 [[variants]]
 id       = "tier-a"
@@ -111,14 +130,8 @@ tier     = "a"
 approach = "realistic"
 default  = true
 env      = { DESER = "shipped" }
-knobs    = { linger_ms = 1000, max_rows = 25000, inflight = 2 }
+knobs    = { parallelism = 4, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
 reports  = { wire_format = "rowbinary_nt" }
-notes = """
-ClickHouse's official Flink connector forces RowBinaryWithNamesAndTypes: the
-Java client has no Native writer (clickhouse-java#2509, open). That is a gap in
-the Java client, not a Flink deficiency, and the page says so — it is not a win
-we claim.
-"""
 
 [[variants]]
 id       = "tier-b"
@@ -126,38 +139,21 @@ label    = "Flink 2.2.1 · RowBinary · tier B"
 tier     = "b"
 approach = "realistic"
 env      = { DESER = "shipped" }
-knobs    = { linger_ms = 1000, max_rows = 25000, inflight = 2 }
+knobs    = { parallelism = 4, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
 reports  = { wire_format = "rowbinary_nt" }
 
+# A secondary arm quantifying what Flink's shipped Avro deserializer costs.
+# `unshipped` is what makes the `stripped` label enforceable rather than
+# conventional: validation refuses any variant naming a non-shipped component
+# that is not labelled `stripped`. Its knobs are identical to `tier-a`'s, because
+# the arm exists to isolate one deserializer and any other difference would put a
+# second variable in the delta.
 [[variants]]
-id       = "tier-a-reusing"
-label    = "Flink 2.2.1 · reusing deserializer"
-tier     = "a"
-# `stripped`, so the site never shows this as the headline. This is the
-# anti-gaming valve working in Flink's favour rather than against it.
-approach = "stripped"
-env      = { DESER = "reusing" }
-knobs    = { linger_ms = 1000, max_rows = 25000, inflight = 2 }
-reports  = { wire_format = "rowbinary_nt" }
-notes = """
-ReusingAvroDeserializationSchema is code WE wrote; Flink does not ship it, so
-rule 1 bars it from the headline. Published as a secondary arm because the delta
-quantifies what Flink's shipped deserializer costs — it allocates a fresh
-GenericData.Record plus Utf8/ByteBuffer fields per message — and rule 2 obliges
-us to state that the cost is avoidable in about twenty lines rather than publish
-a beatable number in silence. A pro-Flink disclosure, never a competing headline.
-"""
-
-[[deviations]]
-id      = "control-plane-outside-data-plane-budget"
-what    = "The JobManager receives 1 CPU / 2 GiB in ADDITION to the 4 CPU / 16 GiB data-plane envelope."
-why     = """
-Charging a whole JobManager against a single TaskManager is an artefact of
-running one TaskManager; in production one JobManager serves an entire cluster.
-Measurement bears this out — the JobManager consumed 0.03 cores, so charging it a
-full core would have taxed Flink roughly 33x its real cost and the resulting
-"win" would have been an artefact of our own accounting. Its measured
-consumption is published instead, and every arm reports its data-plane figure
-alongside its total so a reader who prefers the stricter rule can apply it.
-"""
-affects = ["envelope"]
+id        = "tier-a-reusing"
+label     = "Flink 2.2.1 · reusing deserializer"
+tier      = "a"
+approach  = "stripped"
+unshipped = ["ReusingAvroDeserializationSchema"]
+env       = { DESER = "reusing" }
+knobs     = { parallelism = 4, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
+reports   = { wire_format = "rowbinary_nt" }

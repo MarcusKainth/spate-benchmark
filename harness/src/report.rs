@@ -22,9 +22,10 @@
 //!   compared across machines.
 //! - [`RunMeta::harness_version`] / [`RunMeta::dataset_version`] — the two
 //!   quantities that invalidate an entire result set.
+//! - [`RunMeta::invocation_id`] — which sitting a record belongs to, so
+//!   repetitions can be grouped exactly rather than by the day they landed on.
 //! - [`Status`] — so "we ran it and it failed the headroom gate" is
 //!   distinguishable from "we never ran it".
-//! - [`Report::superseded_by`] — retraction without deletion.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -42,15 +43,15 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// place them on one axis rather than averaging across the change.
 ///
 /// Bump when the protocol changes in a way that **moves numbers**: the
-/// steady-state detector, the drain protocol, sampler interval semantics, the
-/// gate set, envelope enforcement. Do **not** bump for a log message, a
-/// refactor, or a new field that no measurement depends on.
+/// definition of the measurement window, the drain protocol, sampler interval
+/// semantics, the gate set, envelope enforcement. Do **not** bump for a log
+/// message, a refactor, or a new field that no measurement depends on.
 ///
 /// Hand-maintained rather than derived, deliberately. "Did this change move
 /// numbers?" is a judgement; a content hash would answer yes to every typo fix
-/// and shatter every comparability group in the archive. `METHODOLOGY.md`
+/// and shatter every comparability group in the archive. `methodology/`
 /// carries a row per version and CI asserts the two stay in step.
-pub const HARNESS_VERSION: u32 = 1;
+pub const HARNESS_VERSION: u32 = 2;
 
 /// Version of the **corpus**: the Avro schema, the ClickHouse DDL, and the
 /// generator constants.
@@ -102,8 +103,26 @@ impl Status {
     }
 }
 
-/// What caused a run to happen. Recorded so a PR-triggered measurement on
-/// untrusted code can never be mistaken for a published one.
+/// What caused a run to happen. Recorded so a measurement taken for a reason
+/// that bars publication can never be mistaken for a published one.
+///
+/// # Two of these mean "never published", and that is now enforced
+///
+/// [`Trigger::Pr`] has carried the words "Never published" since schema 2 was
+/// written, and nothing set it and nothing refused it. A second field,
+/// `Flag::PrRun`, carried the same words and was likewise set by nothing and
+/// filtered by nothing. That is the state this type exists in the archive to
+/// prevent: a vocabulary for an intention, with no enforcement anywhere, which
+/// reads to the next person as though the rule is already in force.
+///
+/// `Flag::PrRun` is gone rather than wired, and the argument is that it restated
+/// this field and added nothing. `trigger` is mandatory on every record and
+/// typed; a flag derived from it is a second place to look and a second place to
+/// forget, and the two could disagree. No committed record ever carried
+/// `pr_run`, so removing it costs the archive nothing. What replaces both is
+/// [`Trigger::bars_publication`] — one predicate, on the field that is already
+/// required, checked by `validate::results_are_valid` so that committing such a
+/// record fails the build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Trigger {
@@ -111,10 +130,65 @@ pub enum Trigger {
     Nightly,
     /// Invoked by hand.
     Manual,
-    /// Produced by a pull request. Never published.
+    /// Produced by a pull request, on code nobody has reviewed. Never published.
     Pr,
+    /// A **configuration search**: dozens of measurements taken to find out
+    /// which knob setting an arm should be published at. Never published.
+    ///
+    /// A distinct trigger rather than a reuse of [`Trigger::Pr`], and the reason
+    /// is that they are different causes with different lifetimes. A PR run
+    /// happens in CI on untrusted code; a tuning sweep happens on the reference
+    /// rig, by hand, on code that is already committed, and its numbers are
+    /// *good* numbers — they are simply not the arm's published configuration.
+    /// Folding one into the other would leave `pr` meaning "unpublishable for
+    /// some reason", which is what a status or a flag is for, and would make
+    /// "which of these came out of CI?" unanswerable afterwards.
+    ///
+    /// It is not an addition to unenforced vocabulary, because the same change
+    /// that added it enforced both members: `bench validate` refuses any record
+    /// whose trigger bars publication, so the archive cannot contain one.
+    ///
+    /// What a search concludes on is a **descriptor**: the knob values it
+    /// settled on, declared where the driver reads them, and re-measured as an
+    /// ordinary run. A search left as fifty committed records says only "here
+    /// are fifty numbers", and invites exactly the failure this suite cannot
+    /// afford — running until the number is liked, and then recording that one.
+    Tuning,
     /// Pinned to a release of the system under test.
     Release,
+}
+
+impl Trigger {
+    /// The marker a record produced under this trigger must carry, if any.
+    ///
+    /// Shaped like `Environment::publication_bar` on purpose: the driver
+    /// prefixes the record's `note` with whichever of the two applies, so a
+    /// record that must never be published says so in its own prose as well as
+    /// in a typed field, and a person reading one line of JSONL sees it without
+    /// knowing the schema.
+    #[must_use]
+    pub fn publication_bar(self) -> Option<&'static str> {
+        match self {
+            Self::Pr => Some("pull-request run on unreviewed code, never published"),
+            Self::Tuning => Some(
+                "TUNING RUN: a point in a configuration search, never published — the \
+                 search belongs in a document with its rejected points, not in results/",
+            ),
+            Self::Nightly | Self::Manual | Self::Release => None,
+        }
+    }
+
+    /// Whether a record produced under this trigger may reach `results/`.
+    ///
+    /// The single authority, in the same sense [`Status::carries_metrics`] is
+    /// one: the validator, the driver's banner and the driver's note prefix all
+    /// ask this rather than each matching on the variants, so a trigger added
+    /// later cannot be unpublishable in one of the three and publishable in the
+    /// other two.
+    #[must_use]
+    pub fn bars_publication(self) -> bool {
+        self.publication_bar().is_some()
+    }
 }
 
 /// A machine-readable caveat. `note` is prose for humans; these are filterable.
@@ -123,14 +197,59 @@ pub enum Trigger {
 pub enum Flag {
     /// The arm hit its cgroup CPU cap during the measurement window.
     CpuCapThrottled,
-    /// No ceiling measurement was available to gate against.
+    /// No ceiling measurement was available to gate against, or no ceiling
+    /// applies to this arm's insert format.
+    ///
+    /// Both halves matter, and the second was added when the ClickHouse ingest
+    /// ceiling arrived. That ceiling is measured **per insert format and per
+    /// tier**, because Native, RowBinary and `JSONEachRow` are not the same
+    /// amount of server-side work; an arm whose format has no measured figure is
+    /// therefore deliberately not gated against the target at all rather than
+    /// gated against another format's number. See `crate::ceiling`.
+    ///
+    /// The flag exists so that "we did not gate this arm" can never be read as
+    /// "this arm cleared the gate". A record whose status is [`Status::Ok`] and
+    /// whose share sat comfortably below the limit against the one ceiling that
+    /// was checked is a different claim from one that was held to every ceiling
+    /// `methodology/` names, and a consumer has to be able to tell them apart
+    /// without reading prose.
     HeadroomUnproven,
     /// A sustained arm could not keep up with the offered rate.
+    ///
+    /// A flag and not a [`Status`], deliberately. `methodology/` is explicit
+    /// that such a point "is a genuine ceiling measurement": the arm consumed at
+    /// its capacity for the whole window, and its throughput, CPU and footprint
+    /// figures are exactly as sound as any other sustained record's. Demoting it
+    /// to [`Status::Failed`] would throw away the one number a saturating host
+    /// is best placed to produce.
+    ///
+    /// What is *not* sound is its latency. Once the arm is behind, the gap
+    /// between a row's scheduled send time and its `ingest_ts` is dominated by
+    /// how far the backlog had grown by then, so the distribution describes
+    /// backlog age and grows without bound for as long as the window is held —
+    /// it is a property of how long we ran the experiment, not of the pipeline.
+    /// The driver therefore does three things at once and none of them alone:
+    /// it sets this flag, it leads the record's `note` with the warning, and it
+    /// publishes the figures under `backlog_age_*` metric keys instead of
+    /// `latency_*`. The third is the one that cannot be ignored by accident — a
+    /// consumer plotting `latency_p99_us` finds no such metric on a saturated
+    /// record rather than finding a number it has no reason to distrust, and a
+    /// median taken across repetitions cannot mix the two quantities under one
+    /// name. See `driver::Sustained`.
     Saturated,
-    /// Produced by a pull-request run on untrusted code. Never published.
-    PrRun,
     /// Produced on hardware we do not control.
     ThirdPartyHardware,
+    /// Produced in an environment whose class bars publication — a `fixture`
+    /// profile, whose data is synthetic.
+    ///
+    /// Distinct from [`Flag::ThirdPartyHardware`], which is a claim about
+    /// *hardware we do not control*. A fixture run happens on our own machine
+    /// and the objection to it is the data, not the host. The driver used to
+    /// conflate the two: it set `ThirdPartyHardware` on fixture runs and on
+    /// nothing else, so the one flag meaning "not our hardware" was applied
+    /// exclusively to runs on our hardware, and the record made a false
+    /// provenance claim in place of a true worthlessness claim.
+    UnpublishableEnvironment,
     /// Infrastructure containers were reused rather than recreated.
     ReusedInfra,
 }
@@ -194,6 +313,32 @@ impl Metric {
     /// while emitting the same unit string.
     pub fn bytes_per_s(bytes_per_s: f64) -> Self {
         Self::maximize(bytes_per_s / 1e6, "MB/s")
+    }
+
+    /// A dimensionless **fraction**, where 1.0 is the whole — `kept_up_share`
+    /// being the first of them.
+    ///
+    /// A ratio still needs a unit string, and it needs its own rather than
+    /// borrowing one, for the reason `ALLOWED_UNITS` exists: the unit is the
+    /// only thing that tells a consumer what to do with a number, and the site's
+    /// formatter branches on it. A share tagged `"records/s"` because that was
+    /// the nearest allowed string would be rendered with an SI suffix and read
+    /// as a rate; a share left untagged would fall through whichever branch a
+    /// formatter ends on. That seam has already produced one published defect —
+    /// a value in megabytes tagged `"bytes"` rendered 1010 MB as "1.0 KB" — and
+    /// [`Metric::bytes`] exists because of it.
+    ///
+    /// **Never scaled by a consumer.** `0.62` means 62%, and a formatter that
+    /// multiplies it by anything is wrong. Rendering it as a percentage is a
+    /// display choice; changing the stored value is not.
+    ///
+    /// `higher_is_better`, because these are shares of a target that is being
+    /// aimed at rather than avoided. A value above 1.0 is legitimate and is not
+    /// clamped: for `kept_up_share` it means the arm consumed faster than the
+    /// producer offered over the window, i.e. it was clearing a backlog, which
+    /// is information a reader wants rather than an error to be tidied to 1.0.
+    pub fn share(share: f64) -> Self {
+        Self::maximize(share, "ratio")
     }
 
     /// Attaches a 95% confidence interval.
@@ -284,9 +429,45 @@ pub struct Infra {
     pub partitions: i32,
     /// Schema Registry implementation, e.g. `redpanda-builtin`.
     pub registry: String,
-    /// The measured consume ceiling this run was gated against. `0` means no
-    /// ceiling was available, which sets [`Flag::HeadroomUnproven`].
+    /// The measured consume ceiling this run was gated against, in **messages**
+    /// per second. `0` means no ceiling was available, which sets
+    /// [`Flag::HeadroomUnproven`].
     pub ceiling_msgs_per_s: u64,
+    /// The same consume ceiling in **bytes** per second.
+    ///
+    /// Both, because neither transfers on its own. A messages-per-second figure
+    /// does not survive a change of message size, and `crate::ceiling` records
+    /// what that cost: a ceiling measured against 840-byte messages was kept as
+    /// the denominator after the corpus grew to 4056, which asserted a byte rate
+    /// 4.8x the one the rig had actually sustained. A byte rate alone cannot be
+    /// compared against an arm whose work is per message. A record carrying only
+    /// one of the two cannot be audited for that mistake after the fact, which
+    /// is exactly the position the archive was in when it was found.
+    ///
+    /// Additive: [`SCHEMA_VERSION`] stays at 2 and this is `#[serde(default)]`,
+    /// so every record already committed still deserialises, with a zero a
+    /// consumer reads as "not stated".
+    #[serde(default)]
+    pub ceiling_bytes_per_s: u64,
+    /// The ClickHouse ingest ceiling this arm was actually gated against, in
+    /// rows per second. `0` means none applies to its insert format.
+    ///
+    /// Per **arm** rather than per run, unlike every other field on this type,
+    /// and the exception is forced by what the ceiling is: it is measured per
+    /// insert format and per tier, so a single figure for the whole sweep would
+    /// gate every arm against work it does not do — and would err leniently for
+    /// exactly the arms whose format is cheapest server-side. `crate::infra`
+    /// therefore leaves this zero, because bringing infrastructure up happens
+    /// before any arm is known, and `driver::measure` fills it in on each
+    /// record, where the arm's declared `wire_format` is.
+    ///
+    /// `0` is "not gated against the target" — a visible gap rather than a
+    /// cleared gate, and the same condition that raises
+    /// [`Flag::HeadroomUnproven`].
+    ///
+    /// Additive on the same terms as [`Self::ceiling_bytes_per_s`].
+    #[serde(default)]
+    pub ceiling_rows_per_s: u64,
 }
 
 /// Provenance for a run: when, where, under what protocol, on what data.
@@ -294,6 +475,23 @@ pub struct Infra {
 pub struct RunMeta {
     /// Unix epoch milliseconds at which the record was built.
     pub ts_ms: u64,
+    /// The `bench run` invocation that produced this record — one UUIDv7 minted
+    /// per sweep and written identically onto every record that sweep appends.
+    ///
+    /// A sitting is the unit repetitions belong to: three repetitions of one arm
+    /// are comparable because one invocation produced them under one set of
+    /// conditions. Nothing in schema 2 said so, and the site approximated it by
+    /// UTC calendar day — which splits a sweep that straddles midnight into two
+    /// published rows, and merges two sweeps run on the same day into one row
+    /// captioned as run-to-run spread. Both are silent, and the second is the
+    /// worse of the two because it presents a configuration change as noise.
+    ///
+    /// Additive: [`SCHEMA_VERSION`] stays at 2 and this is `#[serde(default)]`,
+    /// so every record already committed still deserialises, with an empty id
+    /// that a consumer reads as "not stated" and falls back to the old
+    /// approximation for.
+    #[serde(default)]
+    pub invocation_id: String,
     /// Interned hardware profile — the file stem in `environments/`.
     pub env_id: String,
     /// Content hash of the resolved environment profile, so a later edit to
@@ -315,12 +513,24 @@ pub struct RunMeta {
 /// The static half of [`RunMeta`], resolved once per process.
 struct StaticMeta {
     commit: Option<String>,
+    invocation_id: String,
 }
 
+/// Provenance that is fixed for the life of the process.
+///
+/// The invocation id is minted here rather than passed down from `bench run`
+/// deliberately. One process is one sweep, so a `OnceLock` makes it impossible
+/// for two records of the same invocation to disagree and impossible for a new
+/// call site to forget to thread it through — which is the only way this field
+/// can fail, and it fails silently.
+///
+/// UUIDv7 rather than v4 so that sittings sort by time in the same way
+/// [`Report::run_id`] does.
 fn static_meta() -> &'static StaticMeta {
     static META: OnceLock<StaticMeta> = OnceLock::new();
     META.get_or_init(|| StaticMeta {
         commit: detect_commit(),
+        invocation_id: uuid::Uuid::now_v7().to_string(),
     })
 }
 
@@ -361,6 +571,7 @@ impl RunMeta {
     ) -> Self {
         Self {
             ts_ms: now_ms(),
+            invocation_id: static_meta().invocation_id.clone(),
             env_id: env_id.into(),
             env_digest: env_digest.into(),
             harness_version: HARNESS_VERSION,
@@ -370,19 +581,6 @@ impl RunMeta {
             infra,
         }
     }
-}
-
-/// A retraction. The record it is attached to stays in the archive and stays
-/// visible on the site, struck through with `reason` shown.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Superseded {
-    /// `run_id` of the replacement, when there is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub by: Option<String>,
-    /// Why the original number should not be believed. Rendered to readers.
-    pub reason: String,
-    /// When the retraction was recorded.
-    pub ts_ms: u64,
 }
 
 /// One emitted measurement record.
@@ -420,9 +618,6 @@ pub struct Report {
     /// Machine-readable caveats.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<Flag>,
-    /// Set by a *later* commit when this record is retracted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub superseded_by: Option<Superseded>,
 }
 
 impl Report {
@@ -448,7 +643,6 @@ impl Report {
             metrics: BTreeMap::new(),
             note: None,
             flags: Vec::new(),
-            superseded_by: None,
         }
     }
 
@@ -532,6 +726,8 @@ mod tests {
             partitions: 8,
             registry: "redpanda-builtin".to_owned(),
             ceiling_msgs_per_s: 305_554,
+            ceiling_bytes_per_s: 256_700_000,
+            ceiling_rows_per_s: 3_100_000,
         }
     }
 
@@ -569,9 +765,74 @@ mod tests {
     fn optional_fields_are_omitted_when_absent() {
         let line = report().to_line().expect("serialize");
         assert!(!line.contains("note"), "{line}");
-        assert!(!line.contains("superseded_by"), "{line}");
         assert!(!line.contains("flags"), "{line}");
         assert!(line.contains(r#""status":"ok""#), "{line}");
+    }
+
+    /// A sitting has to be identifiable exactly. Every record one invocation
+    /// writes carries the same id, so a consumer can group repetitions without
+    /// approximating the sweep by the calendar day it landed on.
+    #[test]
+    fn every_record_of_one_invocation_carries_the_same_invocation_id() {
+        let a = report();
+        let b = report();
+        assert!(!a.run.invocation_id.is_empty());
+        assert_eq!(a.run.invocation_id, b.run.invocation_id);
+        // Distinct from the per-record id, which must still differ.
+        assert_ne!(a.run_id, b.run_id);
+        assert_ne!(a.run.invocation_id, a.run_id);
+    }
+
+    /// The additive half of the change: `SCHEMA_VERSION` stays at 2, so a record
+    /// written before the field existed must still load — as "not stated"
+    /// rather than as a parse error that would make the archive unreadable.
+    #[test]
+    fn a_record_written_without_an_invocation_id_still_loads() {
+        let line = report().to_line().expect("serialize");
+        let mut v: Value = serde_json::from_str(&line).expect("parse");
+        v.get_mut("run")
+            .and_then(|r| r.as_object_mut())
+            .expect("a record carries a run object")
+            .remove("invocation_id")
+            .expect("the field was written");
+        let older = serde_json::to_string(&v).expect("re-serialize");
+
+        let back: Report = serde_json::from_str(&older).expect("an older record deserialises");
+        assert!(back.run.invocation_id.is_empty());
+    }
+
+    /// The second consume ceiling and the ClickHouse one are additions to a
+    /// schema that stays at 2, so the eight-arm dataset already committed has to
+    /// keep loading — as "not stated" rather than as a parse error that would
+    /// make the archive unreadable.
+    ///
+    /// A zero read as "not stated" is safe here for the same reason it is safe
+    /// on a live record: zero already means "not gated against this ceiling",
+    /// which is the conservative reading, and [`Flag::HeadroomUnproven`] is what
+    /// distinguishes it from a gate that was cleared.
+    #[test]
+    fn a_record_written_before_the_second_ceiling_existed_still_loads() {
+        let line = report().to_line().expect("serialize");
+        let mut v: Value = serde_json::from_str(&line).expect("parse");
+        let infra = v
+            .get_mut("run")
+            .and_then(|r| r.get_mut("infra"))
+            .and_then(|i| i.as_object_mut())
+            .expect("a record carries an infra object");
+        infra
+            .remove("ceiling_bytes_per_s")
+            .expect("the field was written");
+        infra
+            .remove("ceiling_rows_per_s")
+            .expect("the field was written");
+        let older = serde_json::to_string(&v).expect("re-serialize");
+
+        let back: Report = serde_json::from_str(&older).expect("an older record deserialises");
+        assert_eq!(back.run.infra.ceiling_bytes_per_s, 0);
+        assert_eq!(back.run.infra.ceiling_rows_per_s, 0);
+        // The figure that was always there is untouched, so an old record is
+        // still gated-against-something rather than gated-against-nothing.
+        assert_eq!(back.run.infra.ceiling_msgs_per_s, 305_554);
     }
 
     #[test]
@@ -601,10 +862,60 @@ mod tests {
         assert!((m.value - 1.048576).abs() < 1e-12);
     }
 
+    /// A dimensionless share still carries a unit of its own, because the unit
+    /// is what a consumer's formatter branches on. `validate::ALLOWED_UNITS` has
+    /// to carry `"ratio"` or every sustained record fails validation — that
+    /// coupling is deliberate and is why adding a unit is a deliberate act.
+    #[test]
+    fn a_share_is_a_fraction_of_one_and_is_never_rescaled() {
+        let m = Metric::share(0.62);
+        assert_eq!(m.unit, "ratio");
+        assert!(m.higher_is_better, "a share of a target is aimed at");
+        assert!((m.value - 0.62).abs() < f64::EPSILON, "{}", m.value);
+
+        // Not clamped at 1.0. An arm that cleared a backlog inside the window
+        // consumed more than was offered over it, and saying so is information
+        // rather than an error to be tidied away.
+        assert!((Metric::share(1.04).value - 1.04).abs() < f64::EPSILON);
+    }
+
     #[test]
     fn direction_travels_with_the_number() {
         assert!(Metric::maximize(1.0, "records/s").higher_is_better);
         assert!(!Metric::minimize(1.0, "ns").higher_is_better);
+    }
+
+    /// The predicate the validator, the driver's banner and the driver's note
+    /// prefix all defer to. Enumerated exhaustively rather than spot-checked, so
+    /// that a trigger added later has to decide which side of the line it is on
+    /// here rather than defaulting to publishable by omission.
+    #[test]
+    fn a_trigger_that_bars_publication_says_so_in_exactly_one_place() {
+        for t in [Trigger::Pr, Trigger::Tuning] {
+            assert!(t.bars_publication(), "{t:?}");
+            assert!(
+                t.publication_bar().is_some_and(|b| !b.trim().is_empty()),
+                "{t:?} bars publication but says nothing a reader could act on"
+            );
+        }
+        for t in [Trigger::Nightly, Trigger::Manual, Trigger::Release] {
+            assert!(!t.bars_publication(), "{t:?}");
+            assert_eq!(t.publication_bar(), None, "{t:?}");
+        }
+    }
+
+    /// A tuning sweep is not a pull-request run, and the record has to be able to
+    /// say which it was. Conflating them would leave `pr` meaning "unpublishable
+    /// for some reason" and make "which of these came out of CI?" unanswerable.
+    #[test]
+    fn a_tuning_run_and_a_pull_request_run_are_distinguishable_in_the_record() {
+        let tuning = serde_json::to_string(&Trigger::Tuning).expect("serialize");
+        let pr = serde_json::to_string(&Trigger::Pr).expect("serialize");
+        assert_eq!(tuning, r#""tuning""#);
+        assert_ne!(tuning, pr);
+
+        let back: Trigger = serde_json::from_str(&tuning).expect("deserialize");
+        assert_eq!(back, Trigger::Tuning);
     }
 
     #[test]

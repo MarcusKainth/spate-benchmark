@@ -12,15 +12,68 @@
 //! It also makes this arm symmetric with the Flink arm, which owns its own
 //! `SensorRow.java` and `Rows.java` for exactly the same reason.
 //!
-//! The flatten itself is *pipeline logic*, which METHODOLOGY.md rule 1 assigns
+//! The flatten itself is *pipeline logic*, which methodology/ rule 1 assigns
 //! to the arm: every system writes this, and writing it well is expected.
 
 use apache_avro::types::Value as AvroValue;
 use etl_clickhouse::{DateTime64Micros, DateTime64Millis};
 use serde::Serialize;
-use spate_benchmark_harness::corpus::{
-    DROP_UNIT, QUALITY_FLOOR, SensorBatch, ascii_upper, value_scaled_of,
-};
+// `SensorBatch` only, and the line is worth explaining because what is NOT
+// imported here is the point.
+//
+// `SensorBatch` is the **wire contract**: the Avro schema every arm reads off the
+// same registry, which the Flink arm parses from the same committed `.avsc`.
+// Sharing a decoder for it shares nothing an arm is supposed to write.
+//
+// The tier-B transform used to be imported from the same module, and that was a
+// structural fairness defect rather than a convenience. `corpus` is the ORACLE —
+// it computes the closed-form expectations the correctness gate holds every arm
+// to. An arm importing `ascii_upper` and `value_scaled_of` from the oracle cannot
+// disagree with the marking scheme by construction, while the Flink arm, which
+// reimplements both in Java, can. So changing the oracle's uppercase to something
+// Unicode-aware would have moved this arm silently and failed a gate Flink should
+// have passed. The gate's guarantee was one-sided in the author's favour.
+//
+// METHODOLOGY settles whose job this is: pipeline logic — the flatten, the tier-B
+// filter, the derived columns — "is user code in every system, and every arm
+// writes them". This arm now writes them, below, and
+// `harness/tests/each_arm_restates_the_transform.rs` pins both arms' restatements
+// against the workload definition so a change to it cannot re-specify one arm and
+// not the other.
+use spate_benchmark_harness::corpus::SensorBatch;
+
+/// The `unit` value tier B drops, restated for this arm.
+///
+/// Specified by `workload/workload.toml`'s `drop_unit`, which is hashed into
+/// `dataset_version` — so the *value* is specification, and restating it is what
+/// makes a change to the specification fail loudly in every arm at once instead
+/// of flowing silently into one. The Flink arm restates the same constant in
+/// `Rows.java`; a test holds both to the workload.
+const DROP_UNIT: &str = "drop";
+
+/// The tier-B quality floor, restated for this arm. See [`DROP_UNIT`].
+const QUALITY_FLOOR: f64 = 0.2;
+
+/// ASCII-only uppercase, this arm's own.
+///
+/// The contract specifies ASCII-only rather than "uppercase" because Java's
+/// `String.toUpperCase()` is locale-dependent and even `toUpperCase(Locale.ROOT)`
+/// is Unicode-aware — it maps `ß` to `SS` and `ı` to `I` — so "uppercase" alone
+/// would not be the same operation in every language. `str::to_ascii_uppercase`
+/// folds exactly `a-z`, which is the specified operation.
+fn ascii_upper(s: &str) -> String {
+    s.to_ascii_uppercase()
+}
+
+/// `value_scaled = value * 1000 / (event_seq + 1)`, truncating toward zero.
+///
+/// `i64` throughout, deliberately: `value` runs to `2^31 - 1`, so `value * 1000`
+/// reaches ~2.1e12 and overflows 32 bits. Rust's `/` on integers truncates toward
+/// zero and `value` is non-negative by construction, so the truncation matches
+/// the contract without a rounding mode to argue about.
+fn value_scaled(value: i64, seq: u32) -> i64 {
+    value * 1000 / i64::from(seq + 1)
+}
 
 // ---------------------------------------------------------------------------
 // Output rows. Field order IS the wire contract for RowBinary and Native, and
@@ -196,7 +249,7 @@ pub fn flatten_typed_b<F: FnMut(RowB)>(b: &SensorBatch, mut emit: F) {
             name_upper: ascii_upper(&ev.name),
             unit: ev.unit.clone(),
             value: ev.value,
-            value_scaled: value_scaled_of(ev.value, seq),
+            value_scaled: value_scaled(ev.value, seq),
             quality: ev.quality,
             tags: ev.tags.clone(),
             batch_ts: DateTime64Millis(b.batch_ts_ms),
@@ -277,7 +330,7 @@ pub fn flatten_value_b<F: FnMut(RowB)>(v: &AvroValue, mut emit: F) {
             name_upper: ascii_upper(as_str(&e[1].1)),
             unit: unit.to_owned(),
             value,
-            value_scaled: value_scaled_of(value, seq),
+            value_scaled: value_scaled(value, seq),
             quality,
             tags: as_tags(&e[5].1),
             batch_ts: DateTime64Millis(batch_ts_ms),

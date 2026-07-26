@@ -85,13 +85,17 @@ pub fn attach_to_network(container: &str) {
     }
 }
 
-/// A `--memory`/`--memory-swap` pair from `var`, falling back to `default`.
-/// An empty resolved value yields no flags at all (uncapped).
+/// Runs one statement against ClickHouse over HTTP, returning its body.
 ///
-/// Both flags are always set to the same value: with swap left at its default a
-/// container over its memory cap silently swaps instead of feeling pressure, so
-/// a footprint measurement would record the cap being respected while the real
-/// cost moved somewhere we are not looking.
+/// The fallible counterpart to [`clickhouse_sql`], which asserts on a
+/// `DB::Exception`. Callers that run a query whose failure is *survivable* — a
+/// disabled system table, a server-side figure that is nice to have — must use
+/// this one: a panic here takes a thirty-hour sweep down over a measurement the
+/// run could have proceeded without.
+///
+/// # Errors
+///
+/// If the request cannot be made, or the server answers with an exception.
 pub fn try_clickhouse_sql(
     host: &str,
     port: u16,

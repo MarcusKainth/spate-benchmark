@@ -16,9 +16,9 @@ response to one is to make it impossible to hide:
   site.
 - **No published number is reported by the system that produced it.** Throughput
   is `SELECT count()` against ClickHouse; CPU and memory are cgroup v2 counters
-  read by a sidecar container; latency is computed inside ClickHouse from a
-  materialized ingest timestamp. A framework's own metrics are available for
-  debugging and are never read as results.
+  read by a sidecar container; correctness is a query against the rows that
+  actually landed. A framework's own metrics are available for debugging and are
+  never read as results.
 - Every competitor configuration is in this repository, in full, and we intend to
   send them upstream and ask whether we handicapped anyone. Whatever comes back
   gets linked — including "they told us to change X and we did".
@@ -49,9 +49,10 @@ across them rather than quietly averaging:
 Softer differences — a ClickHouse patch release, a compiler version — are
 recorded and shown as a footnote rather than treated as disqualifying.
 
-**Results are never deleted.** A run found to be wrong is retracted by appending
-a `superseded_by` marker; the record stays visible, struck through, with the
-reason. Re-running one system does not re-run or overwrite any other.
+**`bench run` only appends.** There is no code path in it that truncates a results
+file. A number later found to be wrong is corrected by editing the archive in a
+commit of its own, so the change is in the repository's history. Re-running one
+system does not re-run or overwrite any other.
 
 ## Current state
 
@@ -64,6 +65,7 @@ having to be remembered.
 ## Repository layout
 
 ```
+methodology/   the fairness contract. Normative, in four parts.
 harness/       the driver and the `bench` CLI. Has no dependency on any entrant.
 entrants/      one directory per system. Adding a system touches nothing else.
 workload/      the one canonical workload: Avro schema, ClickHouse DDL, generator.
@@ -72,21 +74,28 @@ results/       append-only JSONL, partitioned by environment and system.
 website/       the published site.
 ```
 
-**[METHODOLOGY.md](METHODOLOGY.md) is normative.** Every implementation here,
-including Spate's own, conforms to it. If it is ambiguous, that is a bug in the
-document — say so rather than guessing.
+**[methodology/](methodology/) is normative.** Every implementation here,
+including Spate's own, conforms to it. It is the complete specification for an
+arm — [the rules](methodology/README.md), [the resource
+envelope](methodology/envelope.md), [how you are
+measured](methodology/measurement.md), and [what makes two numbers
+comparable](methodology/comparability.md). If it is ambiguous, that is a bug in
+the document — say so rather than guessing.
 
 ## Running it
 
 ```sh
 bench list                      # systems, variants, and when each was last measured
 bench validate                  # what CI checks, runnable locally
+bench stale                     # arms whose measurement has fallen behind
+bench build '*'                 # build the selected entrants' images
 bench prefill                   # populate the topic once per corpus
-bench ceiling                   # prove the infrastructure is not the bottleneck
+bench ceiling                   # report the ceilings, and refuse if none is gateable
+bench ceiling --measure --write # re-measure them against this corpus and record it
 bench run '*' --reps 3          # every arm, interleaved
 bench run spate --reps 3        # just one system; nothing else is touched
-bench run --stale --reps 3      # anything whose pinned version has moved on
 bench run '*' --dry-run         # print the plan without running it
+bench run spate --mode sustained --rate 40000    # latency; has to be asked for
 ```
 
 `bench run` only ever appends. There is no code path in it that truncates a

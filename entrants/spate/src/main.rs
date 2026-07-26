@@ -13,7 +13,7 @@
 //!
 //! It also does not report on itself. `metrics.exporter` is `none`: every
 //! published figure comes from the driver's cgroup sampler and from ClickHouse.
-//! `METHODOLOGY.md` is normative.
+//! `methodology/` is normative.
 //!
 //! Env:
 //! - `TIER` (`a`) — `a` is decode/flatten/insert; `b` adds the specified filter
@@ -54,8 +54,11 @@ use spate_benchmark_harness::{env_str, env_u64};
 /// `build.rs` from `Cargo.lock`.
 ///
 /// The driver executes the arm with `--version` and parses this, which is how a
-/// result record comes to name the code it measured. The format is matched by
-/// the `[version].pattern` in `entrant.toml`; changing one means changing both.
+/// result record comes to name the code it measured. `driver::parse_version`
+/// does the reading: the first whitespace token starting with a digit and
+/// containing a dot is the version, a parenthesised hex string is the commit,
+/// and a `toolchain:` line is the compiler. Changing the shape below means
+/// changing that parser.
 fn version_line() -> String {
     format!(
         "spate-arm {} ({})",

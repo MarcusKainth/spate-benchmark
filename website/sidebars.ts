@@ -6,8 +6,13 @@ import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 const sidebars: SidebarsConfig = {
   docs: [
     'index',
-    'methodology',
     'workload',
+    {
+      type: 'category',
+      label: 'The fairness contract',
+      link: {type: 'doc', id: 'contract/rules'},
+      items: ['contract/envelope', 'contract/measurement', 'contract/comparability'],
+    },
     'environments',
     'limitations',
     'roadmap',

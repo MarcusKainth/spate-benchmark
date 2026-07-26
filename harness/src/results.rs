@@ -1,15 +1,16 @@
 //! Writing results, and the one thing this module deliberately cannot do.
 //!
-//! **There is no truncate path here.** Not a guarded one, not a flag-protected
-//! one — the capability does not exist. Retention of published numbers is
-//! enforced by the absence of the operation rather than by anyone remembering
-//! not to use it, because the previous runner script opened its results file
-//! with `>` and silently replaced every earlier run on each invocation.
+//! **No path in this module rewrites a results file.** [`append`] is the only
+//! writer, it opens with `append(true)` and no `truncate`, and there is no
+//! guarded or flag-protected alternative beside it — the capability does not
+//! exist. Retention of published numbers is enforced by the absence of the
+//! operation rather than by anyone remembering not to use it, because the
+//! previous runner script opened its results file with `>` and silently replaced
+//! every earlier run on each invocation.
 //!
-//! A run later found to be wrong is **retracted, not deleted**: [`retract`]
-//! appends a `superseded_by` marker naming the reason, and the site renders the
-//! number struck through with that reason attached. A reader who saw a number
-//! once can always find out what happened to it.
+//! A number later found to be wrong is corrected by editing the archive in a
+//! commit of its own, so the change is visible in the repository's history
+//! rather than in a marker the site has to render.
 //!
 //! Layout is `results/<env_id>/<entrant>/<YYYY-MM>.jsonl`. Two properties follow,
 //! and both matter at scale:
@@ -24,7 +25,44 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::report::{Report, Superseded, now_ms};
+use crate::report::Report;
+
+/// Where records that must never be published are written instead.
+///
+/// Beside `results/` and not inside it, so that no part of the archive has to be
+/// filtered to be trusted. See [`root_for`].
+pub const TUNING_DIR: &str = "tuning";
+
+/// The archive a record produced under `trigger` belongs in.
+///
+/// A tuning sweep produces dozens of real measurements that must never reach a
+/// reader, and the obvious arrangement — append them to `results/` and let
+/// `validate::results_are_valid` refuse the file afterwards — is worse than it
+/// looks. The layout partitions by `(env_id, entrant, month)`, so those records
+/// would land in the *same file* as the arm's published ones, and clearing them
+/// would mean hand-deleting fifty lines out of a file containing numbers that
+/// are published. This module deliberately has no capability to rewrite a
+/// results file, so that hand-edit would happen in an editor, unreviewed, on the
+/// one file where a slip is unrecoverable.
+///
+/// Two smaller consequences make the separation worth having on its own.
+/// [`load_all`] reads `results/`, so `bench stale` and `bench list` would
+/// otherwise report an arm as freshly measured on the strength of a tuning run —
+/// the arm would then never be re-measured at the configuration it publishes.
+/// And the site's loader walks `results/` too.
+///
+/// The validator's refusal stays, and is not made redundant by this: a record
+/// can still reach `results/` by a file being moved, by a hand-written line, or
+/// by a future writer that forgets to ask. Routing decides where the harness
+/// puts one; the refusal decides what the archive is allowed to contain.
+#[must_use]
+pub fn root_for(repo_root: &Path, trigger: crate::report::Trigger) -> PathBuf {
+    if trigger.bars_publication() {
+        repo_root.join(TUNING_DIR)
+    } else {
+        repo_root.join("results")
+    }
+}
 
 /// The file a record belongs in.
 ///
@@ -107,64 +145,6 @@ pub fn load_all(root: &Path) -> std::io::Result<(Vec<Report>, Vec<String>)> {
     Ok((records, problems))
 }
 
-/// Marks a record superseded, in place, without removing it.
-///
-/// Rewrites the one file containing `run_id`, preserving every other line
-/// byte-for-byte. The rewrite is via a temporary file and a rename so an
-/// interrupted retraction cannot leave a half-written archive.
-///
-/// # Errors
-///
-/// If the id is not found, or the file cannot be rewritten.
-pub fn retract(root: &Path, run_id: &str, reason: &str) -> std::io::Result<PathBuf> {
-    let mut files = Vec::new();
-    collect_jsonl(root, &mut files)?;
-    files.sort();
-
-    for path in files {
-        let src = std::fs::read_to_string(&path)?;
-        let mut hit = false;
-        let mut out = String::with_capacity(src.len() + 256);
-        for line in src.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<Report>(line) {
-                Ok(mut r) if r.run_id == run_id => {
-                    hit = true;
-                    r.superseded_by = Some(Superseded {
-                        by: None,
-                        reason: reason.to_owned(),
-                        ts_ms: now_ms(),
-                    });
-                    let l = r
-                        .to_line()
-                        .map_err(|e| std::io::Error::other(format!("serialize: {e}")))?;
-                    out.push_str(&l);
-                    out.push('\n');
-                }
-                // Every other line is copied verbatim rather than round-tripped
-                // through the struct: re-serialising would silently rewrite
-                // records this retraction has no business touching.
-                _ => {
-                    out.push_str(line);
-                    out.push('\n');
-                }
-            }
-        }
-        if hit {
-            let tmp = path.with_extension("jsonl.tmp");
-            std::fs::write(&tmp, out)?;
-            std::fs::rename(&tmp, &path)?;
-            return Ok(path);
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!("no record with run_id {run_id}"),
-    ))
-}
-
 fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -204,6 +184,8 @@ fn year_month(ts_ms: u64) -> String {
 mod tests {
     use super::*;
 
+    use crate::report::Trigger;
+
     #[test]
     fn months_are_derived_from_the_records_own_timestamp() {
         // 2026-07-25T00:00:00Z
@@ -218,6 +200,32 @@ mod tests {
         assert_eq!(year_month(1_798_761_599_000), "2026-12");
         // And the first second of the next must.
         assert_eq!(year_month(1_798_761_600_000), "2027-01");
+    }
+
+    #[test]
+    fn a_run_that_must_never_be_published_is_written_beside_the_archive_and_not_into_it() {
+        // The archive partitions by (env, entrant, month), so a tuning sweep
+        // appended to `results/` would land in the SAME FILE as the arm's
+        // published records — and this module deliberately cannot rewrite a
+        // results file, so clearing them would be a hand-edit of the one file
+        // where a slip is unrecoverable.
+        let repo = Path::new("/repo");
+        let publishable = root_for(repo, Trigger::Manual);
+        assert!(
+            publishable.ends_with("results"),
+            "{}",
+            publishable.display()
+        );
+
+        for barred in [Trigger::Tuning, Trigger::Pr] {
+            let root = root_for(repo, barred);
+            assert!(root.ends_with(TUNING_DIR), "{barred:?}: {}", root.display());
+            // Not a subdirectory of the archive: `load_all`, `bench stale`, the
+            // validator's walker and the site's loader all walk `results/`
+            // recursively, so nesting it would put a tuning record back inside
+            // every one of them.
+            assert!(!root.starts_with(publishable.as_path()), "{barred:?}");
+        }
     }
 
     #[test]

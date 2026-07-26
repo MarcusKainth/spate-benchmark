@@ -37,7 +37,7 @@ import java.io.IOException;
  * alone and not to a rewritten decoder.
  *
  * <p>The primary arm does <em>not</em> use this, because
- * {@code METHODOLOGY.md} rule 1 forbids hand-writing a competitor's
+ * {@code methodology/} rule 1 forbids hand-writing a competitor's
  * internals: doing so would measure our Java rather than Flink. Publishing the
  * delta as a labelled secondary is how the same rule wants a shipped default's cost
  * quantified.

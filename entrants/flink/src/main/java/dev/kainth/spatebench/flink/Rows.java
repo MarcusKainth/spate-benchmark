@@ -8,7 +8,7 @@ import java.util.List;
  * The pipeline logic the contract leaves to each arm: the fan-out's per-field
  * conversions and the tier-B derivations.
  *
- * <p>{@code METHODOLOGY.md} rule 1 splits framework internals (which we may
+ * <p>{@code methodology/} rule 1 splits framework internals (which we may
  * not hand-write) from pipeline logic (which every arm writes). Everything in this
  * class is the latter.
  */

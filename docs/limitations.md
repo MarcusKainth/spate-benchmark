@@ -41,7 +41,7 @@ Every arm is given far more memory than it needs, deliberately, so that no
 garbage-collected runtime is penalised for an allocation *we* chose. The
 consequence is that the memory figure measures what a system chooses to use when
 nothing forces it to economise, not what it requires. See
-[the methodology](./methodology.md) for the full argument. If you want "how small
+[the resource envelope](./contract/envelope.md) for the full argument. If you want "how small
 can this run?", that is a different sweep and it has not been done.
 
 ## The host is a Mac, and that is a real weakness
@@ -57,10 +57,18 @@ indicative and every record carries full environment provenance, which makes a
 later bare-metal re-run an added dataset rather than a rewrite. It remains the
 single most reasonable thing to attack about this suite.
 
-## Tier B has not been run
+## Tier B is measured, but it is a very small transform
 
-Every current record is tier A — decode, flatten, insert. The transform tier is
-specified and implemented but unmeasured.
+Nine of the current records are tier B — decode, flatten, filter, derive — and
+they are drawn beside the tier-A ones. What tier B is *not* is a hard test of
+transformation. It is two predicates, a coalesce, an integer division and an
+ASCII uppercase, all per-row and entirely stateless, so it separates systems on
+per-row compute cost and on nothing else. The work that actually distinguishes a
+stream processor from a pipe — windows, joins, keyed aggregation — is in neither
+tier, for the reason given above.
+
+Tier B also exists only for the two implemented systems, so today it compares
+Spate against Flink and nothing else.
 
 ## Most systems are not here yet
 

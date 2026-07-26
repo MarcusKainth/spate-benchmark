@@ -92,7 +92,7 @@
 
     <!-- Avro decoding goes through Flink's own shipped schemas
          (ConfluentRegistryAvroDeserializationSchema / AvroDeserializationSchema).
-         Per rule 1 of METHODOLOGY.md we do not hand-write a decoder for
+         Per rule 1 of methodology/ we do not hand-write a decoder for
          the primary arm. -->
     <dependency>
       <groupId>org.apache.flink</groupId>

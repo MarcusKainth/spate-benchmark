@@ -47,11 +47,12 @@ it. Swap is disabled so memory pressure surfaces rather than hiding.
 
 Memory is deliberately far more than any arm needs, so that no garbage-collected
 runtime is penalised for an allocation we chose.
-[The methodology](./methodology.md) states what that does to the memory number,
+[The resource envelope](./contract/envelope.md) states what that does to the memory
+number,
 which is the honest cost of the choice.
 
 **Infrastructure sits outside every arm's budget** and is identical for all of
-them: Redpanda at 8 CPUs / 8 GiB, ClickHouse at 5 CPUs / 12 GiB, an 8-partition
+them: Redpanda at 4 CPUs / 8 GiB, ClickHouse at 9 CPUs / 12 GiB, an 8-partition
 topic. It is declared in the environment profile rather than passed on the
 command line — which is the fix for a real failure, where a runner script, the
 driver's defaults and the written methodology stated three different envelopes

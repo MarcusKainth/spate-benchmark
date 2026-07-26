@@ -107,6 +107,15 @@ jobs:
         working-directory: website
         run: npm run typecheck
 
+      # Deliberately duplicated from ci.yml rather than depended upon. The data
+      # layer decides which numbers may be compared and which are struck through,
+      # and a deploy that publishes a broken one is not recoverable by fixing CI
+      # afterwards — the wrong page is already live.
+      - name: Test
+        if: steps.site.outputs.present == 'true'
+        working-directory: website
+        run: npm test
+
       - name: Build
         if: steps.site.outputs.present == 'true'
         working-directory: website

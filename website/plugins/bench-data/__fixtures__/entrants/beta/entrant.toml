@@ -1,0 +1,39 @@
+schema = 1
+
+[entrant]
+id       = "beta"
+name     = "Beta"
+homepage = "https://example.invalid"
+licence  = "Apache-2.0"
+vendor   = "someone-else"
+kind     = "stream-processor"
+runtime  = "native"
+status   = "active"
+
+[maintainer]
+who = "spate-benchmark"
+reviewed_upstream = false
+
+[display]
+order = 20
+hue   = 20
+short = "Beta"
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "offset-commit"
+interval_ms = 5000
+
+[[variants]]
+id       = "tier-a"
+label    = "tier-a"
+tier     = "a"
+approach = "realistic"
+reports  = { wire_format = "rowbinary" }
+
+[[variants]]
+id       = "tier-a-hand"
+label    = "tier-a-hand"
+tier     = "a"
+approach = "stripped"
+reports  = { wire_format = "rowbinary" }

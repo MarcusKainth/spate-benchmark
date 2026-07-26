@@ -66,7 +66,7 @@ const config: Config = {
       title: 'Spate Benchmark',
       items: [
         {to: '/', label: 'Results', position: 'left', activeBaseRegex: '^/$'},
-        {to: '/methodology', label: 'Methodology', position: 'left'},
+        {to: '/contract/rules', label: 'Contract', position: 'left'},
         {to: '/environments', label: 'Environments', position: 'left'},
         {to: '/limitations', label: 'Limitations', position: 'left'},
         {href: githubUrl, label: 'GitHub', position: 'right'},
@@ -79,7 +79,7 @@ const config: Config = {
           title: 'The benchmark',
           items: [
             {label: 'Results', to: '/'},
-            {label: 'Methodology', to: '/methodology'},
+            {label: 'The fairness contract', to: '/contract/rules'},
             {label: 'Limitations', to: '/limitations'},
             {label: 'Reproducing this', to: '/reproduce'},
           ],

@@ -33,7 +33,7 @@ WORKDIR /build
 COPY entrants/flink/pom.xml ./pom.xml
 COPY entrants/flink/src ./src
 
-# THE one schema. METHODOLOGY.md forbids re-declaring it inline, so the
+# THE one schema. methodology/ forbids re-declaring it inline, so the
 # committed .avsc is copied into the jar's resources and SensorBatchSchema reads
 # it from the classpath. `assertFieldOrder` then proves the positional field
 # constants still match it, at job submission and again at operator open.
@@ -105,12 +105,36 @@ USER flink
 
 # Defaults target the bench network; the driver overrides what it varies.
 #
+# "What it varies" is now every sink knob and the parallelism, which is what
+# METHODOLOGY rule 2 requires and what this list previously prevented:
+# SINK_MAX_BUFFERED_ROWS was declared here and nowhere in `entrant.toml`'s
+# `[env]`, so the driver could not reach it, and ComparisonJob's
+# batch-must-be-smaller-than-buffer rule then capped the insert batch at under
+# 50,000 rows. A value that only exists here is an image default for a hand-run
+# container; it is not a knob.
+#
+# The sink defaults are kept EQUAL to the descriptor's published knobs. Rule 7
+# sends this image's configuration to upstream maintainers, and a reviewer who
+# starts the container by hand should get the configuration the published numbers
+# describe rather than a stale one.
+#
+# SINK_MAX_BATCH_BYTES is the one sink setting that is still only an image
+# default. It binds above roughly 150,000 rows per batch, so it would cap
+# `max_rows` before `max_rows` does. It is well clear at the published 50,000,
+# and is recorded here rather than made a knob.
+#
+# EXPECT_PARALLELISM must equal `parallelism.default` in config.yaml, and
+# `entrants_are_valid` asserts that it does. It is the number ComparisonJob
+# checks the cluster's resolved parallelism against, so a hand-run container has
+# to assert the truth about itself rather than being exempt from the check.
+#
 # No metrics reporter is configured on purpose. Flink's own metrics and the
 # ClickHouse sink's counters stay as the frameworks ship them, because they are
-# production-idiomatic, but METHODOLOGY.md takes every published figure
+# production-idiomatic, but methodology/ takes every published figure
 # from outside: ClickHouse for throughput and latency, cgroup v2 for CPU and
 # memory, /opt/flink/log/gc.log for GC.
 ENV TIER=a \
+    EXPECT_PARALLELISM=4 \
     DESER=shipped \
     BOOTSTRAP=spate-bench-redpanda:29092 \
     TOPIC=comparison-sensor-batches \
@@ -121,8 +145,8 @@ ENV TIER=a \
     CLICKHOUSE_USER=default \
     CLICKHOUSE_PASSWORD=bench \
     CLICKHOUSE_DATABASE=default \
-    SINK_MAX_BATCH_ROWS=25000 \
-    SINK_MAX_BUFFERED_ROWS=50000 \
+    SINK_MAX_BATCH_ROWS=50000 \
+    SINK_MAX_BUFFERED_ROWS=100000 \
     SINK_MAX_BATCH_BYTES=16777216 \
     SINK_MAX_ROW_BYTES=1048576 \
     SINK_LINGER_MS=1000 \

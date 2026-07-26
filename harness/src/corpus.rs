@@ -28,6 +28,27 @@
 //! Rust, Java and ClickHouse alike for non-negative operands, so
 //! `value * 1000 / (event_seq + 1)` cannot disagree between implementations the
 //! way it could if the sign varied.
+//!
+//! # The corpus-version markers
+//!
+//! Two marker comments below delimit the part of this file that determines a
+//! byte of the corpus: the field derivations, the tier-B transform definitions,
+//! the Avro encoding, the Confluent framing and the prefill timestamp.
+//! `harness/build.rs` hashes exactly that region — comments stripped, whitespace
+//! collapsed — into `DATASET_VERSION`.
+//!
+//! It is hashed at all because the arithmetic used not to be. The version was
+//! derived from `workload.toml`, the `.avsc` and the DDL only, so changing
+//! `1_000_003` to `1_000_033` in this file changed every `value` in the corpus
+//! while `DATASET_VERSION` stood still — and post-change records would have been
+//! medianed together with pre-change ones under one comparability group.
+//!
+//! It is a marked region rather than the whole file because the rest of this
+//! module is the Kafka producer, the prefill loop and the correctness gates, none
+//! of which change what the data *is*. Hashing those would re-version a
+//! byte-identical corpus every time `linger.ms` was retuned, which is the
+//! opposite failure and just as expensive: it splits published records from the
+//! tree for a change that moved no byte.
 
 use apache_avro::types::Value as AvroValue;
 use apache_avro::{Schema, to_avro_datum};
@@ -63,6 +84,7 @@ pub fn schema() -> &'static Schema {
         .get_or_init(|| Schema::parse_str(SCHEMA_JSON).expect("committed sensor_batch.avsc parses"))
 }
 
+// dataset-version:begin
 // ---------------------------------------------------------------------------
 // Field derivations — the single source of truth for producer and gates alike.
 // ---------------------------------------------------------------------------
@@ -241,6 +263,86 @@ pub fn frame_confluent(schema_id: u32, datum: &[u8]) -> Vec<u8> {
     framed
 }
 
+/// `send_ts_us` for a **prefilled** batch: derived from `batch_id`, not the
+/// clock.
+///
+/// This is deliberate. A prefilled corpus is replayed by every arm from offset
+/// 0, so deriving the timestamp keeps the corpus byte-identical across
+/// re-prefills and makes a published arm reproducible months later. The cost is
+/// that drain-mode latency is meaningless by construction — the difference
+/// between `ingest_ts` and this value is backlog age, not pipeline latency —
+/// which is why drain mode reports throughput only. Sustained mode uses real
+/// intended-schedule timestamps instead.
+///
+/// It sits inside the corpus-version region rather than beside the prefill loop
+/// because it is one of the numbers written into the bytes on the topic: moving
+/// it produces a different corpus under an unchanged `DATASET_VERSION` unless the
+/// version covers it.
+#[must_use]
+pub fn send_ts_us_prefill(batch_id: u64) -> i64 {
+    BASE_TS_MS * 1000 + i64::try_from(batch_id).expect("batch_id fits i64")
+}
+// dataset-version:end
+
+// ---------------------------------------------------------------------------
+// The sustained schedule
+//
+// Deliberately OUTSIDE the corpus-version region above. Everything inside that
+// region is a function of `batch_id` and is therefore a byte of a reproducible
+// corpus. These two are readings of a wall clock: they have no closed form, they
+// are the one field `expected_range` declines to check, and moving them inside
+// would re-version the dataset for a value the dataset does not contain.
+// ---------------------------------------------------------------------------
+
+/// Microseconds after a sustained producer's origin at which the message with
+/// global index `n` is **due**.
+///
+/// A schedule fixed in advance from the target rate, and never `sleep(1/rate)`
+/// in a loop. The two are not the same function. A per-iteration sleep adds its
+/// own overhead to every gap, so the offered rate sags below the requested one
+/// by an amount nobody measured — and the arm is then credited with keeping up
+/// with a load that was never offered, which is the flattering direction.
+///
+/// Integer division truncates, so the schedule runs at most one microsecond per
+/// message ahead of the exact one and never behind it. The multiplication
+/// overflows `u64` at roughly 1.8e13 messages, which at any rate this harness
+/// can offer is hundreds of thousands of years of producing.
+#[must_use]
+pub fn sustained_due_us(n: u64, rate: u64) -> u64 {
+    (n * 1_000_000) / rate
+}
+
+/// `send_ts_us` for a **sustained** message: the time it was due, not the time
+/// it went.
+///
+/// # Do not "fix" this into `now()`
+///
+/// This is the coordinated-omission correction, and it is the line in this
+/// harness most likely to be tidied into incorrectness by someone who reads it
+/// as a stale timestamp being carried around for no reason.
+///
+/// `ingest_ts - send_ts` is the published latency. With the **scheduled** time
+/// here, a message the producer could not send on time — because the broker
+/// pushed back, or because the host was busy — is charged for the whole of its
+/// wait, so the pipeline is billed for time a row spent queued behind a producer
+/// that had fallen behind. With `now()` taken at the moment of the send, that
+/// wait disappears: the clock restarts exactly when the system is failing, and
+/// the reported distribution *improves* as the pipeline gets worse. A benchmark
+/// that stamps at actual send time publishes a flattering tail precisely under
+/// the load a reader cares about, which is the most common way a latency number
+/// lies.
+///
+/// The signature is what keeps that true. It takes the due **offset** rather
+/// than the index and the rate, so the number that paced the send is literally
+/// the number that is stamped: [`sustained_due_us`] is called once per message
+/// and its result is used twice. Passing `(n, rate)` here instead would put a
+/// second call in the file for a later edit to drift, and two clocks that are
+/// meant to agree are the same defect wearing better clothes.
+#[must_use]
+pub fn send_ts_us_sustained(origin_epoch_us: i64, due_us: u64) -> i64 {
+    origin_epoch_us + i64::try_from(due_us).expect("schedule offset fits i64")
+}
+
 // ---------------------------------------------------------------------------
 // Decode targets
 // ---------------------------------------------------------------------------
@@ -353,7 +455,76 @@ impl Tier {
     }
 }
 
+/// A checksum of one short ASCII string, reproducible byte-for-byte in Rust and
+/// in ClickHouse.
+///
+/// The gate has to compare a string column against a closed form, and it has to
+/// do it with `sum()`. An exact-distinct over string *values* is the shape of
+/// query that asked ClickHouse for 10.45 GiB against a 10.8 GiB limit and was
+/// killed, so every string column becomes an integer before it is aggregated.
+///
+/// The integer has to be one both sides compute identically, which rules out the
+/// obvious choice. ClickHouse ships `CRC32`, `CRC32IEEE`, `CRC64` and
+/// `cityHash64`, all stronger than this — and every one of them would have to be
+/// reimplemented here byte-exactly, against a server whose variant is not
+/// pinned by anything in this repository. A gate that fails an honest arm
+/// because our CRC polynomial disagrees with the server's is worse than a weaker
+/// gate that never does. `reinterpretAsUInt64` has one documented behaviour:
+/// first eight bytes, little-endian, zero-padded when short and truncated when
+/// long.
+///
+/// Head **and** reversed head, added, because the head alone stops at eight
+/// bytes and `sensor-1023` is eleven. The two together read the first and last
+/// eight bytes of the string, which is every byte of anything up to sixteen —
+/// and the longest string here, a three-element tag concatenation, is eighteen.
+/// So the fingerprint is *not* injective in general. It is injective over the
+/// 1116 strings this corpus can emit at the committed generator constants, and
+/// `the_string_fingerprint_separates_every_string_the_corpus_can_produce`
+/// asserts that rather than assuming it — which is what would fail if a constant
+/// grew the alphabet past what sixteen bytes can separate.
+///
+/// Byte reversal, not character reversal — ClickHouse's `reverse` is byte-wise.
+/// The two coincide only because every string the generator emits is ASCII,
+/// which is a property of the generator and is likewise tested.
+#[must_use]
+pub fn str_fingerprint(s: &str) -> i128 {
+    let raw = s.as_bytes();
+
+    let mut head = [0u8; 8];
+    let n = raw.len().min(8);
+    head[..n].copy_from_slice(&raw[..n]);
+
+    let mut tail = [0u8; 8];
+    for (slot, byte) in tail.iter_mut().zip(raw.iter().rev()) {
+        *slot = *byte;
+    }
+
+    i128::from(u64::from_le_bytes(head)) + i128::from(u64::from_le_bytes(tail))
+}
+
 /// What a correct arm must have produced.
+///
+/// Every field is both a closed form over `batch_id` and a single ClickHouse
+/// aggregate, and that pairing is the design constraint rather than a
+/// coincidence: the gate must be one query over one bounded pass, because the
+/// unbounded version of this check is what exhausted ClickHouse's memory and
+/// took a completed, valid measurement down with it.
+///
+/// The three original fields — rows, `value` and `value_scaled` — proved that
+/// two arms moved the same rows and did the same *integer* arithmetic, and
+/// nothing else. `name_upper`, `tags`, `region`, `sensor`, `unit`, `quality` and
+/// the timestamps were all unchecked, and the gap was cheaply exploitable: an
+/// arm emitting `tags = []` skips the `Array(LowCardinality(String))` encode on
+/// every one of 150,000,000 rows — a large, real speed-up — and passed every
+/// gate. So did an arm that dropped the null-`region` coalesce, and so did the
+/// exact regression `ddl.sql` warns about, losing the `DateTime64` scaling so
+/// that "every value silently lands in 1970".
+///
+/// The gap was also asymmetric, which is why it mattered more than it looks. The
+/// Spate arm imports `ascii_upper` and `value_scaled_of` from this module, so
+/// the vendor's arm and the oracle move together by construction, while Flink
+/// reimplements them independently. An unchecked column is therefore a free pass
+/// aimed squarely at the arm we have the most reason not to flatter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Expected {
     /// Distinct `(batch_id, event_seq)` rows. Anything less is data loss.
@@ -365,6 +536,33 @@ pub struct Expected {
     /// Sum of `value_scaled` over distinct rows; zero for tier A, which has no
     /// such column.
     pub value_scaled_sum: i128,
+    /// Sum of [`str_fingerprint`] over the `sensor` column.
+    pub sensor_sum: i128,
+    /// Sum of [`str_fingerprint`] over the `region` column, with a null region
+    /// fingerprinted as the empty string — which is what the coalesce specified
+    /// for both tiers must have put in the non-nullable target column.
+    pub region_sum: i128,
+    /// Sum of [`str_fingerprint`] over the name column: `name` for tier A,
+    /// `name_upper` for tier B. One sum covers both because the column that
+    /// carries the name differs by tier, and so does its expected content.
+    pub name_sum: i128,
+    /// Sum of [`str_fingerprint`] over the `unit` column.
+    pub unit_sum: i128,
+    /// Sum of `length(tags)`. Separate from [`Expected::tag_sum`] so that an arm
+    /// which drops the array entirely and one which fills it with the wrong
+    /// strings produce different failure messages.
+    pub tag_count_sum: i128,
+    /// Sum of [`str_fingerprint`] over the tag elements concatenated with no
+    /// separator. Zero for an arm that emits `tags = []` on every row, because
+    /// the fingerprint of the empty string is zero.
+    pub tag_sum: i128,
+    /// Sum of `batch_ts` in epoch milliseconds. This is the `DateTime64`
+    /// scaling check: an arm that writes seconds, or writes milliseconds into a
+    /// micros column, lands near 1970 and misses by orders of magnitude.
+    pub batch_ts_sum: i128,
+    /// Rows whose `quality` is null. The second Avro union, and the only part of
+    /// `quality` a closed form can pin — see [`expected_range`].
+    pub null_quality_rows: u64,
 }
 
 /// Compute what `batches` messages must yield for `tier`.
@@ -372,11 +570,36 @@ pub struct Expected {
 /// Deliberately a loop over the generator rather than a closed form: the point
 /// of the gate is to catch a transform that disagrees with the specification,
 /// and a closed form derived from the same misreading of the spec would agree
-/// with the bug. Iterating the actual derivations costs ~100M cheap iterations
-/// on the largest planned corpus, which is a fraction of a second in release.
+/// with the bug.
 #[must_use]
 pub fn expected(batches: u64, tier: Tier) -> Expected {
     expected_range(0, batches, tier)
+}
+
+/// How many rows `batches` messages must yield for `tier`, and nothing else.
+///
+/// [`expected`] is the gate's oracle and formats a string per string column per
+/// row to get there. That is the right price for a gate — under a second over
+/// the bounded window, paid once per arm after the measurement has finished —
+/// and the wrong price for the callers that want a row count and ask for it over
+/// the **whole** corpus. At 1,500,000 batches each of those would spend roughly
+/// fifteen seconds computing ten fields in order to read one.
+///
+/// The duplicated loop is what that costs, and
+/// `the_cheap_row_count_agrees_with_the_full_expectation` is what stops it
+/// drifting into a second, disagreeing definition of which rows tier B keeps.
+#[must_use]
+pub fn expected_rows(batches: u64, tier: Tier) -> u64 {
+    let mut rows = 0;
+    for batch_id in 0..batches {
+        for seq in 0..EVENTS_PER_BATCH {
+            if tier == Tier::B && !tier_b_keeps(batch_id, seq) {
+                continue;
+            }
+            rows += 1;
+        }
+    }
+    rows
 }
 
 /// Compute what batches `lo..hi` must yield for `tier`.
@@ -386,21 +609,86 @@ pub fn expected(batches: u64, tier: Tier) -> Expected {
 /// actually landed is some `[min(batch_id), max(batch_id)]` window rather than a
 /// prefix starting at zero. Gating against a prefix would either fail a correct
 /// arm or, worse, pass a broken one whose totals happened to coincide.
+///
+/// # What this deliberately does not cover
+///
+/// * **`quality`'s values.** They are `f64`, and a sum of floats depends on the
+///   order the server happened to add them in, so an exact comparison would fail
+///   correct arms at random. Only the null pattern is pinned, which is the part
+///   that proves the second union was decoded rather than flattened away.
+/// * **`send_ts`'s value.** In sustained mode it is the producer's intended
+///   schedule time, a property of the clock and not of `batch_id`, so no closed
+///   form exists for it in the mode that matters. [`run_gates`] checks instead
+///   that it is not *before* `BASE_TS_MS`, which is true in both modes and which
+///   the `DateTime64` regression violates.
+///
+/// # Cost
+///
+/// Covering the string columns means the loop now formats `name` and `tags` per
+/// event rather than doing pure integer work, so it allocates where it used not
+/// to. Measured on the reference host, the ten-million-row gate window costs
+/// under a second in release. It is paid once per arm, after the measurement
+/// window has closed, and it buys the only check that notices an arm skipping the
+/// tags encode.
+///
+/// The obvious optimisation is to memoise each derivation on its own residue —
+/// there are only 32 distinct names and 16 distinct tag concatenations. It is
+/// deliberately not taken: the memo key would restate `(batch_id * 31 + seq) %
+/// NAMES` outside `name_of`, which is the duplicated arithmetic this whole
+/// approach exists to avoid, and a memo keyed on a misread modulus would agree
+/// with a generator that misread it the same way.
 #[must_use]
 pub fn expected_range(lo: u64, hi: u64, tier: Tier) -> Expected {
     let mut out = Expected {
         rows: 0,
         value_sum: 0,
         value_scaled_sum: 0,
+        sensor_sum: 0,
+        region_sum: 0,
+        name_sum: 0,
+        unit_sum: 0,
+        tag_count_sum: 0,
+        tag_sum: 0,
+        batch_ts_sum: 0,
+        null_quality_rows: 0,
     };
     for batch_id in lo..hi {
+        // Hoisted out of the event loop because `sensor`, `region` and
+        // `batch_ts` are properties of the *batch*. Recomputing them per event
+        // would multiply their string formatting by EVENTS_PER_BATCH for no
+        // extra coverage, and this loop already runs ten million times per gate.
+        let sensor_fp = str_fingerprint(&sensor_of(batch_id));
+        let region_fp = str_fingerprint(region_of(batch_id).as_deref().unwrap_or(""));
+        let batch_ts = i128::from(batch_ts_ms_of(batch_id));
+
         for seq in 0..EVENTS_PER_BATCH {
             if tier == Tier::B && !tier_b_keeps(batch_id, seq) {
                 continue;
             }
             let value = value_of(batch_id, seq);
+            let name = name_of(batch_id, seq);
+            // Tier B's column is `name_upper`; tier A's is `name`. Derived
+            // through `ascii_upper` rather than by upper-casing here, so the
+            // oracle and the specification cannot drift apart.
+            let name = if tier == Tier::B {
+                ascii_upper(&name)
+            } else {
+                name
+            };
+            let tags = tags_of(batch_id, seq);
+
             out.rows += 1;
             out.value_sum += i128::from(value);
+            out.sensor_sum += sensor_fp;
+            out.region_sum += region_fp;
+            out.name_sum += str_fingerprint(&name);
+            out.unit_sum += str_fingerprint(unit_of(batch_id, seq));
+            out.tag_count_sum += i128::try_from(tags.len()).expect("tag count fits i128");
+            out.tag_sum += str_fingerprint(&tags.concat());
+            out.batch_ts_sum += batch_ts;
+            if quality_of(batch_id, seq).is_none() {
+                out.null_quality_rows += 1;
+            }
             if tier == Tier::B {
                 out.value_scaled_sum += i128::from(value_scaled_of(value, seq));
             }
@@ -453,21 +741,6 @@ fn split_sql(sql: &str) -> Vec<String> {
 /// The registry subject. Topic-name strategy, which is what Kafka Connect's
 /// `AvroConverter` and ClickHouse's `AvroConfluent` both expect by default.
 pub const SUBJECT: &str = "sensor-batches-value";
-
-/// `send_ts_us` for a **prefilled** batch: derived from `batch_id`, not the
-/// clock.
-///
-/// This is deliberate. A prefilled corpus is replayed by every arm from offset
-/// 0, so deriving the timestamp keeps the corpus byte-identical across
-/// re-prefills and makes a published arm reproducible months later. The cost is
-/// that drain-mode latency is meaningless by construction — the difference
-/// between `ingest_ts` and this value is backlog age, not pipeline latency —
-/// which is why drain mode reports throughput only. Sustained mode uses real
-/// intended-schedule timestamps instead.
-#[must_use]
-pub fn send_ts_us_prefill(batch_id: u64) -> i64 {
-    BASE_TS_MS * 1000 + i64::try_from(batch_id).expect("batch_id fits i64")
-}
 
 /// Register the committed schema under [`SUBJECT`] and return its id.
 ///
@@ -621,13 +894,40 @@ impl SustainedLoad {
         assert!(threads > 0, "sustained load needs at least one thread");
 
         let stop = std::sync::Arc::new(AtomicBool::new(false));
+
+        // ONE origin for every thread, read before any of them is spawned.
+        //
+        // Defect this closes: each thread took its own `Instant::now()` and its
+        // own epoch reading *inside* the closure, so thread 7's timeline began
+        // however long `thread::spawn` had taken to reach it. A message's due
+        // time is derived from its GLOBAL index, and that only reconstructs one
+        // aggregate schedule if every thread measures that index against the
+        // same zero. It did not: adjacent `batch_id`s produced by different
+        // threads carried `send_ts_us` values offset from each other by the
+        // spawn skew, and because `send_ts` is one end of the published latency,
+        // the skew landed in the measurement as noise nobody had put there.
+        //
+        // Sharing the origin also makes the lateness of a late-starting thread
+        // *honest* rather than invisible: its first sends really were due before
+        // it existed, that lateness is charged to latency like any other, and
+        // `max_schedule_lag_ms` reports it instead of hiding it behind a private
+        // clock.
+        let origin = Instant::now();
+        let origin_epoch_us = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_micros(),
+        )
+        .expect("epoch micros fit i64");
+
         let handles = (0..threads)
             .map(|slot| {
                 let stop_thread = std::sync::Arc::clone(&stop);
                 let (bootstrap, topic) = (bootstrap.to_owned(), topic.to_owned());
 
                 std::thread::spawn(move || {
-                    use std::sync::atomic::AtomicU64;
+                    use std::sync::atomic::{AtomicU64, Ordering};
                     let delivered = std::sync::Arc::new(AtomicU64::new(0));
                     let failed = std::sync::Arc::new(AtomicU64::new(0));
                     let producer: BaseProducer<DeliveryCounter> = ClientConfig::new()
@@ -646,15 +946,6 @@ impl SustainedLoad {
                         })
                         .expect("sustained producer");
 
-                    let origin = Instant::now();
-                    let origin_epoch_us = i64::try_from(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("clock after epoch")
-                            .as_micros(),
-                    )
-                    .expect("epoch micros fit i64");
-
                     let mut sent = 0u64;
                     let mut max_lag_us = 0i64;
                     while !stop_thread.load(Ordering::Relaxed) {
@@ -664,7 +955,7 @@ impl SustainedLoad {
                         // counter would give each thread its own timeline and the offered
                         // rate would drift.
                         let global = slot + sent * threads;
-                        let due_us = (global * 1_000_000) / rate;
+                        let due_us = sustained_due_us(global, rate);
                         let elapsed_us =
                             u64::try_from(origin.elapsed().as_micros()).unwrap_or(u64::MAX);
                         if elapsed_us < due_us {
@@ -678,9 +969,20 @@ impl SustainedLoad {
                             max_lag_us.max(i64::try_from(elapsed_us - due_us).unwrap_or(i64::MAX));
 
                         let batch_id = first_batch_id + global;
-                        // The intended schedule time, NOT `now()`. See the type docs.
-                        let send_ts_us =
-                            origin_epoch_us + i64::try_from(due_us).expect("due fits i64");
+                        // The INTENDED schedule time, never `now()`, and `due_us`
+                        // is the same value that decided this send was allowed to
+                        // happen a few lines above. Control reaches here only when
+                        // the producer is at or *behind* schedule, so the gap
+                        // between `due_us` and the wall clock right now is real
+                        // lateness — and stamping the schedule is what charges the
+                        // published latency for it instead of restarting the clock
+                        // at the moment the producer finally caught up.
+                        //
+                        // `send_ts_us_sustained` carries the argument in full. Read
+                        // it before changing this line: a `now()` here is a one-word
+                        // edit that makes every saturated arm report an excellent
+                        // tail, and nothing else in the harness would notice.
+                        let send_ts_us = send_ts_us_sustained(origin_epoch_us, due_us);
                         let payload =
                             frame_confluent(schema_id, &encode_batch(batch_id, send_ts_us));
                         let key = sensor_of(batch_id);
@@ -723,7 +1025,6 @@ impl SustainedLoad {
                         reason = "microsecond lag stays far below f64's exact integer range"
                     )]
                     let max_schedule_lag_ms = max_lag_us as f64 / 1000.0;
-                    use std::sync::atomic::Ordering;
                     LoadReport {
                         sent,
                         delivered: delivered.load(Ordering::Relaxed),
@@ -780,6 +1081,32 @@ impl SustainedLoad {
                 .iter()
                 .map(|p| p.max_schedule_lag_ms)
                 .fold(0.0_f64, f64::max),
+        }
+    }
+}
+
+impl Drop for SustainedLoad {
+    /// Defect this closes: there was no `Drop`, so every path that abandoned a
+    /// sustained run — an arm whose container exited during warm-up, a row-count
+    /// probe that failed five times running, a panic out of a ClickHouse
+    /// assertion — dropped this value, detached its threads, and left a
+    /// multi-threaded producer offering hundreds of thousands of messages a
+    /// second at the *next* arm on a host `methodology/` documents as
+    /// oversubscribed. Nothing about that is visible in the result: the next arm
+    /// simply produces a slower number, and a slower number is what a benchmark
+    /// is for. It is the same shape as the orphaned-sampler defect in
+    /// `sampler::Sampler`, and it fails in the same direction.
+    ///
+    /// Idempotent with [`SustainedLoad::stop`], which takes the handles: a value
+    /// that has already been stopped drops with nothing left to join.
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for h in std::mem::take(&mut self.handles) {
+            // The join result is discarded rather than unwrapped: this runs on
+            // the unwind path of a panic that has already been diagnosed, and a
+            // second panic from `Drop` during unwinding aborts the process,
+            // taking the refusal message with it.
+            let _ = h.join();
         }
     }
 }
@@ -969,6 +1296,29 @@ pub struct Gates {
     pub value_sum_match: bool,
     /// Whether `sum(value_scaled)` matches (tier B only; trivially true for A).
     pub value_scaled_match: bool,
+    /// Whether the `sensor` column's fingerprint sum matches.
+    pub sensor_match: bool,
+    /// Whether the `region` column's fingerprint sum matches — the null
+    /// coalesce.
+    pub region_match: bool,
+    /// Whether the name column's fingerprint sum matches — for tier B, the
+    /// ASCII uppercase.
+    pub name_match: bool,
+    /// Whether the `unit` column's fingerprint sum matches.
+    pub unit_match: bool,
+    /// Whether `sum(length(tags))` matches — the array's cardinality.
+    pub tag_count_match: bool,
+    /// Whether the tag elements' fingerprint sum matches — the array's content.
+    pub tag_match: bool,
+    /// Whether `sum(batch_ts)` in milliseconds matches — the `DateTime64`
+    /// scaling.
+    pub batch_ts_match: bool,
+    /// Whether the count of null `quality` values matches — the second union.
+    pub null_quality_match: bool,
+    /// Whether the earliest `send_ts` is at or after `BASE_TS_MS`. A bound
+    /// rather than a checksum, because sustained mode's `send_ts` is a clock
+    /// reading and has no closed form; see [`expected_range`].
+    pub send_ts_after_base: bool,
 }
 
 impl Gates {
@@ -979,10 +1329,28 @@ impl Gates {
     /// wrong arithmetic do fail it.
     #[must_use]
     pub fn passed(&self) -> bool {
-        self.contiguous && self.rows_match && self.value_sum_match && self.value_scaled_match
+        self.contiguous
+            && self.rows_match
+            && self.value_sum_match
+            && self.value_scaled_match
+            && self.sensor_match
+            && self.region_match
+            && self.name_match
+            && self.unit_match
+            && self.tag_count_match
+            && self.tag_match
+            && self.batch_ts_match
+            && self.null_quality_match
+            && self.send_ts_after_base
     }
 
     /// Human-readable reason for a failure, for the driver's refusal message.
+    ///
+    /// Every check reports separately, and each message names the *regression*
+    /// rather than the column. A gate that says only "correctness failed" sends
+    /// whoever reads it back into the arm's source with nothing to look for,
+    /// which on a sweep that has already spent an hour is the expensive kind of
+    /// unhelpful.
     #[must_use]
     pub fn failure(&self) -> Option<String> {
         if self.passed() {
@@ -1007,8 +1375,70 @@ impl Gates {
         if !self.value_scaled_match {
             why.push("sum(value_scaled) disagrees — the tier-B derivation is wrong".into());
         }
+        if !self.sensor_match {
+            why.push("the sensor column disagrees — the key was not carried through".into());
+        }
+        if !self.region_match {
+            why.push(
+                "the region column disagrees — the null-region coalesce is missing or wrong".into(),
+            );
+        }
+        if !self.name_match {
+            why.push(
+                "the name column disagrees — for tier B, the ASCII uppercase was skipped or is \
+                 locale-dependent"
+                    .into(),
+            );
+        }
+        if !self.unit_match {
+            why.push("the unit column disagrees — the filter sentinel was not carried".into());
+        }
+        if !self.tag_count_match {
+            why.push(
+                "sum(length(tags)) disagrees — the arm did not emit the array it was given, and \
+                 skipping the Array(LowCardinality(String)) encode is a large speed-up"
+                    .into(),
+            );
+        }
+        if !self.tag_match {
+            why.push(
+                "the tag elements disagree — the array is present but holds wrong values".into(),
+            );
+        }
+        if !self.batch_ts_match {
+            why.push(
+                "sum(batch_ts) disagrees — the DateTime64 scaling is wrong, which is how every \
+                 value silently lands in 1970"
+                    .into(),
+            );
+        }
+        if !self.null_quality_match {
+            why.push(
+                "the null-quality count disagrees — the nullable union was not decoded".into(),
+            );
+        }
+        if !self.send_ts_after_base {
+            why.push(
+                "the earliest send_ts predates the corpus base timestamp — the DateTime64(6) \
+                 column was written at the wrong scale"
+                    .into(),
+            );
+        }
         Some(why.join("; "))
     }
+}
+
+/// The ClickHouse expression matching [`str_fingerprint`] for one string column.
+///
+/// The `CAST ... AS String` is not decoration. Every string column in the target
+/// is `LowCardinality(String)` and `reinterpretAsUInt64` takes a `String`, so the
+/// cast is what keeps the gate from dying on a type error at the single moment
+/// it is most expensive to discover — after an arm has finished running.
+fn fingerprint_sql(expr: &str) -> String {
+    format!(
+        "toInt128(reinterpretAsUInt64(CAST({expr} AS String))) + \
+         toInt128(reinterpretAsUInt64(reverse(CAST({expr} AS String))))"
+    )
 }
 
 /// Run the correctness gates for `tier` against the target table.
@@ -1026,6 +1456,13 @@ impl Gates {
 /// because that is the part produced during and after the measurement window.
 /// The slice is still tens of millions of rows; a framework that drops,
 /// duplicates or mis-transforms does so systematically, not once.
+///
+/// **Two queries, one scan each, and no unbounded hash set beyond the
+/// `uniqExact` the bound already covers.** Everything the gate learns about the
+/// string and array columns is learned by reducing each to a fixed-width scalar
+/// before aggregating, never by collecting distinct values — see [`Expected`]
+/// for what that buys and [`str_fingerprint`] for why the reduction is the one
+/// it is.
 ///
 /// # Errors
 /// If the table cannot be queried, or ClickHouse returns unparseable output — a
@@ -1071,41 +1508,86 @@ pub fn run_gates(
     let hi = max_batch;
     let lo = (min_batch + 1).max(hi.saturating_sub(max_batches));
 
+    // `min(send_ts)` rides along on the counting scan rather than the sum query
+    // below, and deliberately so: it is idempotent under duplication, so it needs
+    // no deduplication, and keeping it out of the DISTINCT projection keeps eight
+    // bytes per row out of that query's hash set.
     let counts = sql(&format!(
-        "SELECT count(), uniqExact((batch_id, event_seq)), uniqExact(batch_id) FROM {table} \
+        "SELECT count(), uniqExact((batch_id, event_seq)), uniqExact(batch_id), \
+                min(toUnixTimestamp64Micro(send_ts)) FROM {table} \
          WHERE batch_id >= {lo} AND batch_id < {hi}"
     ))?;
-    if counts.len() < 3 {
+    if counts.len() < 4 {
         return Err(format!("gate count query returned {counts:?}"));
     }
     let rows = num(&counts[0])? as u64;
     let distinct_ids = num(&counts[1])? as u64;
     let distinct_batches = num(&counts[2])? as u64;
+    let min_send_ts_us = num(&counts[3])?;
 
     // The sums are taken over DEDUPLICATED rows, which is not a detail: these are
     // at-least-once systems, so a legitimate duplicate would otherwise inflate
     // `sum(value)` and fail a *correct* arm. Deduplicating on the full row is
     // sound because a replayed record re-encodes identically.
     //
+    // The projection is entirely fixed-width scalars, and that is the load-bearing
+    // property. Every string column is reduced to a fingerprint and `tags` to a
+    // count plus a fingerprint *inside* the subquery, so the DISTINCT hash set
+    // holds ~120 bytes per row — about 1.2 GiB over the ten-million-row window,
+    // against the 10.8 GiB limit. Putting `tags` itself in the DISTINCT key would
+    // have put an array of strings there and taken the query back to where the
+    // unbounded gate died.
+    //
     // `toInt128` because ClickHouse's `sum` over `Int64` returns `Int64`, which a
     // large corpus would overflow silently.
-    let (proj, scaled_sum) = if tier == Tier::B {
-        (
-            "batch_id, event_seq, value, value_scaled",
-            ", sum(toInt128(value_scaled))",
-        )
+    let name_col = if tier == Tier::B {
+        "name_upper"
     } else {
-        ("batch_id, event_seq, value", "")
+        "name"
     };
+    // Tier A has no `value_scaled` column, so the outer sum reads a literal zero
+    // and the column count of the result is the same for both tiers. Parsing a
+    // result whose width depends on the tier is a bug waiting for whoever adds
+    // the next field.
+    let (scaled_proj, scaled_expr) = if tier == Tier::B {
+        (", value_scaled", "value_scaled")
+    } else {
+        ("", "0")
+    };
+    let sensor_fp = fingerprint_sql("sensor");
+    let region_fp = fingerprint_sql("region");
+    let name_fp = fingerprint_sql(name_col);
+    let unit_fp = fingerprint_sql("unit");
+    let tag_fp = fingerprint_sql("arrayStringConcat(CAST(tags AS Array(String)), '')");
+
     let sums = sql(&format!(
-        "SELECT sum(toInt128(value)){scaled_sum} FROM \
-         (SELECT DISTINCT {proj} FROM {table} WHERE batch_id >= {lo} AND batch_id < {hi})"
+        "SELECT sum(toInt128(value)), sum(toInt128({scaled_expr})), sum(sensor_fp), \
+                sum(region_fp), sum(name_fp), sum(unit_fp), sum(toInt128(tag_count)), \
+                sum(tag_fp), sum(toInt128(batch_ts_ms)), sum(toInt128(quality_null)) \
+         FROM (SELECT DISTINCT batch_id, event_seq, value{scaled_proj}, \
+                      {sensor_fp} AS sensor_fp, \
+                      {region_fp} AS region_fp, \
+                      {name_fp} AS name_fp, \
+                      {unit_fp} AS unit_fp, \
+                      toUInt8(length(tags)) AS tag_count, \
+                      {tag_fp} AS tag_fp, \
+                      toUnixTimestamp64Milli(batch_ts) AS batch_ts_ms, \
+                      isNull(quality) AS quality_null \
+               FROM {table} WHERE batch_id >= {lo} AND batch_id < {hi})"
     ))?;
-    if sums.is_empty() {
+    if sums.len() < 10 {
         return Err(format!("gate sum query returned {sums:?}"));
     }
     let value_sum = num(&sums[0])?;
-    let value_scaled_sum = if tier == Tier::B { num(&sums[1])? } else { 0 };
+    let value_scaled_sum = num(&sums[1])?;
+    let sensor_sum = num(&sums[2])?;
+    let region_sum = num(&sums[3])?;
+    let name_sum = num(&sums[4])?;
+    let unit_sum = num(&sums[5])?;
+    let tag_count_sum = num(&sums[6])?;
+    let tag_sum = num(&sums[7])?;
+    let batch_ts_sum = num(&sums[8])?;
+    let null_quality_rows = num(&sums[9])?;
 
     let exp = expected_range(lo, hi, tier);
     Ok(Gates {
@@ -1120,6 +1602,15 @@ pub fn run_gates(
         rows_match: distinct_ids == exp.rows,
         value_sum_match: value_sum == exp.value_sum,
         value_scaled_match: value_scaled_sum == exp.value_scaled_sum,
+        sensor_match: sensor_sum == exp.sensor_sum,
+        region_match: region_sum == exp.region_sum,
+        name_match: name_sum == exp.name_sum,
+        unit_match: unit_sum == exp.unit_sum,
+        tag_count_match: tag_count_sum == exp.tag_count_sum,
+        tag_match: tag_sum == exp.tag_sum,
+        batch_ts_match: batch_ts_sum == exp.batch_ts_sum,
+        null_quality_match: null_quality_rows == i128::from(exp.null_quality_rows),
+        send_ts_after_base: min_send_ts_us >= i128::from(BASE_TS_MS) * 1000,
     })
 }
 
@@ -1357,6 +1848,10 @@ mod tests {
 
     /// A range's expectation must be the difference of two prefixes, or the
     /// sustained gates and the drain gates would disagree about the same rows.
+    ///
+    /// Every field, not a sample of them: an accumulator that is not additive
+    /// over `batch_id` would pass in drain mode and fail every sustained arm,
+    /// and it would do so with a message blaming the framework.
     #[test]
     fn a_range_expectation_is_the_difference_of_two_prefixes() {
         for tier in [Tier::A, Tier::B] {
@@ -1369,16 +1864,203 @@ mod tests {
                 "{tier:?} rows"
             );
             assert_eq!(
-                range.value_sum,
-                prefix_700.value_sum - prefix_200.value_sum,
-                "{tier:?} value_sum"
+                range.null_quality_rows,
+                prefix_700.null_quality_rows - prefix_200.null_quality_rows,
+                "{tier:?} null_quality_rows"
             );
+            for (label, got, whole, part) in [
+                (
+                    "value_sum",
+                    range.value_sum,
+                    prefix_700.value_sum,
+                    prefix_200.value_sum,
+                ),
+                (
+                    "value_scaled_sum",
+                    range.value_scaled_sum,
+                    prefix_700.value_scaled_sum,
+                    prefix_200.value_scaled_sum,
+                ),
+                (
+                    "sensor_sum",
+                    range.sensor_sum,
+                    prefix_700.sensor_sum,
+                    prefix_200.sensor_sum,
+                ),
+                (
+                    "region_sum",
+                    range.region_sum,
+                    prefix_700.region_sum,
+                    prefix_200.region_sum,
+                ),
+                (
+                    "name_sum",
+                    range.name_sum,
+                    prefix_700.name_sum,
+                    prefix_200.name_sum,
+                ),
+                (
+                    "unit_sum",
+                    range.unit_sum,
+                    prefix_700.unit_sum,
+                    prefix_200.unit_sum,
+                ),
+                (
+                    "tag_count_sum",
+                    range.tag_count_sum,
+                    prefix_700.tag_count_sum,
+                    prefix_200.tag_count_sum,
+                ),
+                (
+                    "tag_sum",
+                    range.tag_sum,
+                    prefix_700.tag_sum,
+                    prefix_200.tag_sum,
+                ),
+                (
+                    "batch_ts_sum",
+                    range.batch_ts_sum,
+                    prefix_700.batch_ts_sum,
+                    prefix_200.batch_ts_sum,
+                ),
+            ] {
+                assert_eq!(got, whole - part, "{tier:?} {label}");
+            }
+        }
+    }
+
+    /// The cheap row count exists only because the full expectation got
+    /// expensive. Two loops that disagree about which rows tier B keeps would
+    /// make the driver announce one figure and the gate demand another.
+    #[test]
+    fn the_cheap_row_count_agrees_with_the_full_expectation() {
+        for tier in [Tier::A, Tier::B] {
+            for batches in [1u64, 2, 7, 10, 137, 1000] {
+                assert_eq!(
+                    expected_rows(batches, tier),
+                    expected(batches, tier).rows,
+                    "{tier:?} over {batches} batches"
+                );
+            }
+        }
+    }
+
+    /// The fingerprint has to separate any two strings the corpus can put in a
+    /// column, or two different columns could sum to the same total and the gate
+    /// would report agreement it did not verify.
+    ///
+    /// Head-plus-reversed-head is not injective over arbitrary strings — it reads
+    /// sixteen bytes and the longest tag concatenation is eighteen. So the
+    /// property is asserted over the actual alphabet rather than argued for in
+    /// general, and this test is what would fail if a generator constant grew the
+    /// alphabet past what the fingerprint can separate.
+    #[test]
+    fn the_string_fingerprint_separates_every_string_the_corpus_can_produce() {
+        let mut strings = std::collections::BTreeSet::new();
+        // Everything a batch-scoped column can hold, including the coalesced
+        // null region.
+        strings.insert(String::new());
+        for batch_id in 0..SENSORS.max(64) {
+            strings.insert(sensor_of(batch_id));
+            if let Some(r) = region_of(batch_id) {
+                strings.insert(r);
+            }
+        }
+        // Everything an event-scoped column can hold. Two full periods of every
+        // modulus in the derivations is far more than enough to enumerate them.
+        for batch_id in 0..256u64 {
+            for seq in 0..EVENTS_PER_BATCH {
+                let name = name_of(batch_id, seq);
+                strings.insert(ascii_upper(&name));
+                strings.insert(name);
+                strings.insert(unit_of(batch_id, seq).to_owned());
+                strings.insert(tags_of(batch_id, seq).concat());
+            }
+        }
+
+        let mut seen = std::collections::BTreeMap::new();
+        for s in &strings {
+            assert!(
+                s.is_ascii(),
+                "the generator emitted {s:?}, which is not ASCII — ClickHouse's byte-wise \
+                 `reverse` and a character-wise reverse would then disagree"
+            );
+            if let Some(other) = seen.insert(str_fingerprint(s), s.clone()) {
+                panic!("{s:?} and {other:?} share a fingerprint");
+            }
+        }
+    }
+
+    /// An arm emitting `tags = []` skips the `Array(LowCardinality(String))`
+    /// encode on every row, which is a large and real speed-up. Before the tag
+    /// expectations existed it passed every gate.
+    #[test]
+    fn an_arm_that_emits_empty_tags_now_fails_a_closed_form_expectation() {
+        for tier in [Tier::A, Tier::B] {
+            let exp = expected(500, tier);
             assert_eq!(
-                range.value_scaled_sum,
-                prefix_700.value_scaled_sum - prefix_200.value_scaled_sum,
-                "{tier:?} value_scaled_sum"
+                str_fingerprint(""),
+                0,
+                "an empty array concatenates to the empty string, whose fingerprint is what an \
+                 arm emitting no tags would sum to"
+            );
+            assert_ne!(exp.tag_count_sum, 0, "{tier:?} tag_count_sum");
+            assert_ne!(exp.tag_sum, 0, "{tier:?} tag_sum");
+        }
+    }
+
+    /// Tier B's column is `name_upper`. An arm that writes `name` through
+    /// unchanged skips a per-row transform on 150,000,000 rows.
+    #[test]
+    fn an_arm_that_skips_the_ascii_uppercase_now_fails_a_closed_form_expectation() {
+        let batches = 500;
+        let exp = expected(batches, Tier::B);
+        let mut lower = 0i128;
+        for batch_id in 0..batches {
+            for seq in 0..EVENTS_PER_BATCH {
+                if !tier_b_keeps(batch_id, seq) {
+                    continue;
+                }
+                lower += str_fingerprint(&name_of(batch_id, seq));
+            }
+        }
+        assert_ne!(exp.name_sum, lower);
+    }
+
+    /// The regression `ddl.sql` warns about: lose the `DateTime64` scaling and
+    /// "every value silently lands in 1970". The expectation is far enough from
+    /// zero that any such arm misses it by orders of magnitude.
+    #[test]
+    fn an_arm_that_loses_the_datetime64_scaling_now_fails_a_closed_form_expectation() {
+        for tier in [Tier::A, Tier::B] {
+            let exp = expected(500, tier);
+            let floor = i128::from(BASE_TS_MS) * i128::from(exp.rows);
+            assert!(
+                exp.batch_ts_sum >= floor,
+                "{tier:?} batch_ts_sum {} is below {floor}, so an arm landing in 1970 could \
+                 coincide with it",
+                exp.batch_ts_sum
             );
         }
+    }
+
+    /// Both tiers must coalesce a null `region` to `''` — the target column is
+    /// `LowCardinality(String)`, not `LowCardinality(Nullable(String))`. An arm
+    /// that writes the region of every batch, null ones included, disagrees.
+    #[test]
+    fn an_arm_that_drops_the_null_region_coalesce_now_fails_a_closed_form_expectation() {
+        let batches = 500;
+        let exp = expected(batches, Tier::A);
+        let mut uncoalesced = 0i128;
+        for batch_id in 0..batches {
+            // What an arm that forgot the null branch would most plausibly write:
+            // the region string the batch would have had.
+            let fp = str_fingerprint(&format!("region-{}", batch_id % 7));
+            for _ in 0..EVENTS_PER_BATCH {
+                uncoalesced += fp;
+            }
+        }
+        assert_ne!(exp.region_sum, uncoalesced);
     }
 
     #[test]
@@ -1416,11 +2098,24 @@ mod tests {
 
     /// `expected` must agree with an independent flatten of the same corpus,
     /// so a mistake in the accumulator cannot pass as an expectation.
+    ///
+    /// The flatten reads the columns back out of *decoded Avro*, not out of the
+    /// derivation functions, which is what makes it independent: an expectation
+    /// computed from the same misreading of the specification as the encoder
+    /// would agree with the encoder and prove nothing.
     #[test]
     fn expectations_agree_with_an_independent_flatten() {
         let batches = 200u64;
         let mut rows = 0u64;
         let mut sum = 0i128;
+        let mut sensor_sum = 0i128;
+        let mut region_sum = 0i128;
+        let mut name_sum = 0i128;
+        let mut unit_sum = 0i128;
+        let mut tag_count_sum = 0i128;
+        let mut tag_sum = 0i128;
+        let mut batch_ts_sum = 0i128;
+        let mut null_quality_rows = 0u64;
         for batch_id in 0..batches {
             let datum = encode_batch(batch_id, 0);
             let v = apache_avro::from_avro_datum(schema(), &mut datum.as_slice(), None)
@@ -1433,10 +2128,120 @@ mod tests {
                 }
                 rows += 1;
                 sum += i128::from(ev.value);
+                sensor_sum += str_fingerprint(&b.sensor);
+                region_sum += str_fingerprint(b.region.as_deref().unwrap_or(""));
+                name_sum += str_fingerprint(&ascii_upper(&ev.name));
+                unit_sum += str_fingerprint(&ev.unit);
+                tag_count_sum += i128::try_from(ev.tags.len()).unwrap();
+                tag_sum += str_fingerprint(&ev.tags.concat());
+                batch_ts_sum += i128::from(b.batch_ts_ms);
+                if ev.quality.is_none() {
+                    null_quality_rows += 1;
+                }
             }
         }
         let exp = expected(batches, Tier::B);
         assert_eq!(exp.rows, rows);
         assert_eq!(exp.value_sum, sum);
+        assert_eq!(exp.sensor_sum, sensor_sum);
+        assert_eq!(exp.region_sum, region_sum);
+        assert_eq!(exp.name_sum, name_sum);
+        assert_eq!(exp.unit_sum, unit_sum);
+        assert_eq!(exp.tag_count_sum, tag_count_sum);
+        assert_eq!(exp.tag_sum, tag_sum);
+        assert_eq!(exp.batch_ts_sum, batch_ts_sum);
+        assert_eq!(exp.null_quality_rows, null_quality_rows);
+    }
+
+    /// The coordinated-omission property, stated as an assertion rather than as
+    /// a comment.
+    ///
+    /// A message due at `t` carries `t` whether it went at `t`, a millisecond
+    /// late, or five seconds late — so the whole of the wait it spent behind a
+    /// producer that had fallen behind lands in `ingest_ts - send_ts`. The
+    /// alternative implementation, `now()` at the moment of the send, is
+    /// modelled here as the thing that must NOT be equal to what is stamped:
+    /// under lateness it reports a shorter wait, and it reports the shortest
+    /// wait exactly when the pipeline is worst.
+    #[test]
+    fn a_sustained_send_is_stamped_with_its_scheduled_time_however_late_it_actually_went() {
+        let origin = 1_772_000_000_000_000i64;
+        let rate = 50_000u64;
+
+        for n in [0u64, 1, 49_999, 50_000, 1_000_000] {
+            let due = sustained_due_us(n, rate);
+            let stamped = send_ts_us_sustained(origin, due);
+            // The stamp is the schedule, and the schedule does not know when the
+            // send happened. Three different actual send times, one stamp.
+            for late_us in [0i64, 1_000, 5_000_000] {
+                let actually_sent_at = origin + i64::try_from(due).unwrap() + late_us;
+                assert_eq!(
+                    stamped,
+                    send_ts_us_sustained(origin, due),
+                    "the stamp moved with the send time"
+                );
+                assert!(
+                    actually_sent_at >= stamped,
+                    "a send can be late but never early: control only reaches the stamp \
+                     once the schedule is due"
+                );
+                // What `now()` at send would have reported, and why it is wrong:
+                // it charges the pipeline for zero of the producer's lateness.
+                let omitted = actually_sent_at - stamped;
+                assert_eq!(omitted, late_us);
+            }
+        }
+    }
+
+    /// The schedule is a pure function of the index and the target rate, so the
+    /// offered rate is what was asked for rather than whatever a loop of sleeps
+    /// happened to achieve.
+    #[test]
+    fn the_sustained_schedule_is_a_fixed_function_of_the_index_and_the_rate() {
+        let rate = 40_000u64;
+        // Exactly `rate` messages fall due in each whole second.
+        assert_eq!(sustained_due_us(0, rate), 0);
+        assert_eq!(sustained_due_us(rate, rate), 1_000_000);
+        assert_eq!(sustained_due_us(rate * 60, rate), 60_000_000);
+
+        // Monotonic and non-accumulating: the gap between the first and last
+        // message of a long run is the run's length, to within the one
+        // microsecond integer division can lose per message.
+        let n = 10_000_000u64;
+        let span_us = sustained_due_us(n, rate) - sustained_due_us(0, rate);
+        let exact_us = n * 1_000_000 / rate;
+        assert!(exact_us.abs_diff(span_us) <= 1, "{span_us} vs {exact_us}");
+    }
+
+    /// The stride interleave has to cover every global index exactly once, and
+    /// every index has to keep the due time it would have had with one thread —
+    /// or the aggregate offered rate is not the rate that was requested, and
+    /// `batch_id` stops being dense enough for the gate's contiguity test.
+    #[test]
+    fn every_message_belongs_to_exactly_one_producer_thread_and_keeps_its_global_schedule() {
+        let rate = 96_000u64;
+        for threads in [1u64, 2, 3, 8] {
+            let per_thread = 1_000u64;
+            let mut seen = std::collections::BTreeSet::new();
+            for slot in 0..threads {
+                for k in 0..per_thread {
+                    let global = slot + k * threads;
+                    assert!(seen.insert(global), "index {global} sent twice");
+                    // Derived from the GLOBAL index, so a thread's own counter
+                    // never becomes a private timeline.
+                    assert_eq!(sustained_due_us(global, rate), (global * 1_000_000) / rate);
+                }
+            }
+            assert_eq!(
+                u64::try_from(seen.len()).expect("count fits u64"),
+                threads * per_thread
+            );
+            assert_eq!(*seen.first().expect("non-empty"), 0);
+            assert_eq!(
+                *seen.last().expect("non-empty"),
+                threads * per_thread - 1,
+                "the covered range must be contiguous, or batch_id is not dense"
+            );
+        }
     }
 }

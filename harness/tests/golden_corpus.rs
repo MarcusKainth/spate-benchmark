@@ -8,17 +8,23 @@
 //! against, and if it changes silently then two result sets are being compared
 //! across different inputs while claiming to be like-for-like.
 //!
-//! So these values are absolute. They were taken from the pre-extraction harness
+//! So these values are absolute. The encoding fingerprints and the first three
+//! closed-form expectations were taken from the pre-extraction harness
 //! (`etl-rs/benchmarks/src/comparison_data.rs` at `f41280d51165`) and asserted
 //! here unchanged, which is what proves the move between repositories did not
-//! alter a single byte of what is being measured.
+//! alter a single byte of what is being measured. The remaining closed-form
+//! expectations pin columns the pre-extraction gate never checked, so they have
+//! no earlier value to be carried forward from and are pinned from here on.
 //!
 //! **If one of these fails, do not update the constant to match.** Either the
-//! generator changed — in which case `workload/workload.toml` or the schema
-//! moved and `dataset_version` must move with it, splitting the comparability
-//! group — or something changed that should not have. Both need a human.
+//! generator changed — in which case `workload/workload.toml`, the schema, the
+//! DDL or the marked region of `harness/src/corpus.rs` moved and
+//! `dataset_version` must move with it, splitting the comparability group — or
+//! something changed that should not have. Both need a human.
 
-use spate_benchmark_harness::corpus::{Tier, encode_batch, expected, frame_confluent};
+use spate_benchmark_harness::corpus::{
+    Tier, encode_batch, expected, frame_confluent, str_fingerprint,
+};
 
 /// FNV-1a, inline. A dependency-free fingerprint: the point is stability across
 /// versions of this repository, and a hash crate that changed its output would
@@ -86,21 +92,74 @@ fn closed_form_expectations_are_unchanged() {
     assert_eq!(a.rows, 100_000);
     assert_eq!(a.value_sum, 49_950_630_000_000);
     assert_eq!(a.value_scaled_sum, 0, "tier A derives no scaled column");
+    assert_eq!(a.sensor_sum, 1_173_538_243_778_728_244_334_000);
+    assert_eq!(a.region_sum, 1_073_775_014_116_685_352_450_000);
+    assert_eq!(a.name_sum, 1_115_741_519_765_750_538_698_296);
+    assert_eq!(a.unit_sum, 756_001_010_861_599_587_500);
+    assert_eq!(a.tag_count_sum, 150_000);
+    assert_eq!(a.tag_sum, 660_617_217_952_123_568_699_526);
+    assert_eq!(a.batch_ts_sum, 177_200_000_049_950_000);
+    assert_eq!(a.null_quality_rows, 20_000);
 
     let b = expected(BATCHES, Tier::B);
     assert_eq!(b.rows, 73_500);
     assert_eq!(b.value_sum, 36_712_213_045_500);
     assert_eq!(b.value_scaled_sum, 1_903_970_758_089_327);
+    assert_eq!(b.sensor_sum, 862_547_254_290_276_801_415_122);
+    assert_eq!(b.region_sum, 789_224_923_606_139_885_762_498);
+    assert_eq!(b.name_sum, 650_904_861_039_966_432_802_372);
+    assert_eq!(b.unit_sum, 635_040_811_622_225_011_500);
+    assert_eq!(b.tag_count_sum, 105_000);
+    assert_eq!(b.tag_sum, 483_030_864_161_340_461_867_712);
+    assert_eq!(b.batch_ts_sum, 130_242_000_036_711_750);
+    assert_eq!(b.null_quality_rows, 17_500);
+
+    // Tier A carries `name`, tier B carries `name_upper`. If these ever agreed,
+    // the tier-B uppercase would have stopped happening and every sum above
+    // would still be self-consistent.
+    assert_ne!(a.name_sum, b.name_sum);
+}
+
+/// The fingerprint is half of the same-work checksum, and the other half lives
+/// in a ClickHouse expression this test cannot execute.
+///
+/// So it is pinned against literals: if `str_fingerprint` is ever "simplified",
+/// this fails immediately and says so, rather than the whole gate quietly
+/// disagreeing with the server the next time an arm runs.
+#[test]
+fn the_string_fingerprint_is_unchanged() {
+    // An absent value. A coalesced null region and an arm emitting `tags = []`
+    // both land here, which is why the tag and region sums can catch them.
+    assert_eq!(str_fingerprint(""), 0);
+    // Shorter than the eight bytes `reinterpretAsUInt64` reads.
+    assert_eq!(str_fingerprint("ms"), 57_568);
+    // Exactly eight bytes, and its lower-case twin: tier B's uppercase.
+    assert_eq!(str_fingerprint("METRIC_7"), 9_557_931_003_773_166_724);
+    assert_eq!(str_fingerprint("metric_7"), 11_872_851_856_941_630_628);
+    // Longer than eight bytes, so the reversed half is doing the work.
+    assert_eq!(str_fingerprint("sensor-1023"), 11_861_606_880_014_931_878);
+    assert_eq!(str_fingerprint("region-3"), 11_930_833_490_185_392_805);
+    // A three-element tag array, concatenated with no separator.
+    assert_eq!(
+        str_fingerprint("tag-15tag-0tag-1"),
+        14_456_948_040_575_913_637
+    );
 }
 
 #[test]
 fn the_dataset_version_matches_the_committed_workload() {
-    // Pinned so that editing the schema, the DDL or the generator constants
-    // without noticing is impossible: this test fails and points at the change.
-    // Updating it is correct — but it must happen in the same commit as the
-    // corpus change, which is the review artefact worth having.
+    // Pinned so that editing the schema, the DDL's *structure*, the generator
+    // constants or the generator's arithmetic without noticing is impossible:
+    // this test fails and points at the change. Updating it is correct — but it
+    // must happen in the same commit as the corpus change, which is the review
+    // artefact worth having.
+    //
+    // The converse is pinned too, and it is why the `d1` scheme was replaced:
+    // correcting a comment in any of those files must leave this alone. If a
+    // pure prose change makes this test fail, the failure is in the derivation,
+    // not in the prose.
     assert_eq!(
         spate_benchmark_harness::report::DATASET_VERSION,
-        "d1-9aeec63b4931"
+        "d2-2985195b5999"
     );
 }

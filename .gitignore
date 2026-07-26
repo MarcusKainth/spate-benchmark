@@ -19,6 +19,16 @@ yarn-error.log
 # results/ is the source of truth and is committed; the sharded copies are not.
 website/static/bench
 
-# Generated into the docs tree at build time from the root METHODOLOGY.md
-# by website/scripts/sync-docs.mjs. Edit the root file, not the copy.
-docs/methodology.md
+# Generated into the docs tree at build time from methodology/ by
+# website/scripts/sync-docs.mjs. Edit the root files, not the copies.
+docs/contract/
+
+# Records from runs whose trigger bars publication — `bench run --trigger
+# tuning`, and a PR run. `results::root_for` sends them here rather than into
+# results/, so that a configuration search cannot land in the same file as the
+# arm's published numbers. They are working data for a search and never an
+# archive: the configuration a search settles on is declared in the descriptor
+# and re-measured as an ordinary run. Ignored rather than committed because
+# `bench validate` refuses these records under results/ and would not see them
+# here — so the one way they could quietly accumulate is `git add -A`.
+/tuning

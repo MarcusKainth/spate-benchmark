@@ -61,6 +61,37 @@ pub enum Class {
     Fixture,
 }
 
+impl Class {
+    /// Why records from this class may not be published, if they may not.
+    ///
+    /// Written as an exhaustive match rather than a negated comparison so that
+    /// adding a class forces somebody to answer the question for it, and written
+    /// as a *reason* rather than a boolean because the reason is the part that
+    /// was got wrong. The driver answered `false` here by attaching
+    /// `Flag::ThirdPartyHardware` to the record — a flag that means "produced on
+    /// hardware we do not control", which is a different claim, and a false one
+    /// about a fixture run on the very machine the reference profile describes.
+    /// A consumer filtering on that flag would have read a synthetic development
+    /// record as a real measurement taken somewhere else.
+    ///
+    /// The string is the marker a record carries, so it has to say what is wrong
+    /// with the number rather than what is wrong with the hardware.
+    #[must_use]
+    pub fn publication_bar(self) -> Option<&'static str> {
+        match self {
+            // Deliberately still runnable. A fixture environment is where
+            // exploratory work goes — a configuration sweep whose records must
+            // exist somewhere and must never be published — so the answer is to
+            // mark its records unmistakably, not to refuse the run and push the
+            // work somewhere with no record at all.
+            Self::Fixture => {
+                Some("fixture environment: synthetic development data, never published")
+            }
+            Self::Authoritative | Self::Indicative => None,
+        }
+    }
+}
+
 /// Hardware description.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,25 +150,21 @@ pub struct CeilingRef {
     pub file: String,
 }
 
-/// The measured consume ceiling, in **messages** per second.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Ceiling {
-    /// Messages per second the shared consume path sustained.
-    ///
-    /// Messages, not rows, deliberately: the ceiling is a property of the
-    /// consume path, and rows per second depends on the fan-out factor. Storing
-    /// rows would mean that changing `events_per_batch` silently invalidated
-    /// this file — which is exactly the class of mistake that produced several
-    /// retracted numbers already. The driver multiplies by the current fan-out
-    /// itself.
-    pub consume_msgs_per_s: u64,
-}
-
-/// The fraction of the measured ceiling above which an arm is infra-bound.
+/// The ceilings an arm may be gated against, resolved for the current corpus.
 ///
-/// Above this we are measuring the shared consume path rather than the system,
-/// and the run is recorded with `status: infra_bound` rather than published.
-pub const HEADROOM_LIMIT: f64 = 0.70;
+/// Re-exported rather than defined here because a ceiling is a property of the
+/// measurement rather than of the hardware profile, and because the resolution —
+/// which of the committed figures still describe this corpus and this envelope —
+/// is [`crate::ceiling`]'s whole subject. The name stays `Ceiling` so that every
+/// call site that already says `environment::Ceiling` keeps resolving to the one
+/// type the harness gates on.
+pub use crate::ceiling::Ceiling;
+/// The fraction of a measured ceiling above which an arm is infra-bound.
+///
+/// Re-exported for the same reason: the limit belongs beside the ceilings, and
+/// `environment::HEADROOM_LIMIT` is the name the driver and the methodology both
+/// already use.
+pub use crate::ceiling::HEADROOM_LIMIT;
 
 impl Environment {
     /// Loads the profile named `id` from `dir`.
@@ -167,16 +194,47 @@ impl Environment {
         })
     }
 
-    /// The measured ceiling for this environment.
+    /// Where this environment's ceilings file lives.
+    #[must_use]
+    pub fn ceilings_path(&self) -> PathBuf {
+        self.dir.join(&self.spec.ceiling.file)
+    }
+
+    /// Every ceiling measured for this environment, exactly as committed.
+    ///
+    /// The file, not the gate. `bench ceiling` needs this to show a maintainer
+    /// what was measured *and* why it is or is not usable; everything that acts
+    /// on a ceiling wants [`Environment::ceiling`] instead.
+    ///
+    /// # Errors
+    ///
+    /// If the referenced file is missing or does not parse.
+    pub fn ceilings(&self) -> Result<crate::ceiling::Ceilings, String> {
+        crate::ceiling::Ceilings::load(&self.ceilings_path())
+    }
+
+    /// The ceilings this environment may actually be **gated against**.
+    ///
+    /// Resolved against the corpus the harness currently generates and against
+    /// this profile's own infrastructure envelope, so a figure measured at
+    /// another message size or under other caps is dropped rather than scaled.
+    /// A dropped ceiling leaves `consume_msgs_per_s` at zero — which is what
+    /// raises `Flag::HeadroomUnproven` — and its reason in
+    /// [`Ceiling::refusals`], so "we did not gate this arm" never reads as "this
+    /// arm cleared the gate".
+    ///
+    /// Returning `Ok` with nothing gateable rather than `Err` is deliberate.
+    /// `Err` here means the file is broken and somebody has to fix a file; a
+    /// refusal means the file is fine and somebody has to run a measurement.
+    /// Collapsing the two would make a stale ceiling look like a parse error.
     ///
     /// # Errors
     ///
     /// If the referenced file is missing or does not parse.
     pub fn ceiling(&self) -> Result<Ceiling, String> {
-        let path = self.dir.join(&self.spec.ceiling.file);
-        let src =
-            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        serde_json::from_str(&src).map_err(|e| format!("{}: {e}", path.display()))
+        Ok(self
+            .ceilings()?
+            .gate(crate::ceiling::corpus_message_bytes(), &self.infra_digest()))
     }
 
     /// Digest over the **envelope-defining** subset of the infrastructure.
@@ -206,7 +264,17 @@ impl Environment {
     /// Whether results from here may be published.
     #[must_use]
     pub fn is_publishable(&self) -> bool {
-        self.spec.class != Class::Fixture
+        self.spec.class.publication_bar().is_none()
+    }
+
+    /// The marker every record produced here must carry, if any.
+    ///
+    /// `None` for a publishable environment. The driver prefixes the record's
+    /// `note` with this, so a fixture record says so in the archive rather than
+    /// only on the terminal of whoever ran it.
+    #[must_use]
+    pub fn publication_bar(&self) -> Option<&'static str> {
+        self.spec.class.publication_bar()
     }
 }
 
@@ -234,9 +302,34 @@ mod tests {
     }
 
     #[test]
-    fn the_headroom_limit_is_the_documented_seventy_percent() {
-        // Named rather than inlined at the call site so the methodology and the
-        // code cannot state different limits.
-        assert!((HEADROOM_LIMIT - 0.70).abs() < f64::EPSILON);
+    fn only_the_fixture_class_bars_publication() {
+        // The defect: the driver read "not publishable" and wrote
+        // `Flag::ThirdPartyHardware` onto the record, which means "produced on
+        // hardware we do not control". A fixture run happens on our own machine,
+        // so the record made a false claim about where it came from while
+        // saying nothing true about why it must not be believed — and the run
+        // still appended to `results/`.
+        assert!(Class::Fixture.publication_bar().is_some());
+        assert!(Class::Indicative.publication_bar().is_none());
+        assert!(Class::Authoritative.publication_bar().is_none());
+    }
+
+    #[test]
+    fn the_publication_bar_describes_the_data_not_the_hardware() {
+        let bar = Class::Fixture.publication_bar().expect("fixture is barred");
+        assert!(bar.contains("fixture"), "{bar}");
+        assert!(
+            !bar.contains("hardware"),
+            "the marker must not restate the third-party-hardware claim: {bar}"
+        );
+    }
+
+    /// The limit itself is pinned in `crate::ceiling`, where it lives. This
+    /// asserts the re-export, because the driver imports it from here and a
+    /// profile module that stopped offering the name would fail the gate rather
+    /// than fail to compile if the import were ever made conditional.
+    #[test]
+    fn the_headroom_limit_is_reachable_under_the_name_the_driver_imports() {
+        assert!((HEADROOM_LIMIT - crate::ceiling::HEADROOM_LIMIT).abs() < f64::EPSILON);
     }
 }

@@ -14,7 +14,7 @@ import java.time.ZoneOffset;
  * The one Avro schema, read from {@code workload/schema/sensor_batch.avsc}.
  *
  * <p>The Dockerfile copies that committed file into this jar's resources; the
- * schema is never re-declared here, which {@code METHODOLOGY.md} requires.
+ * schema is never re-declared here, which {@code methodology/} requires.
  *
  * <p>Field access on the hot path is <em>positional</em> ({@code GenericRecord.get(int)}),
  * because a name lookup per field would cost a hash probe on every one of ~44

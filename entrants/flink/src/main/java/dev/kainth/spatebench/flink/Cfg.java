@@ -5,7 +5,7 @@ import java.util.Locale;
 /**
  * Environment lookups, with the defaults that target the live bench network.
  *
- * <p>Nothing here is measurement instrumentation. Per {@code METHODOLOGY.md}
+ * <p>Nothing here is measurement instrumentation. Per {@code methodology/}
  * every published figure comes from the driver's cgroup sampler and from
  * ClickHouse; this class only reads configuration.
  */

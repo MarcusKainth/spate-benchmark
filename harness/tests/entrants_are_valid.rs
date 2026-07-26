@@ -73,6 +73,35 @@ fn every_active_entrant_has_a_realistic_default() {
 }
 
 #[test]
+fn the_flink_arm_running_our_own_deserializer_stays_labelled_stripped() {
+    // METHODOLOGY calls the anti-gaming valve "not hypothetical" and names this
+    // arm as the case: `ReusingAvroDeserializationSchema` is code *we* wrote, so
+    // rule 1 bars it from the headline even though it makes Flink look better.
+    //
+    // What that protection consisted of was the word `stripped` on one
+    // hand-written line of `entrants/flink/entrant.toml`. Editing it to
+    // `realistic` passed every check in this repository and moved
+    // hand-written-decoder numbers into the site's default view. Naming the arm
+    // here means the edit also has to delete a test that says why it must not be
+    // made — and if the arm is genuinely retired, this test is deleted in the
+    // same change, deliberately.
+    let entrants = entrant::load_all(&entrants_dir()).expect("descriptors valid");
+    let flink = entrants
+        .iter()
+        .find(|e| e.id() == "flink")
+        .expect("flink entrant");
+    let v = flink
+        .variant("tier-a-reusing")
+        .expect("the reusing-deserializer arm; remove this test if it is retired");
+    assert_eq!(
+        v.approach,
+        Approach::Stripped,
+        "flink {}: runs a deserializer Flink does not ship, so it is never the headline",
+        v.id
+    );
+}
+
+#[test]
 fn planned_entrants_explain_themselves() {
     // A roadmap that says only "later" is a promise, not a plan. Anything not yet
     // measured has to say what is blocking it, so the gap is legible to a reader
@@ -142,6 +171,55 @@ fn flink_jvm_sizing_fits_its_declared_container() {
 }
 
 #[test]
+fn the_flink_images_parallelism_matches_the_number_it_asserts_about_itself() {
+    // Two files inside one image have to agree, and neither is obviously the
+    // source of truth — the shape that drifts silently.
+    //
+    // `ComparisonJob` refuses to submit unless the parallelism the cluster
+    // resolved equals `EXPECT_PARALLELISM`. That check is what stops a
+    // parallelism sweep recording values it never ran at, and it only works if
+    // the image's own default asserts the truth about itself: a container run by
+    // hand gets `config.yaml`'s `parallelism.default` and the Dockerfile's
+    // `EXPECT_PARALLELISM`, with no driver to set either. If those two disagree,
+    // the image refuses to start every job, and the first person to meet it will
+    // be told that FLINK_PROPERTIES is broken when it is not.
+    //
+    // The descriptor's `parallelism` knob is deliberately NOT tied to these. It
+    // is what the driver applies, and requiring it to match the image would mean
+    // an image rebuild every time the published configuration changed — which is
+    // exactly the coupling making the knob reachable was for.
+    let entrants = entrant::load_all(&entrants_dir()).expect("descriptors valid");
+    let flink = entrants
+        .iter()
+        .find(|e| e.id() == "flink")
+        .expect("flink entrant");
+
+    let config = std::fs::read_to_string(flink.dir.join("config.yaml")).expect("read config.yaml");
+    let mut lines = config.lines().skip_while(|l| l.trim() != "parallelism:");
+    lines.next().expect("config.yaml declares parallelism");
+    let default: u32 = lines
+        .find_map(|l| l.trim().strip_prefix("default:"))
+        .and_then(|v| v.trim().parse().ok())
+        .expect("config.yaml declares parallelism.default as an integer");
+
+    let dockerfile =
+        std::fs::read_to_string(flink.dir.join("Dockerfile")).expect("read Dockerfile");
+    let expected: u32 = dockerfile
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("EXPECT_PARALLELISM="))
+        .and_then(|v| v.trim_end_matches(" \\").trim().parse().ok())
+        .expect("the Dockerfile sets EXPECT_PARALLELISM to an integer");
+
+    assert_eq!(
+        default, expected,
+        "entrants/flink/config.yaml sets parallelism.default={default} but the \
+         Dockerfile sets EXPECT_PARALLELISM={expected}. ComparisonJob compares the \
+         two at job submission, so a hand-run container would refuse every job and \
+         report it as a configuration-override failure that has not happened."
+    );
+}
+
+#[test]
 fn the_rust_toolchain_pin_matches_the_arm_image() {
     // Two files have to agree and neither is obviously authoritative: the
     // toolchain that runs the host gates, and the one inside the image that
@@ -194,13 +272,13 @@ fn process_sizes(config: &str) -> Vec<u64> {
     out
 }
 
-/// Parses `3900m`, `4g`, `960m` into MiB.
+/// `3900m`, `4g`, `960m` as MiB.
+///
+/// Delegates rather than parsing, because this used to be the fourth copy of the
+/// suffix parser and the one that had diverged furthest: it returned MiB where
+/// the others returned bytes, and rejected suffixes the descriptors are allowed
+/// to use. A test whose own arithmetic disagrees with the code under test is not
+/// a check.
 fn mib(s: &str) -> Option<u64> {
-    let s = s.trim();
-    let (digits, mult) = match s.chars().last()? {
-        'g' | 'G' => (&s[..s.len() - 1], 1024),
-        'm' | 'M' => (&s[..s.len() - 1], 1),
-        _ => return None,
-    };
-    digits.trim().parse::<u64>().ok().map(|n| n * mult)
+    entrant::parse_memory(s).map(|bytes| bytes / (1024 * 1024))
 }
