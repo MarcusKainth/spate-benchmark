@@ -34,6 +34,20 @@ updates:
       npm:
         patterns: ["*"]
         exclude-patterns: ["@docusaurus/*"]
+    # TypeScript's major is not this repository's to take. `@docusaurus/tsconfig`
+    # is what website/tsconfig.json extends, and Docusaurus 3.x targets the 5.x
+    # line — so a major lands as a typecheck failure rather than a choice. The
+    # first attempt at this proposed 5.6 → 7.0, which removed `baseUrl` and broke
+    # `npm run typecheck` outright.
+    #
+    # Scoped to typescript and to majors deliberately. A blanket non-major rule on
+    # the whole group would also freeze the patch and minor bumps that carry the
+    # security fixes, which is the opposite of what this file is for. When
+    # Docusaurus 4 moves the supported line, delete this and take the major in its
+    # own PR.
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # Keeps the SHA pins in .github/workflows current. Every action there is
   # pinned to a full commit SHA, which is the right default and also a way to
