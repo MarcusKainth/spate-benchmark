@@ -1,0 +1,63 @@
+name: Bug in the harness or the site
+description: bench does the wrong thing, or the published site renders something wrong.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For "I ran this and got a different number", that is useful and wanted —
+        see [Reproducing
+        this](https://github.com/MarcusKainth/spate-benchmark/blob/main/docs/reproduce.md)
+        first, because a different environment or a busy machine explains most of
+        it. Run-to-run spread reaches 14.5% on throughput even on a quiet host.
+
+        A benchmark that cannot be reproduced is a claim, not evidence, so if it
+        is none of those, please do open this.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - bench CLI / harness
+        - the published site
+        - a result that looks wrong
+        - build or CI
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran or the page you were on, and what it did.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: >-
+        For a harness bug: the output of `bench validate` (it prints the harness
+        and dataset versions), your OS and Docker setup, and your environment
+        profile id if you added one. For a site bug: browser and viewport.
+      placeholder: |
+        $ bench validate
+        harness v2, dataset d2-...
+      render: shell
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: Any error or relevant log. Long output is fine.
+      render: shell

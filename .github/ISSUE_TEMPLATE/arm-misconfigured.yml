@@ -1,0 +1,85 @@
+name: An arm is configured badly
+description: A system in this benchmark is not being run the way it should be.
+title: "[arm] "
+labels: ["arm-configuration"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This benchmark is run by the author of one of the systems in it, so "we
+        tuned them until they lost" is the obvious accusation and this is the
+        report that answers it. A slow competitor arm is a bug, not a result.
+
+        **If you know what the fix is, a pull request is more useful than an
+        issue.** Everything an arm does is in `entrants/<id>/`, and nothing else
+        needs to change. See
+        [CONTRIBUTING.md](https://github.com/MarcusKainth/spate-benchmark/blob/main/CONTRIBUTING.md).
+
+  - type: dropdown
+    id: entrant
+    attributes:
+      label: Which system
+      options:
+        - spate
+        - flink
+        - clickhouse-kafka-engine
+        - kafka-connect
+        - redpanda-connect
+        - vector
+        - other / not listed yet
+    validations:
+      required: true
+
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What is configured wrong
+      description: >-
+        Which setting, and what it is set to today. A pointer into
+        `entrants/<id>/` is ideal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: fix
+    attributes:
+      label: What it should be instead
+      description: The value, or the API that should be used in place of this one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: effect
+    attributes:
+      label: What you expect that to do to the number, and why
+      description: >-
+        A rough direction and magnitude is fine. This gets checked against what
+        the re-measurement actually returns, including when it disagrees.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: The two rules
+      description: >-
+        Both from [methodology/](https://github.com/MarcusKainth/spate-benchmark/blob/main/methodology/README.md).
+        If your fix does not fit inside rule 1, say so below and open the issue
+        anyway — that may be a bug in the contract rather than in the arm.
+      options:
+        - label: >-
+            This is configuration, or a switch to a better API the system
+            already ships — not a hand-written replacement for the system's own
+            internals.
+        - label: >-
+            The system still gives at-least-once delivery with a comparable
+            durability interval. Turning fault tolerance off to go faster is not
+            permitted.
+
+  - type: textarea
+    id: affiliation
+    attributes:
+      label: Your relationship to this system, if any
+      description: >-
+        Entirely optional and never counts against a report. It is useful
+        context when the answer comes back and gets published.

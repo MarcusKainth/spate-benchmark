@@ -1,0 +1,55 @@
+Creative Commons Attribution 4.0 International (CC-BY-4.0)
+SPDX-License-Identifier: CC-BY-4.0
+
+Everything in this directory — the published measurement records — is licensed
+under CC-BY-4.0, not under the Apache-2.0 licence that covers the code in the
+rest of this repository. See the LICENSE file at the repository root for the
+code.
+
+The full legal text is at:
+
+    https://creativecommons.org/licenses/by/4.0/legalcode
+
+A plain-language summary is at:
+
+    https://creativecommons.org/licenses/by/4.0/
+
+
+WHAT THIS MEANS
+
+Use these numbers. Copy them, republish them, chart them, quote them in a paper
+or a blog post or a competitor's marketing, commercially or not. The only
+condition is attribution.
+
+
+HOW TO ATTRIBUTE
+
+Credit "Spate Benchmark" and link to https://spate-benchmark.kainth.dev, note
+that you changed the data if you did, and do not imply this project endorses
+whatever you used it for.
+
+
+PLEASE ALSO LINK BACK TO THE SPECIFIC RECORDS
+
+Not a licence condition, and the request matters more here than the usual
+courtesy. This benchmark is published by the author of one of the systems it
+measures, so a reader who cannot get from a quoted number back to its provenance
+has no way to check the one claim most worth checking.
+
+Every record carries what it needs for that: the system version, the exact image
+digest, `env_id` and `env_digest` for the hardware, `harness_version` and
+`dataset_version` for the protocol and corpus, and a `run_id`. Quote a number
+with enough of that to find it again.
+
+
+A NUMBER ON ITS OWN CAN BE MISLEADING
+
+Two records are only comparable when `harness_version`, `dataset_version` and
+`env_id` all match — the site refuses to draw them on one axis otherwise, rather
+than quietly averaging across them. Records also carry a `status`: one marked
+`infra_bound` reached the shared infrastructure's limit rather than its own, and
+is published as a measurement but not as a system comparison.
+
+Current measurements come from a single macOS host and are labelled indicative
+rather than authoritative. Carrying that caveat along is not required by the
+licence. It is just accurate.

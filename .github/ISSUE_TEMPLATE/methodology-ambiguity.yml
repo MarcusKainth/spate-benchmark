@@ -1,0 +1,54 @@
+name: The contract is ambiguous or wrong
+description: Something in methodology/ can be read two ways, or says something untrue.
+title: "[contract] "
+labels: ["methodology"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `methodology/` is normative. It is the complete specification for an arm,
+        including ours, and if it is ambiguous **that is a bug in the document**.
+
+        An arm that guesses and quietly deviates is worse than no arm at all,
+        because it produces a number we would then publish. So this is worth an
+        issue even when you have already guessed correctly.
+
+  - type: dropdown
+    id: document
+    attributes:
+      label: Which document
+      options:
+        - methodology/README.md — the rules
+        - methodology/envelope.md — the resource envelope
+        - methodology/measurement.md — how you are measured
+        - methodology/comparability.md — what makes two numbers comparable
+        - more than one, or not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: passage
+    attributes:
+      label: The passage
+      description: Quote it, or link to the line.
+    validations:
+      required: true
+
+  - type: textarea
+    id: readings
+    attributes:
+      label: The two readings
+      description: >-
+        What it could mean, and what else it could mean — and if it matters,
+        which one you implemented. For a plain factual error, just say what is
+        true instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: consequence
+    attributes:
+      label: What turns on the answer
+      description: >-
+        Optional. Whether it changes a number, disqualifies a comparison, or is
+        only a wording fix — useful for knowing how urgent this is.

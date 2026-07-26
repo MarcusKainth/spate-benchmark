@@ -1,0 +1,8 @@
+# Review on every pull request is requested automatically from here.
+#
+# `main` requires a pull request but zero approvals, so this enforces nothing —
+# a solo maintainer cannot approve their own PR, and a rule requiring one would
+# block every merge. Its job is to make sure a fork's pull request lands in a
+# review queue rather than sitting unnoticed.
+
+* @MarcusKainth
