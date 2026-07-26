@@ -1,0 +1,49 @@
+# Dependency updates.
+#
+# Grouped to one pull request per ecosystem. Ungrouped, three ecosystems at
+# weekly cadence is a steady trickle of single-crate PRs, and on a repository
+# where every merge has to pass CI and land through a pull request that is enough
+# noise to make the real contributions harder to see.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+    # The framework under test. Its rev is provenance, not a dependency version:
+    # it lands in Cargo.lock, travels into `sut.commit` on every record, and
+    # moving it changes which code was measured. Cargo.toml says it moves "in one
+    # PR whose diff IS the provenance change" — which is a decision, not
+    # something to be woken up about weekly.
+    ignore:
+      - dependency-name: "etl-*"
+
+  - package-ecosystem: npm
+    directory: /website
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      docusaurus:
+        patterns: ["@docusaurus/*"]
+      npm:
+        patterns: ["*"]
+        exclude-patterns: ["@docusaurus/*"]
+
+  # Keeps the SHA pins in .github/workflows current. Every action there is
+  # pinned to a full commit SHA, which is the right default and also a way to
+  # quietly freeze on a stale action for a year — this is what stops that, and
+  # what makes the repository's `sha_pinning_required` setting sustainable
+  # rather than a thing to work around.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
