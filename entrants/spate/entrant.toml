@@ -3,8 +3,8 @@ schema = 1
 [entrant]
 id       = "spate"
 name     = "Spate"
-homepage = "https://github.com/MarcusKainth/spate-etl"
-repo     = "https://github.com/MarcusKainth/spate-etl"
+homepage = "https://github.com/MarcusKainth/etl-rs"
+repo     = "https://github.com/MarcusKainth/etl-rs"
 licence  = "Apache-2.0"
 # `self` marks this as the vendor's own entry. The site renders a disclosure on
 # every row of an entrant with this value, and nothing in the site branches on

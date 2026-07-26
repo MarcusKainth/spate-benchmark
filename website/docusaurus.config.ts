@@ -96,7 +96,7 @@ const config: Config = {
           title: 'Source',
           items: [
             {label: 'Repository', href: githubUrl},
-            {label: 'Spate', href: 'https://github.com/MarcusKainth/spate-etl'},
+            {label: 'Spate', href: 'https://github.com/MarcusKainth/etl-rs'},
           ],
         },
       ],

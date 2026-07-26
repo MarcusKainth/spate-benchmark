@@ -25,10 +25,16 @@ response to one is to make it impossible to hide:
 - Where we lose, that is published with the same prominence as where we win. A
   comparison page containing only wins is read as marketing and convinces nobody.
 
+One asymmetry is not yet closed, and it is ours: the framework Spate is built on
+is not public, so its arm's image needs a credential to build while every other
+arm builds from a clean clone. That weakens reproducibility on precisely the arm
+that stands to gain from it, and it resolves when the framework publishes.
+[Reproducing this](docs/reproduce.md) says what that costs you today.
+
 If you think an arm is configured badly, that is a bug and we want the pull
 request. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-[spate]: https://github.com/MarcusKainth/spate-etl
+[spate]: https://github.com/MarcusKainth/etl-rs
 
 ## How to read a number here
 
