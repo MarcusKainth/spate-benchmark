@@ -1,37 +1,4 @@
 # Build the site here, deploy to Cloudflare Pages by Direct Upload.
-#
-# WHY NOT CLOUDFLARE'S OWN BUILD SERVICE (Pages Git integration)
-#
-# It is genuinely the lower-effort option — connect the repo, set a build
-# command, get preview deploys free — and it was rejected for three reasons that
-# are specific to a benchmark site rather than general preference.
-#
-#   1. STALENESS IS COMPUTED AT BUILD TIME. Every row's age badge, and the
-#      "measured under a superseded harness" marker, are derived from `now`
-#      against the record's timestamp. A row therefore goes stale with no commit
-#      to trigger a rebuild, and a site that only builds on push would keep
-#      asserting a number is current long after it stopped being so. That is the
-#      one failure mode this site cannot have, because staleness is the honesty
-#      mechanism. A nightly rebuild is a cron here and is not expressible in the
-#      Git integration without calling back out to a scheduler anyway.
-#
-#   2. THE GUARDS LIVE BETWEEN BUILD AND DEPLOY. `if-no-files-found: error` on
-#      the artifact exists because a silently-empty build uploads nothing and the
-#      deploy then wipes the live site. The file-count ceiling exists because
-#      Cloudflare caps files per deployment and the shard count grows with the
-#      archive. Both sit in the seam between building and publishing, which the
-#      Git integration does not expose.
-#
-#   3. CLOUDFLARE WOULD NEED READ ACCESS TO THE REPOSITORY. Direct Upload means
-#      the only thing crossing the boundary is a directory of built files.
-#
-# (Aside on terminology: there is no "building inside Workers". Workers is the
-# runtime; the hosted build service is part of Pages. What is being compared is
-# where the build RUNS, not what serves the result.)
-#
-# The split below — a build job that holds no credential, and a deploy job that
-# holds no code — is copied from the framework repository's docs deploy, along
-# with the reasoning in its comments.
 
 name: Deploy
 

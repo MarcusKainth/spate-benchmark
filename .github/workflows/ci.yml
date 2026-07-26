@@ -1,29 +1,4 @@
 # The gates this repository claims to have.
-#
-# WHY THIS FILE EXISTS
-#
-# It did not, and six places said it did. `methodology/` stated that "CI
-# asserts [the harness version table] stays in step with the constant in
-# `harness/src/report.rs`"; `README.md` described `bench validate` as "what CI
-# checks, runnable locally"; `.gitattributes` named a `results_are_valid` check
-# as the backstop that makes `merge=union` on the results archive safe; the
-# Spate descriptor claimed "a CI lint enforces that [nothing branches on the
-# literal id], so the neutrality claim is checkable rather than asserted". The
-# only workflow in the repository built the website.
-#
-# For a benchmark whose entire argument is that its numbers are checkable, a
-# claimed guard that does not exist is worse than an absent one: it is the guard
-# a reader is told to rely on instead of checking themselves.
-#
-# WHAT IS AND IS NOT GATED HERE
-#
-# Everything that can run without Docker and without hours of machine time. The
-# measurement itself is not here and cannot be: a sweep takes hours on dedicated
-# hardware, appends to a published archive, and is run deliberately by a
-# maintainer rather than by a push. What CI can do is make sure the code that
-# would take the measurement is correct, that every descriptor and every already
-# published record still validates, and that the site renders the fairness
-# contract it claims to.
 
 name: CI
 
