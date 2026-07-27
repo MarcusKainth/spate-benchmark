@@ -1,7 +1,7 @@
 //! The versioned record every measurement emits.
 //!
 //! One JSON object per line, appended to a file under `results/`. Forked from
-//! `etl-rs/benchmarks/src/report.rs` at `f41280d51165` and immediately taken to
+//! `spate/benchmarks/src/report.rs` at `6f28a8b8912e` and immediately taken to
 //! schema 2. **Fixes do not flow between the two copies.** That repository stays
 //! on schema 1 for its two dozen self-comparison datasets, which have no system
 //! under test, no environment registry and no comparability rules; sharing a
@@ -704,7 +704,7 @@ mod tests {
             entrant: "spate".to_owned(),
             variant_id: "tier-a-native".to_owned(),
             version: Some("0.1.0-dev".to_owned()),
-            commit: Some("f41280d51165".to_owned()),
+            commit: Some("6f28a8b8912e".to_owned()),
             image_digest: format!("sha256:{}", "a".repeat(64)),
             image: "spate-bench-spate".to_owned(),
             toolchain: Some("rustc 1.97.0".to_owned()),

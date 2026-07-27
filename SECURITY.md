@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Use [**private vulnerability
-reporting**](https://github.com/MarcusKainth/spate-benchmark/security/advisories/new).
+reporting**](https://github.com/spate-etl/benchmark/security/advisories/new).
 It opens a private advisory visible only to the maintainers, and it is the
 channel for anything you would not want in a public issue.
 

@@ -1,7 +1,7 @@
 //! Kafka admin operations the driver needs: topic creation with a partition
 //! count it can trust.
 //!
-//! Forked from `etl-rs/benchmarks/src/lib.rs` at `f41280d51165`.
+//! Forked from `spate/benchmarks/src/lib.rs` at `6f28a8b8912e`.
 
 use std::time::{Duration, Instant};
 

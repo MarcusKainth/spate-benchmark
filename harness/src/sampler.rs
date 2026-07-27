@@ -3,12 +3,12 @@
 //! The comparison publishes numbers about other people's software, so nothing
 //! here may depend on the thing being measured. Every quantity this module
 //! produces is read from **outside** the framework under test — from its cgroup —
-//! and is therefore obtained identically whether that framework is etl-rs, a
+//! and is therefore obtained identically whether that framework is Spate, a
 //! JVM, a Go binary, or ClickHouse consuming a topic by itself. No `etl_*`
 //! metric family, and no competitor's own instrumentation, feeds a published
 //! figure.
 //!
-//! The framework under test always runs in a container, including etl-rs: an
+//! The framework under test always runs in a container, including Spate: an
 //! in-process host run would get every core on the box and make the resource
 //! envelope meaningless.
 //!
@@ -855,7 +855,7 @@ pub fn sut_alive(name: &str) -> bool {
 // the footprint.
 //
 // If sustained mode is ever implemented it will need a plateau detector, and
-// this one is in the history under `f41280d51165`. What it must not do is sit
+// this one is in the history under `6f28a8b8912e`. What it must not do is sit
 // here uncalled while a normative document says the protocol uses it.
 
 #[cfg(test)]

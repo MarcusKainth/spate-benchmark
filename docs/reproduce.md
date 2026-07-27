@@ -5,7 +5,7 @@ description: How to build the arms and run the benchmark yourself.
 ---
 
 Everything here runs from a clone of
-[the repository](https://github.com/MarcusKainth/spate-benchmark). No number on
+[the repository](https://github.com/spate-etl/benchmark). No number on
 this site comes from anywhere else.
 
 ## What you need

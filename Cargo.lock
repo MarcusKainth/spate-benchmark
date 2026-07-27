@@ -534,81 +534,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "etl-avro"
-version = "0.1.0"
-source = "git+https://github.com/MarcusKainth/etl-rs?rev=f41280d51165a971acc21384d3e58484c1e31535#f41280d51165a971acc21384d3e58484c1e31535"
-dependencies = [
- "apache-avro",
- "bytes",
- "etl-core",
- "humantime-serde",
- "schema_registry_converter",
- "serde",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "etl-clickhouse"
-version = "0.1.0"
-source = "git+https://github.com/MarcusKainth/etl-rs?rev=f41280d51165a971acc21384d3e58484c1e31535#f41280d51165a971acc21384d3e58484c1e31535"
-dependencies = [
- "bytes",
- "bytesize",
- "clickhouse",
- "etl-core",
- "foldhash",
- "humantime-serde",
- "serde",
- "thiserror",
- "tracing",
- "twox-hash",
-]
-
-[[package]]
-name = "etl-core"
-version = "0.1.0"
-source = "git+https://github.com/MarcusKainth/etl-rs?rev=f41280d51165a971acc21384d3e58484c1e31535#f41280d51165a971acc21384d3e58484c1e31535"
-dependencies = [
- "bytes",
- "bytesize",
- "core_affinity",
- "crossbeam-channel",
- "http-body-util",
- "humantime-serde",
- "hyper",
- "hyper-util",
- "loom",
- "metrics",
- "metrics-exporter-prometheus",
- "metrics-process",
- "serde",
- "serde_path_to_error",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "yaml_serde",
-]
-
-[[package]]
-name = "etl-kafka"
-version = "0.1.0"
-source = "git+https://github.com/MarcusKainth/etl-rs?rev=f41280d51165a971acc21384d3e58484c1e31535#f41280d51165a971acc21384d3e58484c1e31535"
-dependencies = [
- "bytes",
- "bytesize",
- "etl-core",
- "humantime-serde",
- "rdkafka",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "evmap"
 version = "11.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2338,13 +2263,30 @@ version = "0.1.0"
 dependencies = [
  "apache-avro",
  "bytes",
- "etl-avro",
- "etl-clickhouse",
- "etl-core",
- "etl-kafka",
  "serde",
+ "spate-avro",
  "spate-benchmark-harness",
+ "spate-clickhouse",
+ "spate-core",
+ "spate-kafka",
  "yaml_serde",
+]
+
+[[package]]
+name = "spate-avro"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3535658985da34648175c05f9db85aad2191e416b4f0055ce7cffc7e7a7e432"
+dependencies = [
+ "apache-avro",
+ "bytes",
+ "humantime-serde",
+ "schema_registry_converter",
+ "serde",
+ "spate-core",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2360,6 +2302,68 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "spate-clickhouse"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87a926d971210d856aebbd5fd8a6a0fdb9ab041b03639d6405dcdeebe5763414"
+dependencies = [
+ "bytes",
+ "bytesize",
+ "clickhouse",
+ "foldhash",
+ "humantime-serde",
+ "serde",
+ "spate-core",
+ "thiserror",
+ "tracing",
+ "twox-hash",
+]
+
+[[package]]
+name = "spate-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b77c831bafbae47c7f1a7c3198dadaf7952153617e5844f78d52f0568b49927e"
+dependencies = [
+ "bytes",
+ "bytesize",
+ "core_affinity",
+ "crossbeam-channel",
+ "http-body-util",
+ "humantime-serde",
+ "hyper",
+ "hyper-util",
+ "loom",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "metrics-process",
+ "serde",
+ "serde_path_to_error",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "yaml_serde",
+]
+
+[[package]]
+name = "spate-kafka"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70a4c9377a68ac957e31406091235d4d25cea4677c3a089788b09fca22d557ea"
+dependencies = [
+ "bytes",
+ "bytesize",
+ "humantime-serde",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "spate-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2578,9 +2582,9 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.2+spec-1.1.0"
+version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow 1.0.4",
 ]

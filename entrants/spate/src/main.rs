@@ -36,19 +36,19 @@ use std::time::Duration;
 
 use apache_avro::types::Value as AvroValue;
 use bytes::BytesMut;
-use etl_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection};
-use etl_clickhouse::{ClickHouseEncoder, Format, NativeEncoder};
-use etl_core::config::{ComponentConfig, PipelineConfig};
-use etl_core::deser::{Owned, RecFamily};
-use etl_core::error::SinkError;
-use etl_core::ops::chain;
-use etl_core::pipeline::Pipeline;
-use etl_core::record::Record;
-use etl_core::sink::{KeyHashRouter, RowEncoder};
 use serde::Serialize;
 use spate_arm::rows::{self, RowA, RowB};
+use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection};
 use spate_benchmark_harness::corpus::{self as data, Tier};
 use spate_benchmark_harness::{env_str, env_u64};
+use spate_clickhouse::{ClickHouseEncoder, Format, NativeEncoder};
+use spate_core::config::{ComponentConfig, PipelineConfig};
+use spate_core::deser::{Owned, RecFamily};
+use spate_core::error::SinkError;
+use spate_core::ops::chain;
+use spate_core::pipeline::Pipeline;
+use spate_core::record::Record;
+use spate_core::sink::{KeyHashRouter, RowEncoder};
 
 /// The framework version and revision this binary linked, baked in by
 /// `build.rs` from `Cargo.lock`.
@@ -117,8 +117,8 @@ fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64) -> PipelineCo
     .expect("pipeline config")
 }
 
-fn kafka_source() -> etl_kafka::KafkaSource {
-    etl_kafka::KafkaSource::new(etl_kafka::KafkaSourceConfig {
+fn kafka_source() -> spate_kafka::KafkaSource {
+    spate_kafka::KafkaSource::new(spate_kafka::KafkaSourceConfig {
         brokers: env_str("BOOTSTRAP", "spate-bench-redpanda:29092"),
         topic: env_str("TOPIC", "comparison-sensor-batches"),
         group_id: env_str("GROUP_ID", "comparison-spate"),
@@ -250,7 +250,8 @@ fn run(tier: Tier, format: Format, deser: &str) {
     )
     .expect("avro builder");
 
-    let sink = etl_clickhouse::from_component_config(&sink_section(tier, format)).expect("ch sink");
+    let sink =
+        spate_clickhouse::from_component_config(&sink_section(tier, format)).expect("ch sink");
     // `native` needs the server's real column types; `rowbinary` does not.
     let native_schema = match format {
         Format::Native => Some(
@@ -374,7 +375,7 @@ fn run(tier: Tier, format: Format, deser: &str) {
 /// Build the encoder for the selected wire format.
 fn encoder<F: RecFamily>(
     format: Format,
-    native: Option<Arc<etl_clickhouse::NativeSchema>>,
+    native: Option<Arc<spate_clickhouse::NativeSchema>>,
 ) -> EitherEncoder<F> {
     match format {
         Format::Native => EitherEncoder::Native(NativeEncoder::new(native.expect("native schema"))),

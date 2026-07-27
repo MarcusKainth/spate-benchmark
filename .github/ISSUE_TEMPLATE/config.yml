@@ -1,18 +1,18 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/MarcusKainth/spate-benchmark/security/advisories/new
+    url: https://github.com/spate-etl/benchmark/security/advisories/new
     about: >-
       Privately, through GitHub's advisory flow. Anything that could make a
       published number believed when it should not be belongs here rather than
       in a public issue.
   - name: Fix a competitor's configuration
-    url: https://github.com/MarcusKainth/spate-benchmark/blob/main/CONTRIBUTING.md
+    url: https://github.com/spate-etl/benchmark/blob/main/CONTRIBUTING.md
     about: >-
       If you already know what the fix is, the pull request is more useful than
       the issue — everything an arm does lives in entrants/<id>/.
   - name: Read the fairness contract
-    url: https://github.com/MarcusKainth/spate-benchmark/blob/main/methodology/README.md
+    url: https://github.com/spate-etl/benchmark/blob/main/methodology/README.md
     about: >-
       methodology/ is normative and is the complete specification for an arm,
       including ours.

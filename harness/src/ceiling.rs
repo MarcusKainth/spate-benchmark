@@ -3238,7 +3238,7 @@ const LOW_CARDINALITY_KEY_VERSION: u64 = 1;
 /// `NeedUpdateDictionary` (`1 << 10`) tells the server to drop whatever
 /// dictionary it was carrying rather than extend it. It is **not** required —
 /// 26.3 accepts a block that omits it, which was checked by sending one — and it
-/// is set because `etl-clickhouse`'s Native writer sets it. That agreement is
+/// is set because `spate-clickhouse`'s Native writer sets it. That agreement is
 /// the point rather than a coincidence: this ceiling is the denominator the
 /// Spate arm's own Native writer is judged against, so it has to exercise the
 /// same server-side path. See the fidelity note on [`Column::write_native`].
@@ -3333,7 +3333,7 @@ impl Default for Dictionary {
     ///
     /// The reservation is not decoration and it is not ours: ClickHouse's
     /// `ColumnLowCardinality` keeps its default value at index 0, and
-    /// `etl-clickhouse` — the writer behind every `spate:*-native` arm — seeds
+    /// `spate-clickhouse` — the writer behind every `spate:*-native` arm — seeds
     /// exactly this slot before interning anything. Omitting it produces a block
     /// the server still reads correctly, and a dictionary one entry shorter than
     /// the arm's, which moves the index-width boundary by one value. Matching it
@@ -3379,7 +3379,7 @@ impl Dictionary {
     /// A group with no indexes at all writes **nothing** — not even the flag
     /// word. That is the shape the server expects when an
     /// `Array(LowCardinality(String))` block holds only empty arrays, and it is
-    /// what `etl-clickhouse` emits for the same case. It cannot arise from this
+    /// what `spate-clickhouse` emits for the same case. It cannot arise from this
     /// corpus, whose `tags` are non-empty on three rows in four, and it is
     /// mirrored anyway: an encoder that is right only for the inputs it happens
     /// to be handed is the kind that fails once it is reused.
@@ -3532,7 +3532,7 @@ impl Column {
     ///
     /// This was checked against the arm rather than assumed, because a ceiling
     /// measured on a shared-dictionary insert path would be the denominator for
-    /// arms that do not use one. `etl-clickhouse`'s `LowCard` writer resets its
+    /// arms that do not use one. `spate-clickhouse`'s `LowCard` writer resets its
     /// map, its dictionary buffer and its key run at every block boundary, its
     /// per-shard clones start empty, and no dictionary state is held on the
     /// encoder, the writer, the endpoint or the sink pool. It sets the same two
