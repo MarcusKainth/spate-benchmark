@@ -14,31 +14,27 @@ edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
 authors = ["Marcus Kainth <marcus@kainth.dev>"]
-repository = "https://github.com/MarcusKainth/spate-benchmark"
+repository = "https://github.com/spate-etl/benchmark"
 
 [workspace.dependencies]
 spate-benchmark-harness = { version = "=0.1.0", path = "harness" }
 
 # The framework under test.
 #
-# A git dependency pinned to a rev, not a path dependency, and the reason is the
-# whole point of this repository: a path dep records nothing about what was
-# measured and breaks on any clone, whereas a rev lands in Cargo.lock, travels
-# into `sut.commit` on every record, and keeps `--locked` meaningful. A benchmark
-# whose result cannot say which code produced it is not evidence.
+# A version from crates.io now that 0.1.0 is published. Before that it was a git
+# dependency pinned to a rev, because a path dep records nothing about what was
+# measured and breaks on any clone. The reason is unchanged either way: what
+# identifies the code under test has to land in Cargo.lock and travel into every
+# record. A benchmark whose result cannot say which code produced it is not
+# evidence.
 #
-# The crates are still named `etl-*` because the framework's rename sweep has not
-# landed. That is deliberate: this repository uses the `spate` brand in prose,
-# entrant ids and records from day one, and only the Cargo dependency names lag.
-# When the sweep lands these become `spate-*` and the rev moves, in one PR whose
-# diff IS the provenance change.
-#
-# After 0.1.0 publishes, `git`/`rev` becomes `version = "0.1.0"` and this comment
-# shrinks to nothing.
-etl-core = { git = "https://github.com/MarcusKainth/etl-rs", rev = "f41280d51165a971acc21384d3e58484c1e31535" }
-etl-avro = { git = "https://github.com/MarcusKainth/etl-rs", rev = "f41280d51165a971acc21384d3e58484c1e31535" }
-etl-kafka = { git = "https://github.com/MarcusKainth/etl-rs", rev = "f41280d51165a971acc21384d3e58484c1e31535" }
-etl-clickhouse = { git = "https://github.com/MarcusKainth/etl-rs", rev = "f41280d51165a971acc21384d3e58484c1e31535" }
+# Records produced from here on carry `sut.version`. The ones already in
+# `results/` carry `sut.commit`, because they were measured before 0.1.0 existed
+# — the schema accepts either, and saying they were 0.1.0 would be false.
+spate-core = "0.1.0"
+spate-avro = "0.1.0"
+spate-kafka = "0.1.0"
+spate-clickhouse = "0.1.0"
 
 apache-avro = "0.21"
 bytes = "1.11.1"

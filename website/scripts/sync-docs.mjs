@@ -93,7 +93,7 @@ for (const spec of SYNCED) {
   // `workload/schema/sensor_batch.avsc`.
   body = body.replace(
     /\]\((workload|entrants|environments|harness)\//g,
-    '](https://github.com/MarcusKainth/spate-benchmark/blob/main/$1/',
+    '](https://github.com/spate-etl/benchmark/blob/main/$1/',
   );
 
   // A link from one synced document to another has to name the docs-tree file,

@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 /// The dependency whose version and revision identify the framework build.
-const ANCHOR: &str = "etl-core";
+const ANCHOR: &str = "spate-core";
 
 fn main() {
     let lock_path = workspace_root().join("Cargo.lock");

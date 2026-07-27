@@ -15,12 +15,12 @@ real work rather than a pass-through.
 ## The contract
 
 - **Schema** —
-  [`workload/schema/sensor_batch.avsc`](https://github.com/MarcusKainth/spate-benchmark/blob/main/workload/schema/sensor_batch.avsc).
+  [`workload/schema/sensor_batch.avsc`](https://github.com/spate-etl/benchmark/blob/main/workload/schema/sensor_batch.avsc).
   Two-level nesting with an inner array and nullable unions, so every
   implementation goes through a real union-decode path. Arms read this file; none
   re-declares the schema inline.
 - **Target** —
-  [`workload/clickhouse/ddl.sql`](https://github.com/MarcusKainth/spate-benchmark/blob/main/workload/clickhouse/ddl.sql).
+  [`workload/clickhouse/ddl.sql`](https://github.com/spate-etl/benchmark/blob/main/workload/clickhouse/ddl.sql).
   Column order is the wire contract.
 - **Framing** — Confluent (`0x00` + big-endian schema id + datum) against a live
   Schema Registry, so registry-based decoding is exercised as it would be in
@@ -55,7 +55,7 @@ of rows arrived":
   machine, to re-run a published arm.
 
 The generator's constants live in
-[`workload/workload.toml`](https://github.com/MarcusKainth/spate-benchmark/blob/main/workload/workload.toml),
+[`workload/workload.toml`](https://github.com/spate-etl/benchmark/blob/main/workload/workload.toml),
 and `dataset_version` is **derived from their content** together with the schema
 and the DDL. A change to what the data is therefore cannot be made without the
 version moving, which is what stops two result sets from different corpora being

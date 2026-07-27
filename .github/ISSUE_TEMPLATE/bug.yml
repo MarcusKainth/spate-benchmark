@@ -8,7 +8,7 @@ body:
       value: |
         For "I ran this and got a different number", that is useful and wanted —
         see [Reproducing
-        this](https://github.com/MarcusKainth/spate-benchmark/blob/main/docs/reproduce.md)
+        this](https://github.com/spate-etl/benchmark/blob/main/docs/reproduce.md)
         first, because a different environment or a busy machine explains most of
         it. Run-to-run spread reaches 14.5% on throughput even on a quiet host.
 

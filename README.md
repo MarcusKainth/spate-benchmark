@@ -34,7 +34,7 @@ that stands to gain from it, and it resolves when the framework publishes.
 If you think an arm is configured badly, that is a bug and we want the pull
 request. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-[spate]: https://github.com/MarcusKainth/etl-rs
+[spate]: https://github.com/spate-etl/spate
 
 ## How to read a number here
 

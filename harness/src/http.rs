@@ -1,7 +1,7 @@
 //! Minimal HTTP/1.1 over `TcpStream`, for talking to ClickHouse and the Schema
 //! Registry.
 //!
-//! Forked from `etl-rs/benchmarks/src/lib.rs` at `f41280d51165`. Deliberately
+//! Forked from `spate/benchmarks/src/lib.rs` at `6f28a8b8912e`. Deliberately
 //! not a dependency on `reqwest` or `hyper`: the driver makes a handful of
 //! requests to services on the local bench network, and a full async HTTP client
 //! would add a runtime and a large dependency tree to a binary whose whole job is

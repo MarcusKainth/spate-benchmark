@@ -3,7 +3,7 @@ import type {Config} from '@docusaurus/types';
 import {themes as prismThemes} from 'prism-react-renderer';
 
 const url = 'https://spate-benchmark.kainth.dev';
-const githubUrl = 'https://github.com/MarcusKainth/spate-benchmark';
+const githubUrl = 'https://github.com/spate-etl/benchmark';
 
 const config: Config = {
   title: 'Spate Benchmark',
@@ -96,7 +96,7 @@ const config: Config = {
           title: 'Source',
           items: [
             {label: 'Repository', href: githubUrl},
-            {label: 'Spate', href: 'https://github.com/MarcusKainth/etl-rs'},
+            {label: 'Spate', href: 'https://github.com/spate-etl/spate'},
           ],
         },
       ],

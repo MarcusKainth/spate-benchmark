@@ -13,7 +13,7 @@ body:
         **If you know what the fix is, a pull request is more useful than an
         issue.** Everything an arm does is in `entrants/<id>/`, and nothing else
         needs to change. See
-        [CONTRIBUTING.md](https://github.com/MarcusKainth/spate-benchmark/blob/main/CONTRIBUTING.md).
+        [CONTRIBUTING.md](https://github.com/spate-etl/benchmark/blob/main/CONTRIBUTING.md).
 
   - type: dropdown
     id: entrant
@@ -63,7 +63,7 @@ body:
     attributes:
       label: The two rules
       description: >-
-        Both from [methodology/](https://github.com/MarcusKainth/spate-benchmark/blob/main/methodology/README.md).
+        Both from [methodology/](https://github.com/spate-etl/benchmark/blob/main/methodology/README.md).
         If your fix does not fit inside rule 1, say so below and open the issue
         anyway — that may be a bug in the contract rather than in the arm.
       options:

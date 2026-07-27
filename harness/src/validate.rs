@@ -370,7 +370,7 @@ mod tests {
             entrant: "spate".to_owned(),
             variant_id: "tier-a-native".to_owned(),
             version: Some("0.1.0-dev".to_owned()),
-            commit: Some("f41280d51165".to_owned()),
+            commit: Some("6f28a8b8912e".to_owned()),
             image_digest: format!("sha256:{}", "a".repeat(64)),
             image: "spate-bench-spate".to_owned(),
             toolchain: Some("rustc 1.97.0".to_owned()),

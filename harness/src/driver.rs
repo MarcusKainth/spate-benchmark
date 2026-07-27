@@ -3230,9 +3230,9 @@ mod tests {
     #[test]
     fn parses_the_arms_version_line() {
         let (v, c, t) =
-            parse_version("spate-arm 0.1.0-dev (f41280d51165)\ntoolchain: rustc 1.97.1");
+            parse_version("spate-arm 0.1.0-dev (6f28a8b8912e)\ntoolchain: rustc 1.97.1");
         assert_eq!(v.as_deref(), Some("0.1.0-dev"));
-        assert_eq!(c.as_deref(), Some("f41280d51165"));
+        assert_eq!(c.as_deref(), Some("6f28a8b8912e"));
         assert_eq!(t.as_deref(), Some("rustc 1.97.1"));
     }
 

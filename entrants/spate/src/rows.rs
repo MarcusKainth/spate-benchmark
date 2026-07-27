@@ -16,8 +16,8 @@
 //! to the arm: every system writes this, and writing it well is expected.
 
 use apache_avro::types::Value as AvroValue;
-use etl_clickhouse::{DateTime64Micros, DateTime64Millis};
 use serde::Serialize;
+use spate_clickhouse::{DateTime64Micros, DateTime64Millis};
 // `SensorBatch` only, and the line is worth explaining because what is NOT
 // imported here is the point.
 //
