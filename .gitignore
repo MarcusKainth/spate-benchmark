@@ -35,6 +35,7 @@ infra/**/*.tfstate.*
 infra/**/*.tfvars
 infra/**/crash.log
 infra/reaper/build/
+infra/**/__pycache__/
 
 # Records from runs whose trigger bars publication — `bench run --trigger
 # tuning`, and a PR run. `results::root_for` sends them here rather than into

@@ -146,6 +146,12 @@ resource "aws_iam_role_policy" "launcher" {
         Action   = "s3:PutObject"
         Resource = "${aws_s3_bucket.results.arn}/incoming/*/manifest.json"
       },
+      {
+        Sid      = "EncryptManifest"
+        Effect   = "Allow"
+        Action   = "kms:GenerateDataKey"
+        Resource = aws_kms_key.results.arn
+      },
     ]
   })
 }

@@ -148,6 +148,10 @@ No modules.
 | [aws_iam_role_policy.reaper](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy_attachment.instance_ssm_debug](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy_attachment) | resource |
 | [aws_internet_gateway.bench](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/internet_gateway) | resource |
+| [aws_kms_alias.alerts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_alias) | resource |
+| [aws_kms_alias.results](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_alias) | resource |
+| [aws_kms_key.alerts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_key) | resource |
+| [aws_kms_key.results](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_key) | resource |
 | [aws_lambda_function.reaper](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_function) | resource |
 | [aws_lambda_permission.reaper_from_eventbridge](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_permission) | resource |
 | [aws_route_table.public](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table) | resource |
@@ -175,10 +179,9 @@ No modules.
 | <a name="input_budget_limit_usd"></a> [budget\_limit\_usd](#input\_budget\_limit\_usd) | Monthly cost budget. Alerts at 50/80/100% of this figure. | `number` | `150` | no |
 | <a name="input_collector_oidc_sub"></a> [collector\_oidc\_sub](#input\_collector\_oidc\_sub) | Exact OIDC `sub` claim the collector trust policy matches. Same immutable-claims caveat as launcher\_oidc\_sub. | `string` | `"repo:spate-etl/benchmark:ref:refs/heads/main"` | no |
 | <a name="input_enable_ssm_debug"></a> [enable\_ssm\_debug](#input\_enable\_ssm\_debug) | Attach AmazonSSMManagedInstanceCore to the benchmark box for interactive debugging. Off by default: the box should be unreachable. | `bool` | `false` | no |
-| <a name="input_github_repo"></a> [github\_repo](#input\_github\_repo) | owner/name of the repository whose workflows may assume the roles. | `string` | `"spate-etl/benchmark"` | no |
 | <a name="input_instance_type"></a> [instance\_type](#input\_instance\_type) | The one instance type the launcher may start. Part of the environment's provenance — see environments/c8g-8xl-ec2-docker.toml. | `string` | `"c8g.8xlarge"` | no |
 | <a name="input_launcher_oidc_sub"></a> [launcher\_oidc\_sub](#input\_launcher\_oidc\_sub) | Exact OIDC `sub` claim the launcher trust policy matches. The default is the<br/>classic format; repositories on GitHub's immutable-claims format emit<br/>numeric IDs (repo:owner@ID/name@ID:environment:...) instead. Decode a real<br/>token from a throwaway workflow before first apply (see infra/README.md) and<br/>override this if the observed claim differs. | `string` | `"repo:spate-etl/benchmark:environment:aws-bench"` | no |
-| <a name="input_max_ttl_hours"></a> [max\_ttl\_hours](#input\_max\_ttl\_hours) | Upper bound on a benchmark box's lifetime. The reaper terminates anything older than its ttl-hours tag; this caps what that tag may usefully be. | `number` | `36` | no |
+| <a name="input_max_ttl_hours"></a> [max\_ttl\_hours](#input\_max\_ttl\_hours) | Upper bound on a benchmark box's lifetime. The reaper clamps every instance's ttl-hours tag to this, so a fat-fingered or forged tag cannot buy more than this many hours. | `number` | `36` | no |
 | <a name="input_region"></a> [region](#input\_region) | Region every resource lives in. Changing it is an environment change: the instance type offering, AZ set and EBS behaviour all move with it. | `string` | `"eu-west-2"` | no |
 | <a name="input_results_bucket_name"></a> [results\_bucket\_name](#input\_results\_bucket\_name) | Globally unique name for the results-in-flight bucket (incoming/ and processed/ prefixes). | `string` | n/a | yes |
 

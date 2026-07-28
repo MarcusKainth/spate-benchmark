@@ -64,6 +64,11 @@ resource "aws_kms_alias" "state" {
   target_key_id = aws_kms_key.state.key_id
 }
 
+# Server-access logging is deliberately absent (it needs a log bucket that
+# cannot itself log): the only principal that touches state is the maintainer
+# running terraform, and both S3 data events and KMS key usage are already
+# attributable in CloudTrail.
+#trivy:ignore:AVD-AWS-0089
 resource "aws_s3_bucket" "state" {
   bucket = var.state_bucket_name
 }

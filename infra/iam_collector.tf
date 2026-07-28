@@ -65,6 +65,15 @@ resource "aws_iam_role_policy" "collector" {
           "${aws_s3_bucket.results.arn}/processed/*",
         ]
       },
+      {
+        Sid    = "DecryptRunsEncryptMarkers"
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey",
+        ]
+        Resource = aws_kms_key.results.arn
+      },
     ]
   })
 }

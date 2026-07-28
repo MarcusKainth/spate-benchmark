@@ -5,6 +5,11 @@
 # internet (apt, crates.io, Docker Hub, S3) and gets it via public IP through
 # the internet gateway, which costs nothing while idle.
 
+# Flow logs are deliberately absent: this VPC holds one ephemeral, egress-only
+# box per run, every principal touching it is a CloudTrail-attributable role,
+# and the interesting record — what the box did — ships to S3 as the run log.
+# Enable them temporarily for network forensics if a run ever warrants it.
+#trivy:ignore:AVD-AWS-0178
 resource "aws_vpc" "bench" {
   cidr_block           = "10.42.0.0/16"
   enable_dns_support   = true
@@ -27,6 +32,11 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+# Public-on-launch is the design, not an oversight: there is no NAT (nothing
+# to keep warm between runs), the box needs outbound to apt, crates.io, Docker
+# Hub and S3, and its security group has zero inbound rules — a public IP with
+# no listening ingress path is an address, not an exposure.
+#trivy:ignore:AVD-AWS-0164
 resource "aws_subnet" "public" {
   count = 3
 
@@ -68,6 +78,12 @@ resource "aws_security_group" "bench" {
   description = "spate-benchmark box: egress only"
   vpc_id      = aws_vpc.bench.id
 
+  # Unrestricted egress is the deliberate trade: the box pulls from apt
+  # mirrors, crates.io, Docker Hub and S3, none of which publish stable CIDRs
+  # worth pinning. What bounds exfiltration is not this rule but what the box
+  # can know — it holds no secrets, and its only credential writes to one S3
+  # prefix.
+  #trivy:ignore:AVD-AWS-0104
   egress {
     description = "all outbound"
     from_port   = 0

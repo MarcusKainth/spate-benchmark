@@ -32,6 +32,10 @@ env:
 jobs:
   collect:
     name: Collect
+    # Quiet until the pipeline is configured — the same pattern spate's release
+    # workflow uses. Without this, the half-hourly cron would fail red from the
+    # moment this file merges until the AWS side exists.
+    if: vars.AWS_COLLECTOR_ROLE_ARN != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

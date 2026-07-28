@@ -38,6 +38,14 @@ resource "aws_iam_role_policy" "instance" {
         Effect   = "Allow"
         Action   = "s3:PutObject"
         Resource = "${aws_s3_bucket.results.arn}/incoming/*"
+      },
+      {
+        # SSE-KMS: a PUT needs a data key. Encrypt-side only — no Decrypt, so
+        # even this credential cannot read back what the box already wrote.
+        Sid      = "EncryptUploads"
+        Effect   = "Allow"
+        Action   = "kms:GenerateDataKey"
+        Resource = aws_kms_key.results.arn
       }
     ]
   })

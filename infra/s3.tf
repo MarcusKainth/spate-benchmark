@@ -5,6 +5,25 @@
 # Lifecycle rules are the cleanup mechanism — no credential in the pipeline can
 # delete an object.
 
+# A dedicated key, as for the state bucket: key usage is separately visible in
+# CloudTrail, and the three roles' access to run data is gated by KMS policy as
+# well as bucket policy.
+resource "aws_kms_key" "results" {
+  description             = "spate-benchmark results in flight"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+}
+
+resource "aws_kms_alias" "results" {
+  name          = "alias/spate-bench-results"
+  target_key_id = aws_kms_key.results.key_id
+}
+
+# Server-access logging is deliberately absent (it needs a log bucket that
+# cannot itself log, and so on): every principal that can touch this bucket is
+# a role whose sessions are already attributable in CloudTrail, which is the
+# audit trail that matters here.
+#trivy:ignore:AVD-AWS-0089
 resource "aws_s3_bucket" "results" {
   bucket = var.results_bucket_name
 }
@@ -31,8 +50,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "results" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.results.arn
     }
+    bucket_key_enabled = true
   }
 }
 

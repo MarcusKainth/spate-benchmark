@@ -29,6 +29,9 @@ DEFAULT_TTL_HOURS = 1.0
 def handler(event, context):
     ec2 = boto3.client("ec2")
     now = datetime.datetime.now(datetime.timezone.utc)
+    # The tag asks; this clamps. A fat-fingered (or forged) ttl-hours tag
+    # cannot buy more lifetime than the deployed maximum.
+    max_ttl_hours = float(os.environ.get("MAX_TTL_HOURS", "36"))
     reaped = []
 
     pages = ec2.get_paginator("describe_instances").paginate(
@@ -42,7 +45,7 @@ def handler(event, context):
             for instance in reservation["Instances"]:
                 tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
                 try:
-                    ttl_hours = float(tags["ttl-hours"])
+                    ttl_hours = min(float(tags["ttl-hours"]), max_ttl_hours)
                 except (KeyError, ValueError):
                     ttl_hours = DEFAULT_TTL_HOURS
                 age = now - instance["LaunchTime"]

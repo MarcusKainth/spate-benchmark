@@ -124,6 +124,14 @@ jobs:
             reps=3
             mode=run
           fi
+          # Until the environment profile merges (it arrives on the
+          # bootstrap/c8g-env branch, after this workflow), a push-triggered
+          # proposal has nothing to run against — propose nothing rather than
+          # fail red.
+          if [ -n "$selector" ] && [ ! -f "environments/$env_id.toml" ]; then
+            echo "::warning::environment $env_id has no profile yet; proposing nothing"
+            selector=""
+          fi
           # A ceiling bootstrap is bounded by the measurement rig; a full run is
           # bounded by the sweep. Both TTLs are generous until the first c8g
           # sweep calibrates them — the box's own `timeout` fires 2h earlier.
@@ -202,7 +210,12 @@ jobs:
   launch:
     name: Launch
     needs: plan
-    if: needs.plan.outputs.selector != ''
+    # Empty selector: the change moves no number. Empty role ARN: the pipeline
+    # is not configured yet — and this guard matters for more than tidiness,
+    # because referencing an environment that has not been created would make
+    # GitHub create it implicitly WITHOUT protection rules. Configure the
+    # environment before the variables (infra/README.md orders the steps).
+    if: needs.plan.outputs.selector != '' && vars.AWS_LAUNCHER_ROLE_ARN != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # The approval gate. Deployment branches for this environment are

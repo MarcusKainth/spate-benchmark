@@ -56,6 +56,16 @@ resource "aws_iam_role_policy" "reaper" {
         Resource = aws_sns_topic.alerts.arn
       },
       {
+        # Publishing to a CMK-encrypted topic needs a data key.
+        Sid    = "EncryptNotifications"
+        Effect = "Allow"
+        Action = [
+          "kms:GenerateDataKey",
+          "kms:Decrypt",
+        ]
+        Resource = aws_kms_key.alerts.arn
+      },
+      {
         Sid    = "Logs"
         Effect = "Allow"
         Action = [
@@ -69,6 +79,9 @@ resource "aws_iam_role_policy" "reaper" {
   })
 }
 
+# X-Ray tracing is deliberately absent: a 40-line hourly sweep whose every
+# action already lands in CloudTrail gains nothing from a tracing backend.
+#trivy:ignore:AVD-AWS-0066
 resource "aws_lambda_function" "reaper" {
   function_name = "spate-bench-reaper"
   role          = aws_iam_role.reaper.arn
@@ -84,6 +97,7 @@ resource "aws_lambda_function" "reaper" {
   environment {
     variables = {
       SNS_TOPIC_ARN = aws_sns_topic.alerts.arn
+      MAX_TTL_HOURS = tostring(var.max_ttl_hours)
     }
   }
 }
@@ -107,8 +121,20 @@ resource "aws_lambda_permission" "reaper_from_eventbridge" {
   source_arn    = aws_cloudwatch_event_rule.reaper.arn
 }
 
+resource "aws_kms_key" "alerts" {
+  description             = "spate-benchmark alert topic"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+}
+
+resource "aws_kms_alias" "alerts" {
+  name          = "alias/spate-bench-alerts"
+  target_key_id = aws_kms_key.alerts.key_id
+}
+
 resource "aws_sns_topic" "alerts" {
-  name = "spate-bench-alerts"
+  name              = "spate-bench-alerts"
+  kms_master_key_id = aws_kms_key.alerts.arn
 }
 
 resource "aws_sns_topic_subscription" "alerts_email" {

@@ -4,12 +4,6 @@ variable "region" {
   default     = "eu-west-2"
 }
 
-variable "github_repo" {
-  description = "owner/name of the repository whose workflows may assume the roles."
-  type        = string
-  default     = "spate-etl/benchmark"
-}
-
 variable "launcher_oidc_sub" {
   description = <<-EOT
     Exact OIDC `sub` claim the launcher trust policy matches. The default is the
@@ -40,7 +34,7 @@ variable "instance_type" {
 }
 
 variable "max_ttl_hours" {
-  description = "Upper bound on a benchmark box's lifetime. The reaper terminates anything older than its ttl-hours tag; this caps what that tag may usefully be."
+  description = "Upper bound on a benchmark box's lifetime. The reaper clamps every instance's ttl-hours tag to this, so a fat-fingered or forged tag cannot buy more than this many hours."
   type        = number
   default     = 36
 }
