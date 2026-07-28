@@ -66,3 +66,26 @@ That is useful and I would like to know. The most likely causes, in order:
 Every arm, including Spate's, builds from a clean clone of this repository. The
 framework is consumed from crates.io and pinned in `Cargo.lock`, so the arm that
 is ours is exactly as reproducible as every arm that is not.
+
+## Reproducing the cloud environment
+
+Published runs execute on a disposable EC2 box — one on-demand `c8g.8xlarge`
+(Graviton4: 32 vCPUs that are 32 physical cores, no SMT), Ubuntu 24.04 arm64,
+a 500 GiB gp3 volume provisioned at 10,000 IOPS and 1,000 MiB/s so storage is
+never the bottleneck being measured. Every piece of that pipeline is in this
+repository:
+
+- `infra/` — the complete AWS footprint as Terraform, including every IAM
+  permission the pipeline holds;
+- `.github/workflows/bench-launch.yml` — proposes a run, prints the exact arm
+  list, waits for maintainer approval, launches the box;
+- `.github/aws/userdata.sh.tpl` and `.github/aws/run-bench.sh` — what the box
+  actually executes, versioned at the SHA the approver saw;
+- `.github/workflows/bench-collect.yml` — re-validates the uploads and opens
+  the results PR.
+
+You cannot press our launch button — the approval environment and the AWS
+account are ours — but nothing about the environment is privileged: the same
+instance type, volume, AMI and scripts are available to any AWS account, and
+`infra/README.md` is the complete standing-up procedure. A full sweep costs
+roughly the instance-hours it takes at ~$1.3/hour, bounded by a 36-hour TTL.

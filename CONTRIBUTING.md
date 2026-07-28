@@ -78,9 +78,18 @@ retention is not a matter of anyone remembering. A number later found to be wron
 is corrected by the maintainer in a commit of its own, so what changed and why is
 in the repository's history rather than in a marker every reader has to step over.
 
-Measurements are produced by the maintainer on the reference environment, because
-a number is only comparable to the others if it came off the same hardware under
-the same protocol. So a PR changes configuration, code and documentation; the
-re-measurement happens after it merges, and the resulting records are committed
-separately. If your change ought to move a number, say what you expect and it
-will be checked against what comes back — including when it does not.
+Measurements are produced on the reference environment, because a number is only
+comparable to the others if it came off the same hardware under the same
+protocol. So a PR changes configuration, code and documentation; the
+re-measurement happens after it merges, and the resulting records arrive as a
+separate, validated pull request. If your change ought to move a number, say
+what you expect and it will be checked against what comes back — including when
+it does not.
+
+When your merged change can move a published number, the launch workflow
+proposes the re-run automatically and a maintainer approves it — approval is
+also what issues the pipeline's AWS credentials, so you cannot run our cloud
+environment yourself, and nothing spends money without a human clicking. You
+*can* run everything locally ([reproducing this](docs/reproduce.md)), and the
+entire cloud pipeline — Terraform, workflows, instance scripts — is public in
+[`infra/`](infra/README.md) if you want to stand up your own.
