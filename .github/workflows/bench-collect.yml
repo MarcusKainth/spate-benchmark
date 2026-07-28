@@ -1,0 +1,198 @@
+# Turns uploaded runs into pull requests. Polls the results bucket on a
+# schedule, and for every completed, unclaimed run: downloads it, re-validates
+# everything with `bench validate` (the box's uploads are UNTRUSTED input until
+# this passes), and opens a results PR with the GitHub App token — an App
+# token rather than GITHUB_TOKEN because PRs created with the latter do not
+# trigger the required Harness/Site checks.
+#
+# Runs that never completed are declared dead once their TTL (plus slack) has
+# passed, and become a GitHub issue pointing at the logs the box shipped on
+# its way down.
+#
+# Two credentials, deliberately separate: the AWS collector role (read the
+# quarantine prefix, write claim markers — no launch, no terminate, no delete)
+# and the GitHub App key (open PRs — no AWS). Neither can do the other's job.
+
+name: Bench collect
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: bench-collect
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  collect:
+    name: Collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      BUCKET: ${{ vars.BENCH_BUCKET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup show
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_COLLECTOR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: bench-collect-${{ github.run_id }}
+
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app
+        with:
+          app-id: ${{ vars.BENCH_APP_ID }}
+          private-key: ${{ secrets.BENCH_APP_PRIVATE_KEY }}
+
+      - name: Process completed and dead runs
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          now=$(date -u +%s)
+
+          has() { # key
+            aws s3api head-object --bucket "$BUCKET" --key "$1" >/dev/null 2>&1
+          }
+
+          claim() { # run_id — atomic via a conditional PUT; loser skips
+            echo "$GITHUB_RUN_ID" > /tmp/claim
+            aws s3api put-object --bucket "$BUCKET" \
+              --key "incoming/$1/_CLAIMED" --if-none-match '*' \
+              --body /tmp/claim >/dev/null 2>&1
+          }
+
+          process_complete() { # run_id
+            local id=$1 work mode target n
+            work=$(mktemp -d)
+            aws s3 cp --quiet --recursive "s3://$BUCKET/incoming/$id/" "$work/"
+            mode=$(jq -r '.mode' "$work/manifest.json")
+            target=$(jq -r '.target_branch' "$work/manifest.json")
+
+            git checkout --quiet main && git reset --hard --quiet origin/main
+
+            if [ "$mode" = ceiling-bootstrap ]; then
+              # Ceilings go straight onto the branch that proposed the new
+              # environment: env TOML and ceilings must land in one PR, and
+              # that PR already exists.
+              git checkout --quiet -B "$target" "origin/$target"
+              cp "$work"/ceilings/*.json environments/ceilings/
+              cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- validate
+              git add environments/ceilings/
+              git commit --quiet -m "chore(environments): measured ceilings from run $id"
+              git push origin "HEAD:$target"
+              echo "ceilings for run $id pushed to $target" >> "$GITHUB_STEP_SUMMARY"
+            else
+              git checkout --quiet -B "bench/results-$id" origin/main
+              n=0
+              while IFS= read -r rel; do
+                rel=${rel#./}
+                mkdir -p "$(dirname "$rel")"
+                cat "$work/results/$rel" >> "$rel"
+                n=$((n + $(wc -l < "$work/results/$rel")))
+              done < <(cd "$work/results" && find . -type f -name '*.jsonl')
+              if [ "$n" -eq 0 ]; then
+                echo "::warning::run $id completed but shipped no result lines"
+                return 0
+              fi
+              # The firewall between untrusted uploads and git: schema, run_id
+              # uniqueness, trigger publishability, comparability keys.
+              cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- validate
+              git add results/
+              git commit --quiet -m "chore(results): append $n record(s) from run $id"
+              git push origin "HEAD:bench/results-$id"
+              {
+                echo "## Benchmark run \`$id\`"
+                echo
+                jq -r '"- selector: `\(.selector)`\n- environment: `\(.env_id)`\n- trigger: `\(.trigger)` · reps: \(.reps)\n- sha: `\(.sha)`\n- launched by: \(.workflow_run)"' \
+                  "$work/manifest.json"
+                jq -r '"- instance: `\(.instance_type)` `\(.instance_id)` · AMI `\(.ami_id)`"' \
+                  "$work/_COMPLETE.json" 2>/dev/null || true
+                echo "- logs: \`s3://$BUCKET/incoming/$id/logs/\`"
+                echo
+                echo "$n appended record(s). Validated by \`bench validate\` before this PR was opened; the Harness check re-validates from scratch."
+              } > /tmp/pr-body.md
+              gh pr create \
+                --head "bench/results-$id" \
+                --title "chore(results): benchmark run $id" \
+                --body-file /tmp/pr-body.md
+              echo "results PR opened for run $id ($n records)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          report_dead() { # run_id
+            local id=$1
+            aws s3 cp --quiet "s3://$BUCKET/incoming/$id/manifest.json" /tmp/dead-manifest.json
+            {
+              echo "The box for benchmark run \`$id\` never reported completion and its TTL has passed."
+              echo "The reaper has terminated it (or it never came up)."
+              echo
+              echo '```json'
+              cat /tmp/dead-manifest.json
+              echo '```'
+              echo
+              echo "Logs, if the box got far enough to ship them: \`s3://$BUCKET/incoming/$id/logs/\`"
+            } > /tmp/issue-body.md
+            gh issue create \
+              --title "bench run $id failed: no completion before TTL" \
+              --body-file /tmp/issue-body.md
+            echo "dead run $id reported as an issue" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          mapfile -t prefixes < <(aws s3api list-objects-v2 --bucket "$BUCKET" \
+            --prefix incoming/ --delimiter / \
+            --query 'CommonPrefixes[].Prefix' --output text | tr '\t' '\n' | grep -v '^None$' || true)
+
+          for p in "${prefixes[@]:-}"; do
+            [ -n "$p" ] || continue
+            id=${p#incoming/}; id=${id%/}
+            if has "incoming/$id/_CLAIMED"; then
+              continue
+            fi
+            if has "incoming/$id/_COMPLETE.json"; then
+              claim "$id" || continue
+              process_complete "$id" || echo "::error::processing run $id failed"
+            elif has "incoming/$id/manifest.json"; then
+              launched=$(aws s3 cp --quiet "s3://$BUCKET/incoming/$id/manifest.json" - | jq -r '.launched_at')
+              ttl=$(aws s3 cp --quiet "s3://$BUCKET/incoming/$id/manifest.json" - | jq -r '.ttl_hours')
+              deadline=$((launched + (ttl + 2) * 3600))
+              if [ "$now" -gt "$deadline" ]; then
+                claim "$id" || continue
+                report_dead "$id" || echo "::error::reporting dead run $id failed"
+              fi
+            fi
+          done

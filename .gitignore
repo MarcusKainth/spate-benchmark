@@ -23,6 +23,19 @@ website/static/bench
 # website/scripts/sync-docs.mjs. Edit the root files, not the copies.
 docs/contract/
 
+# Terraform. State is the sensitive artefact — it records every resource
+# attribute, including ones the HCL never shows — and it lives only in the
+# private state bucket (infra/bootstrap). Nothing state-shaped, and no local
+# variable file, may be committed.
+# (.terraform.lock.hcl is NOT ignored: the provider lock is reproducibility
+# and belongs in review, exactly like Cargo.lock.)
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/*.tfvars
+infra/**/crash.log
+infra/reaper/build/
+
 # Records from runs whose trigger bars publication — `bench run --trigger
 # tuning`, and a PR run. `results::root_for` sends them here rather than into
 # results/, so that a configuration search cannot land in the same file as the

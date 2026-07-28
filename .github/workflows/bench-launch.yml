@@ -1,0 +1,307 @@
+# Launches the benchmark box. This workflow is a LAUNCHER ONLY: it runs
+# trusted code from the dispatched ref, prints exactly what a run would
+# execute, waits for a human, starts one EC2 instance, and exits. It never
+# waits for results (the collector workflow does that), never registers a
+# self-hosted runner, and never hands the box a GitHub credential.
+#
+# The approval gate and AWS credential issuance are the same control: the
+# `launch` job's `aws-bench` environment requires a reviewer, and the IAM
+# trust policy for the launcher role conditions on that environment's OIDC
+# `sub` claim — a job that was not approved cannot assume the role at all.
+# See infra/README.md for the full pipeline description.
+
+name: Bench launch
+
+on:
+  workflow_dispatch:
+    inputs:
+      selector:
+        description: "bench selector ('*', 'spate', 'flink:tier-a', ...)"
+        default: "*"
+      env_id:
+        description: Environment profile to run against
+        default: c8g-8xl-ec2-docker
+      trigger:
+        description: Provenance trigger recorded on every result
+        type: choice
+        options: [manual, release, nightly]
+        default: manual
+      reps:
+        description: Repetitions per arm (3 is the methodology's floor)
+        default: "3"
+      mode:
+        description: >-
+          'run' executes the suite; 'ceiling-bootstrap' measures and writes a
+          new environment's ceilings instead (see docs/environments.md)
+        type: choice
+        options: [run, ceiling-bootstrap]
+        default: run
+
+permissions: {}
+
+# One benchmark pipeline at a time, and a newer proposal supersedes an older
+# one even while it is still waiting for approval — so an approval given after
+# a further push cannot launch stale code.
+concurrency:
+  group: aws-bench
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      selector: ${{ steps.decide.outputs.selector }}
+      env_id: ${{ steps.decide.outputs.env_id }}
+      trigger: ${{ steps.decide.outputs.trigger }}
+      reps: ${{ steps.decide.outputs.reps }}
+      mode: ${{ steps.decide.outputs.mode }}
+      run_id: ${{ steps.decide.outputs.run_id }}
+      ttl_hours: ${{ steps.decide.outputs.ttl_hours }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide what to propose
+        id: decide
+        env:
+          SELECTOR: ${{ inputs.selector }}
+          ENV_ID: ${{ inputs.env_id }}
+          TRIGGER: ${{ inputs.trigger }}
+          REPS: ${{ inputs.reps }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          # A ceiling bootstrap is bounded by the measurement rig; a full run is
+          # bounded by the sweep. Both TTLs are generous until the first c8g
+          # sweep calibrates them — the box's own `timeout` fires 2h earlier.
+          case "$MODE" in
+            ceiling-bootstrap) ttl=8 ;;
+            *)                 ttl=36 ;;
+          esac
+          {
+            echo "selector=$SELECTOR"
+            echo "env_id=$ENV_ID"
+            echo "trigger=$TRIGGER"
+            echo "reps=$REPS"
+            echo "mode=$MODE"
+            echo "ttl_hours=$ttl"
+            echo "run_id=$(date -u +%Y%m%d-%H%M%S)-${GITHUB_RUN_ID}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install the pinned toolchain
+        if: inputs.mode == 'run'
+        run: |
+          rustup show active-toolchain || rustup show
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: inputs.mode == 'run'
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # The reviewer approves a concrete execution list with a price attached,
+      # not a guess. In bootstrap mode there is no plan to print — the new
+      # environment has no ceilings yet, which is the whole point of the run.
+      - name: Print the exact plan the approver is approving
+        env:
+          SELECTOR: ${{ inputs.selector }}
+          ENV_ID: ${{ inputs.env_id }}
+          MODE: ${{ inputs.mode }}
+          REPS: ${{ inputs.reps }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Proposed benchmark run"
+            echo
+            echo '| | |'
+            echo '|---|---|'
+            echo "| mode | \`$MODE\` |"
+            echo "| selector | \`$SELECTOR\` |"
+            echo "| environment | \`$ENV_ID\` |"
+            echo "| reps | $REPS |"
+            echo "| sha | \`$GITHUB_SHA\` |"
+            echo "| box | one c8g.8xlarge, on-demand, self-terminating |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = run ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- \
+              run "$SELECTOR" --dry-run --env "$ENV_ID" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_Ceiling bootstrap: measures and writes environments/ceilings/$ENV_ID.json._" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  launch:
+    name: Launch
+    needs: plan
+    if: needs.plan.outputs.selector != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The approval gate. Deployment branches for this environment are
+    # restricted to main and bootstrap/* in the repository settings.
+    environment: aws-bench
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      BUCKET: ${{ vars.BENCH_BUCKET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_LAUNCHER_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: bench-launch-${{ github.run_id }}
+
+      # Resolved at launch from Canonical's SSM public parameter; IAM
+      # additionally restricts RunInstances to Canonical-owned images, so a
+      # wrong value here cannot boot somebody else's AMI.
+      - name: Resolve the Ubuntu 24.04 arm64 AMI
+        id: ami
+        run: |
+          set -euo pipefail
+          ami=$(aws ssm get-parameter \
+            --name /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id \
+            --query Parameter.Value --output text)
+          echo "id=$ami" >> "$GITHUB_OUTPUT"
+
+      # envsubst is restricted to the named variables: every other dollar sign
+      # in the template is shell that must reach the box untouched.
+      - name: Render user-data
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+          SHA: ${{ github.sha }}
+          ENV_ID: ${{ needs.plan.outputs.env_id }}
+          SELECTOR: ${{ needs.plan.outputs.selector }}
+          REPS: ${{ needs.plan.outputs.reps }}
+          TRIGGER: ${{ needs.plan.outputs.trigger }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          TTL_HOURS: ${{ needs.plan.outputs.ttl_hours }}
+        run: |
+          set -euo pipefail
+          envsubst '${RUN_ID} ${SHA} ${ENV_ID} ${SELECTOR} ${REPS} ${TRIGGER} ${MODE} ${BUCKET} ${TTL_HOURS} ${AWS_REGION}' \
+            < .github/aws/userdata.sh.tpl > /tmp/userdata.sh
+          bash -n /tmp/userdata.sh
+
+      # Retried across the three subnets (three AZs): capacity for large
+      # Graviton sizes is not uniform across zones, and
+      # InsufficientInstanceCapacity is an ordinary Tuesday rather than an
+      # error. VcpuLimitExceeded is retryable for a different reason — the
+      # 32-vCPU quota means "a box is already running", and a short wait can
+      # find it gone. Anything else fails fast.
+      - name: Launch the box
+        id: launch
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+          TTL_HOURS: ${{ needs.plan.outputs.ttl_hours }}
+          AMI_ID: ${{ steps.ami.outputs.id }}
+          SUBNET_IDS: ${{ vars.BENCH_SUBNET_IDS }}
+          SG_ID: ${{ vars.BENCH_SG_ID }}
+          INSTANCE_PROFILE: ${{ vars.BENCH_INSTANCE_PROFILE }}
+        run: |
+          set -euo pipefail
+          instance_id=""
+          for attempt in 1 2 3 4 5; do
+            for subnet in $SUBNET_IDS; do
+              echo "attempt $attempt, subnet $subnet"
+              set +e
+              out=$(aws ec2 run-instances \
+                --image-id "$AMI_ID" \
+                --instance-type c8g.8xlarge \
+                --count 1 \
+                --subnet-id "$subnet" \
+                --security-group-ids "$SG_ID" \
+                --iam-instance-profile "Name=$INSTANCE_PROFILE" \
+                --instance-initiated-shutdown-behavior terminate \
+                --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=1,HttpEndpoint=enabled' \
+                --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=500,VolumeType=gp3,Iops=10000,Throughput=1000,DeleteOnTermination=true,Encrypted=true}' \
+                --tag-specifications \
+                  "ResourceType=instance,Tags=[{Key=spate-bench,Value=true},{Key=ttl-hours,Value=$TTL_HOURS},{Key=run-id,Value=$RUN_ID},{Key=sha,Value=$GITHUB_SHA},{Key=Name,Value=spate-bench-$RUN_ID}]" \
+                  "ResourceType=volume,Tags=[{Key=spate-bench,Value=true},{Key=run-id,Value=$RUN_ID}]" \
+                --user-data file:///tmp/userdata.sh \
+                --query 'Instances[0].InstanceId' --output text 2>&1)
+              rc=$?
+              set -e
+              if [ $rc -eq 0 ]; then
+                instance_id="$out"
+                break 2
+              fi
+              case "$out" in
+                *InsufficientInstanceCapacity*|*VcpuLimitExceeded*|*InstanceLimitExceeded*)
+                  echo "retryable: $out" ;;
+                *)
+                  echo "$out" >&2
+                  exit 1 ;;
+              esac
+            done
+            sleep $((attempt * 60))
+          done
+          if [ -z "$instance_id" ]; then
+            echo "no capacity in any subnet after 5 attempts" >&2
+            exit 1
+          fi
+          echo "instance_id=$instance_id" >> "$GITHUB_OUTPUT"
+
+      # The manifest is the collector's source of truth: which SHA ran, what it
+      # ran, where results belong, and when the run should be presumed dead.
+      - name: Write the run manifest
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+          SELECTOR: ${{ needs.plan.outputs.selector }}
+          ENV_ID: ${{ needs.plan.outputs.env_id }}
+          TRIGGER: ${{ needs.plan.outputs.trigger }}
+          REPS: ${{ needs.plan.outputs.reps }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          TTL_HOURS: ${{ needs.plan.outputs.ttl_hours }}
+          INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg run_id "$RUN_ID" \
+            --arg sha "$GITHUB_SHA" \
+            --arg target_branch "$REF_NAME" \
+            --arg selector "$SELECTOR" \
+            --arg env_id "$ENV_ID" \
+            --arg trigger "$TRIGGER" \
+            --arg reps "$REPS" \
+            --arg mode "$MODE" \
+            --arg instance_id "$INSTANCE_ID" \
+            --argjson ttl_hours "$TTL_HOURS" \
+            --argjson launched_at "$(date -u +%s)" \
+            --arg workflow_run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '$ARGS.named' > /tmp/manifest.json
+          aws s3 cp /tmp/manifest.json "s3://$BUCKET/incoming/$RUN_ID/manifest.json"
+
+      - name: Summary
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+          INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
+          TTL_HOURS: ${{ needs.plan.outputs.ttl_hours }}
+        run: |
+          {
+            echo "## Launched"
+            echo
+            echo "- run id: \`$RUN_ID\`"
+            echo "- instance: \`$INSTANCE_ID\` (self-terminating; reaped after ${TTL_HOURS}h at the latest)"
+            echo "- results will arrive as a pull request from the collector within ~30 minutes of completion"
+          } >> "$GITHUB_STEP_SUMMARY"

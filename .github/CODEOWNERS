@@ -6,3 +6,13 @@
 # review queue rather than sitting unnoticed.
 
 * @MarcusKainth
+
+# Explicit, though the wildcard already covers them: the AWS footprint and the
+# workflows are the two places where a subtle diff can spend money or move
+# trust boundaries, and deserve to be named as such. NOTE: "require review
+# from Code Owners" must stay off in branch protection — an author cannot
+# approve their own PR, so with a single maintainer it would block every
+# merge. The structural gate for infra/ is that CI never runs `terraform
+# apply`; a merged change is inert until a maintainer applies it by hand.
+/infra/ @MarcusKainth
+/.github/ @MarcusKainth
