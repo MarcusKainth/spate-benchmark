@@ -68,7 +68,11 @@ payload() {
     -p spate-benchmark-harness --bin bench
   local bench="$REPO/target/release/bench"
 
-  run_step build-entrants "$bench" build "$SELECTOR"
+  # The selector may be several selectors ('spate flink'); split on purpose.
+  local -a sel
+  read -ra sel <<< "$SELECTOR"
+
+  run_step build-entrants "$bench" build "${sel[@]}"
   run_step prefill "$bench" prefill --env "$ENV_ID"
 
   if [ "$MODE" = ceiling-bootstrap ]; then
@@ -78,7 +82,7 @@ payload() {
     # The gate check first, separately: exit 3 is REFUSED, and a refusal
     # message in the log beats discovering it per-arm mid-sweep.
     run_step ceiling-gate "$bench" ceiling --env "$ENV_ID"
-    run_step run "$bench" run "$SELECTOR" --reps "$REPS" \
+    run_step run "$bench" run "${sel[@]}" --reps "$REPS" \
       --env "$ENV_ID" --trigger "$TRIGGER"
 
     # Upload only the APPENDED lines of each results file. `bench run` only

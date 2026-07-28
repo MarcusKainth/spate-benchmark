@@ -13,6 +13,21 @@
 name: Bench launch
 
 on:
+  # A push to main proposes a run automatically when it can move a published
+  # number; .github/scripts/affected-entrants.sh decides what, path filters
+  # here are only the first coarse cut. Every proposal still waits at the
+  # aws-bench environment — the gate is the "is this re-run warranted"
+  # decision, so over-proposing costs a click, not money.
+  push:
+    branches: [main]
+    paths:
+      - "harness/**"
+      - "workload/**"
+      - "entrants/**"
+      - "environments/**"
+      - "rust-toolchain.toml"
+      - "Cargo.lock"
+      - ".github/aws/**"
   workflow_dispatch:
     inputs:
       selector:
@@ -68,10 +83,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The push path diffs before..after to decide what a change
+          # invalidates.
+          fetch-depth: 0
 
       - name: Decide what to propose
         id: decide
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
           SELECTOR: ${{ inputs.selector }}
           ENV_ID: ${{ inputs.env_id }}
           TRIGGER: ${{ inputs.trigger }}
@@ -79,30 +99,59 @@ jobs:
           MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            selector=$SELECTOR
+            trigger=$TRIGGER
+            env_id=$ENV_ID
+            reps=$REPS
+            mode=$MODE
+          else
+            # `before` is the zero SHA on a branch create or force push; fall
+            # back to the parent, and to proposing nothing if even that is
+            # unreachable — the manual dispatch path always exists.
+            before=$EVENT_BEFORE
+            case "$before" in
+              ""|0000000000000000000000000000000000000000) before="${GITHUB_SHA}~1" ;;
+            esac
+            if git rev-parse --verify --quiet "$before^{commit}" >/dev/null; then
+              eval "$(.github/scripts/affected-entrants.sh "$before" "$GITHUB_SHA")"
+            else
+              echo "::warning::cannot resolve $before; proposing nothing"
+              selector=""
+              trigger=nightly
+            fi
+            env_id=c8g-8xl-ec2-docker
+            reps=3
+            mode=run
+          fi
           # A ceiling bootstrap is bounded by the measurement rig; a full run is
           # bounded by the sweep. Both TTLs are generous until the first c8g
           # sweep calibrates them — the box's own `timeout` fires 2h earlier.
-          case "$MODE" in
+          case "$mode" in
             ceiling-bootstrap) ttl=8 ;;
             *)                 ttl=36 ;;
           esac
           {
-            echo "selector=$SELECTOR"
-            echo "env_id=$ENV_ID"
-            echo "trigger=$TRIGGER"
-            echo "reps=$REPS"
-            echo "mode=$MODE"
+            echo "selector=$selector"
+            echo "env_id=$env_id"
+            echo "trigger=$trigger"
+            echo "reps=$reps"
+            echo "mode=$mode"
             echo "ttl_hours=$ttl"
             echo "run_id=$(date -u +%Y%m%d-%H%M%S)-${GITHUB_RUN_ID}"
           } >> "$GITHUB_OUTPUT"
+          if [ -z "$selector" ]; then
+            echo "This change moves no published number; nothing proposed." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Install the pinned toolchain
-        if: inputs.mode == 'run'
+        if: steps.decide.outputs.mode == 'run' && steps.decide.outputs.selector != ''
         run: |
           rustup show active-toolchain || rustup show
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: inputs.mode == 'run'
+        if: steps.decide.outputs.mode == 'run' && steps.decide.outputs.selector != ''
         with:
           path: |
             ~/.cargo/registry/index
@@ -116,11 +165,12 @@ jobs:
       # not a guess. In bootstrap mode there is no plan to print — the new
       # environment has no ceilings yet, which is the whole point of the run.
       - name: Print the exact plan the approver is approving
+        if: steps.decide.outputs.selector != ''
         env:
-          SELECTOR: ${{ inputs.selector }}
-          ENV_ID: ${{ inputs.env_id }}
-          MODE: ${{ inputs.mode }}
-          REPS: ${{ inputs.reps }}
+          SELECTOR: ${{ steps.decide.outputs.selector }}
+          ENV_ID: ${{ steps.decide.outputs.env_id }}
+          MODE: ${{ steps.decide.outputs.mode }}
+          REPS: ${{ steps.decide.outputs.reps }}
         run: |
           set -euo pipefail
           {
@@ -137,9 +187,12 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$MODE" = run ]; then
+            # The selector may be several selectors ('spate flink'); split on
+            # purpose.
+            read -ra sel <<< "$SELECTOR"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- \
-              run "$SELECTOR" --dry-run --env "$ENV_ID" >> "$GITHUB_STEP_SUMMARY"
+              run "${sel[@]}" --dry-run --env "$ENV_ID" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           else
             echo "_Ceiling bootstrap: measures and writes environments/ceilings/$ENV_ID.json._" \

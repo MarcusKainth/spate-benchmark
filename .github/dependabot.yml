@@ -7,14 +7,40 @@
 
 version: 2
 updates:
+  # Daily rather than weekly, for one reason: a spate release on crates.io
+  # becomes its own version-bump PR within a day, and merging that PR is what
+  # proposes a release benchmark run (bench-launch.yml reads the Cargo.lock
+  # diff). The general group keeps an effectively weekly cadence via cooldown,
+  # so the faster clock does not turn into faster noise.
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
     open-pull-requests-limit: 5
     groups:
+      # The framework under test. An explicit list rather than "spate-*": a
+      # third party could publish a crate matching the glob, and nothing that
+      # is not the SUT belongs in the PR that triggers a paid benchmark run.
+      spate:
+        patterns:
+          - "spate-core"
+          - "spate-avro"
+          - "spate-kafka"
+          - "spate-clickhouse"
       cargo:
         patterns: ["*"]
+        exclude-patterns:
+          - "spate-core"
+          - "spate-avro"
+          - "spate-kafka"
+          - "spate-clickhouse"
+    cooldown:
+      default-days: 7
+      exclude:
+        - "spate-core"
+        - "spate-avro"
+        - "spate-kafka"
+        - "spate-clickhouse"
 
   - package-ecosystem: npm
     directory: /website
