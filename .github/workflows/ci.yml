@@ -95,12 +95,19 @@ jobs:
       - name: Format
         run: terraform fmt -check -recursive infra
 
-      - name: Validate
-        run: |
-          terraform -chdir=infra init -backend=false -input=false
-          terraform -chdir=infra validate
-          terraform -chdir=infra/bootstrap init -backend=false -input=false
-          terraform -chdir=infra/bootstrap validate
+      # The Inputs/Outputs tables in infra/README.md are generated; this fails
+      # if a variable or output changed without the docs being regenerated
+      # (`terraform-docs markdown table --output-file README.md
+      # --output-mode inject infra`). Runs BEFORE `terraform init`: the
+      # action's fail-on-diff refuses on ANY uncommitted file in the
+      # workspace, and init writes .terraform.lock.hcl.
+      - name: Docs are current
+        uses: terraform-docs/gh-actions@6de6da0cefcc6b4b7a5cbea4d79d97060733093c # v1.4.1
+        with:
+          working-dir: infra
+          output-file: README.md
+          output-method: inject
+          fail-on-diff: "true"
 
       - uses: terraform-linters/setup-tflint@6e1e0642c0289bd619021bf6b34e3c08ed1e005a # v6.3.0
 
@@ -118,17 +125,14 @@ jobs:
           scan-ref: infra
           exit-code: "1"
 
-      # The Inputs/Outputs tables in infra/README.md are generated; this fails
-      # if a variable or output changed without the docs being regenerated
-      # (`terraform-docs markdown table --output-file README.md
-      # --output-mode inject infra`).
-      - name: Docs are current
-        uses: terraform-docs/gh-actions@6de6da0cefcc6b4b7a5cbea4d79d97060733093c # v1.4.1
-        with:
-          working-dir: infra
-          output-file: README.md
-          output-method: inject
-          fail-on-diff: "true"
+      # Last, because init leaves provider lock files in the tree that the
+      # docs action above would refuse.
+      - name: Validate
+        run: |
+          terraform -chdir=infra init -backend=false -input=false
+          terraform -chdir=infra validate
+          terraform -chdir=infra/bootstrap init -backend=false -input=false
+          terraform -chdir=infra/bootstrap validate
 
   site:
     name: Site
