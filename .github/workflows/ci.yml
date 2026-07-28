@@ -72,9 +72,14 @@ jobs:
 
       # A sweep is not runnable here, but the plan it would execute is, and a
       # selector grammar that silently expands to the whole matrix is the kind of
-      # defect that costs hours on the machine that can run it.
-      - name: bench run --dry-run
-        run: cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- run '*' --dry-run
+      # defect that costs hours on the machine that can run it. Once per
+      # environment: with more than one profile committed, `--env` is mandatory
+      # everywhere, and each environment's plan is checked on its own.
+      - name: bench run --dry-run (m5max-mbp-docker)
+        run: cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- run '*' --dry-run --env m5max-mbp-docker
+
+      - name: bench run --dry-run (c8g-8xl-ec2-docker)
+        run: cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- run '*' --dry-run --env c8g-8xl-ec2-docker
 
   # The AWS footprint is public HCL, so it gets the same treatment as the code:
   # formatted, validated, linted, and misconfiguration-scanned on every change.
