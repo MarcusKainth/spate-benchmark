@@ -15,13 +15,6 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
-    # The framework under test. Its rev is provenance, not a dependency version:
-    # it lands in Cargo.lock, travels into `sut.commit` on every record, and
-    # moving it changes which code was measured. Cargo.toml says it moves "in one
-    # PR whose diff IS the provenance change" — which is a decision, not
-    # something to be woken up about weekly.
-    ignore:
-      - dependency-name: "etl-*"
 
   - package-ecosystem: npm
     directory: /website

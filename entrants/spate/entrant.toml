@@ -42,9 +42,6 @@ command  = ["/usr/local/bin/spate-arm", "--version"]
 context    = "../.."
 dockerfile = "Dockerfile"
 image      = "spate-bench-spate"
-# Private git dependency until the framework publishes. Passed as a BuildKit
-# secret so no token is ever baked into an image layer.
-secrets    = ["gitcred"]
 
 # 16 GiB, the same as every other arm, and far more than this arm will use. The
 # point is that no system is memory-bound: a GC-managed runtime that has to

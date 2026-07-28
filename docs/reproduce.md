@@ -61,9 +61,8 @@ That is useful and I would like to know. The most likely causes, in order:
 3. **A real defect in the harness.** Open an issue. A benchmark that cannot be
    reproduced is a claim, not evidence.
 
-## Current gap
+## No credentials required
 
-The Spate arm's image needs credentials for the framework's repository, which is
-private until it publishes. Every other arm builds from a clean clone. This
-weakens reproducibility on precisely the arm that is ours, and it resolves when
-the framework goes public.
+Every arm, including Spate's, builds from a clean clone of this repository. The
+framework is consumed from crates.io and pinned in `Cargo.lock`, so the arm that
+is ours is exactly as reproducible as every arm that is not.

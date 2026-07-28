@@ -29,7 +29,6 @@ WORKDIR /build
 # from silently invalidating the layer cache — and makes it obvious that no
 # result data enters the image.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY .cargo .cargo
 COPY harness harness
 COPY entrants/spate entrants/spate
 COPY workload workload
@@ -38,24 +37,16 @@ COPY workload workload
 # different dependency graph than the one recorded, which for a benchmark means
 # silently measuring different code.
 #
-# The framework is a private git dependency until it publishes, so the fetch
-# needs credentials. They arrive as a BuildKit secret — not an ARG, which would
-# be baked into image history, and not a COPY of the host's git config. A public
-# repository's image must never carry a token. `.cargo/config.toml` sets
-# `git-fetch-with-cli`, which is what makes the credential helper apply.
-#
-# Delete the secret mount and the `git config` line once the framework is on
-# crates.io; at that point there is no private fetch left to authenticate.
+# The framework is consumed from crates.io, so the build needs no credentials of
+# any kind: a clean clone of this public repository builds the arm as-is.
 #
 # Cache mounts make an incremental rebuild seconds rather than minutes (rdkafka
 # compiles librdkafka from vendored C sources). A cache mount is not part of the
 # resulting layer, so the binary must be copied out inside the same RUN.
-RUN --mount=type=secret,id=gitcred,target=/root/.git-credentials \
-    --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    git config --global credential.helper store \
-    && cargo build --release --locked -p spate-arm --bin spate-arm \
+    cargo build --release --locked -p spate-arm --bin spate-arm \
     && cp target/release/spate-arm /build/arm
 
 # Stage the one shared library the runtime base lacks.
