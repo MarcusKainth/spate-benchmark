@@ -110,7 +110,12 @@ payload() {
     # the `|| echo 0` would emit a SECOND zero, corrupting the count. `awk` also
     # counts a final line that lacks a trailing newline, so the last committed
     # record is not re-uploaded as a duplicate.
-    git status --porcelain -- results/ | while read -r _ f; do
+    # -uall, or an environment's FIRST results land as one untracked-directory
+    # entry (`?? results/<env>/`) whose `tail` fails and kills the upload under
+    # `set -e` — the first c8g sweep measured 24 records and lost every one of
+    # them to exactly that. -uall lists untracked files individually, and a
+    # file absent from HEAD uploads whole via the old=0 branch below.
+    git status --porcelain -uall -- results/ | while read -r _ f; do
       if git cat-file -e "HEAD:$f" 2>/dev/null; then
         old=$(git show "HEAD:$f" | awk 'END { print NR + 0 }')
       else
