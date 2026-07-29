@@ -23,7 +23,7 @@ import {metricsPresent, modeOf} from './model';
  * at eight arms: the row order is fixed across every column, so a system's
  * profile is one horizontal scan and an unfavourable column cannot be given less
  * prominence than a favourable one without moving it. At sixty arms that same
- * form is five thousand pixels of table per group, times eighteen groups.
+ * form is five thousand pixels of table per group, times six groups.
  *
  * The dense table keeps the property that mattered and pays for it differently:
  * the column order is fixed, every arm is one ~30px row, and the ordering claim
@@ -40,10 +40,7 @@ import {metricsPresent, modeOf} from './model';
  * provenance and its own environment caveat.
  */
 
-const TIER_GLOSS: Record<string, string> = {
-  a: 'transport — decode, flatten, insert',
-  b: 'transform — tier A plus two filters and two derived columns',
-};
+const WORKLOAD_GLOSS = 'decode, flatten, filter, derive — one row per surviving event';
 
 const MODE_GLOSS: Record<string, string> = {
   drain: 'drain — how fast the system can go through a fixed corpus',
@@ -90,7 +87,6 @@ export default function Table({
   const detail = detailFor(metricsPresent(rows));
   // rank + arm + metrics + the disclosure column.
   const colSpan = 3 + columns.length;
-  const tier = String(group.tier ?? '?');
   const mode = modeOf(group.key);
   const anyRanked = ranked.size > 0;
 
@@ -116,14 +112,14 @@ export default function Table({
       )}
 
       {/* What the summary immediately above this cannot carry, and nothing it
-          already says. The environment, the tier and the mode are the group's
-          identity and belong on the disclosure a reader clicked; repeating them
-          forty pixels lower taught nobody anything. What is left is what the
-          identity does not tell you: what the tier asks of a system, what the
-          mode means for the throughput figure, and the protocol the numbers were
+          already says. The environment and the mode are the group's identity
+          and belong on the disclosure a reader clicked; repeating them forty
+          pixels lower taught nobody anything. What is left is what the identity
+          does not tell you: what the workload asks of a system, what the mode
+          means for the throughput figure, and the protocol the numbers were
           taken under. */}
       <p className="bench-prov bench-note">
-        {TIER_GLOSS[tier] ?? 'workload'}
+        {WORKLOAD_GLOSS}
         {mode && <> · {MODE_GLOSS[mode] ?? mode}</>} · harness v
         {group.harness_version}
         {group.dataset_version && <> · corpus {group.dataset_version}</>}
@@ -132,7 +128,7 @@ export default function Table({
       <div className="bench-scroll">
         <table className="bench-table">
           <caption className="bench-sr-only">
-            Tier {tier.toUpperCase()} arms measured on {group.env_id} under harness v
+            Arms measured on {group.env_id} under harness v
             {group.harness_version}.{' '}
             {anyRanked
               ? `Ordered by ${(columns[0]?.label ?? 'the primary metric').toLowerCase()}.`

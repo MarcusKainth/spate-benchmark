@@ -73,35 +73,6 @@ fn every_active_entrant_has_a_realistic_default() {
 }
 
 #[test]
-fn the_flink_arm_running_our_own_deserializer_stays_labelled_stripped() {
-    // METHODOLOGY calls the anti-gaming valve "not hypothetical" and names this
-    // arm as the case: `ReusingAvroDeserializationSchema` is code *we* wrote, so
-    // rule 1 bars it from the headline even though it makes Flink look better.
-    //
-    // What that protection consisted of was the word `stripped` on one
-    // hand-written line of `entrants/flink/entrant.toml`. Editing it to
-    // `realistic` passed every check in this repository and moved
-    // hand-written-decoder numbers into the site's default view. Naming the arm
-    // here means the edit also has to delete a test that says why it must not be
-    // made — and if the arm is genuinely retired, this test is deleted in the
-    // same change, deliberately.
-    let entrants = entrant::load_all(&entrants_dir()).expect("descriptors valid");
-    let flink = entrants
-        .iter()
-        .find(|e| e.id() == "flink")
-        .expect("flink entrant");
-    let v = flink
-        .variant("tier-a-reusing")
-        .expect("the reusing-deserializer arm; remove this test if it is retired");
-    assert_eq!(
-        v.approach,
-        Approach::Stripped,
-        "flink {}: runs a deserializer Flink does not ship, so it is never the headline",
-        v.id
-    );
-}
-
-#[test]
 fn planned_entrants_explain_themselves() {
     // A roadmap that says only "later" is a promise, not a plan. Anything not yet
     // measured has to say what is blocking it, so the gap is legible to a reader

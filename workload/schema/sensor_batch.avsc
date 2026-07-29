@@ -18,7 +18,7 @@
       "name": "region",
       "type": ["null", "string"],
       "default": null,
-      "doc": "Deliberately a nullable union, and deliberately null ~10% of the time: it forces every implementation through a real union-decode path, and the tier-B transform must coalesce null to the empty string. The ClickHouse column is LowCardinality(String), NOT LowCardinality(Nullable(String)) — our Native encoder rejects a non-String inner, and that trap is the reason the coalesce is part of the specified work rather than an incidental detail."
+      "doc": "Deliberately a nullable union, and deliberately null ~10% of the time: it forces every implementation through a real union-decode path, and the transform must coalesce null to the empty string. The ClickHouse column is LowCardinality(String), NOT LowCardinality(Nullable(String)) — our Native encoder rejects a non-String inner, and that trap is the reason the coalesce is part of the specified work rather than an incidental detail."
     },
     {
       "name": "batch_ts_ms",
@@ -52,18 +52,18 @@
             {
               "name": "unit",
               "type": "string",
-              "doc": "Low-cardinality unit (8 distinct values). One value, `\"drop\"`, is the tier-B filter sentinel."
+              "doc": "Low-cardinality unit (8 distinct values). One value, `\"drop\"`, is the transform's filter sentinel."
             },
             {
               "name": "value",
               "type": "long",
-              "doc": "Deterministic function of (batch_id, seq) — see METHODOLOGY.md. Because it is reproducible from the row identity alone, the driver can compute the expected checksum in closed form and prove that two frameworks did the same arithmetic, not merely that they moved the same number of rows."
+              "doc": "Deterministic function of (batch_id, seq) — see methodology/. Because it is reproducible from the row identity alone, the driver can compute the expected checksum in closed form and prove that two frameworks did the same arithmetic, not merely that they moved the same number of rows."
             },
             {
               "name": "quality",
               "type": ["null", "double"],
               "default": null,
-              "doc": "Second nullable union. The tier-B filter drops rows where this is non-null and below a threshold."
+              "doc": "Second nullable union. The transform's filter drops rows where this is non-null and below a threshold."
             },
             {
               "name": "tags",

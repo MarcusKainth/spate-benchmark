@@ -80,9 +80,7 @@ COPY --from=builder /staging/ /
 COPY --from=builder /build/arm /usr/local/bin/spate-arm
 
 # Defaults target the bench network; the driver overrides what it varies.
-ENV TIER=a \
-    FORMAT=native \
-    DESER=value \
+ENV FORMAT=native \
     BOOTSTRAP=spate-bench-redpanda:29092 \
     REGISTRY_URL=http://spate-bench-redpanda:8081 \
     CLICKHOUSE_URL=http://spate-bench-clickhouse:8123 \

@@ -14,13 +14,12 @@ import {enhance} from './enhance';
  *
  * WHAT THIS PAGE IS SHAPED BY
  *
- * The benchmark grows along four axes at once: systems toward twenty-plus,
- * variants per system, environments, and workload tiers. The comparability key
- * is a six-tuple, so three environments times three tiers times two modes is
- * eighteen groups — and group count, not row count, is what breaks a results
- * page first. A design that stacks every group as its own block with its own
- * legend and prose is thousands of pixels deep before anyone has filtered
- * anything.
+ * The benchmark grows along three axes at once: systems toward twenty-plus,
+ * variants per system, and environments. The comparability key is a
+ * five-tuple, so three environments times two modes is six groups — and group
+ * count, not row count, is what breaks a results page first. A design that
+ * stacks every group as its own block with its own legend and prose is
+ * thousands of pixels deep before anyone has filtered anything.
  *
  * So: one dense ranked table per group, every group on one page, and the group a
  * reader is looking at chosen by a native disclosure rather than by script.
@@ -197,8 +196,9 @@ export default function Results(): React.JSX.Element {
       <div className="bench-strip">
         <p className="bench-strip__what">
           <strong>Kafka → Avro → ClickHouse.</strong> 4 CPU and 16 GiB of data plane per
-          system, at-least-once, one row per event. Every system consumes the same topic and
-          flattens each message into one row per event.
+          system, at-least-once. Every system consumes the same topic, decodes and flattens
+          each message, applies the same two filters and two derived columns, and lands the
+          surviving rows in ClickHouse.
         </p>
         <p className="bench-note">
           {rows.length} arm{rows.length === 1 ? '' : 's'} · {inPlay.length} system
@@ -240,7 +240,6 @@ export default function Results(): React.JSX.Element {
           the group they are looking at. */}
       <div className="bench-groups">
         {groups.map((g, i) => {
-          const tier = String(g.group.tier ?? '?');
           const mode = modeOf(g.group.key);
           const env = envById.get(g.group.env_id);
           return (
@@ -252,10 +251,7 @@ export default function Results(): React.JSX.Element {
             >
               <summary className="bench-group__sum">
                 <span className="bench-group__where">{g.group.env_id}</span>
-                <span className="bench-group__what">
-                  tier {tier.toUpperCase()}
-                  {mode && <> · {mode}</>}
-                </span>
+                {mode && <span className="bench-group__what">{mode}</span>}
                 <span className="bench-note">
                   {g.rows.length} arm{g.rows.length === 1 ? '' : 's'}
                   {env?.class && env.class !== 'authoritative' && <> · {env.class}</>}

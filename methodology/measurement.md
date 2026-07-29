@@ -70,10 +70,7 @@ rates.
 
 It is a separate limit from run-to-run spread, and the two are often confused.
 Spread says how much a repeated measurement wanders; quantisation says how finely
-any single one can be read. Both must clear before a difference means anything,
-and on this environment the binding one is usually spread — the profile records
-14.5%, and a Flink sweep observed 0.0–10.4% across ten confirmed configurations,
-so treat the profile's figure as a bound rather than a description.
+any single one can be read. Both must clear before a difference means anything.
 
 The practical consequence for a reader: **two arms within a few percent of each
 other are not ranked by these numbers**, whatever order the page happens to draw
@@ -83,11 +80,12 @@ exactly this reason.
 ## Which mode measures what, and why
 
 **Throughput and efficiency come from DRAIN mode. Latency comes from SUSTAINED
-mode.** That split is forced by the host, and it was measured rather than assumed.
+mode.** That split is forced by host arithmetic, and it was measured rather than
+assumed.
 
-The reference box has 18 vCPU. The system's 4, plus the broker's, plus
-ClickHouse's, plus a load generator wide enough to offer millions of rows/s, plus
-the driver, **exceeds 18**. The consequence is not subtle: under sustained load,
+An arm's envelope, plus the broker's, plus ClickHouse's, plus a load generator
+wide enough to offer millions of rows/s, plus the driver, **can exceed the cores
+a host has**. The consequence is not subtle: under sustained load,
 widening the Spate arm's egress concurrency changed its throughput not at all,
 which reads exactly like "egress concurrency does not matter" — while the same
 widening, measured in drain mode with the generator's CPU outside the window,

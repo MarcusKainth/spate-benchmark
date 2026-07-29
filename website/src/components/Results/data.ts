@@ -45,7 +45,6 @@ export type Row = {
   dataset_version: string;
   ts_ms: number;
   status: string;
-  tier: string | null;
   approach: string;
   wire_format: string | null;
   reps_counted: number;
@@ -60,7 +59,6 @@ export type Attempt = {
   group: string;
   entrant: string;
   variant_id: string;
-  tier: string | null;
   status: string;
   note: string | null;
   ts_ms: number;
@@ -71,7 +69,6 @@ export type Variant = {
   label?: string;
   approach?: string;
   default?: boolean;
-  tier?: string;
   unshipped?: string[];
   /** The resolved knob values this arm ran with. */
   knobs?: Record<string, string | number | boolean>;
@@ -137,7 +134,6 @@ export type Group = {
   env_id: string;
   harness_version: number;
   dataset_version?: string;
-  tier: string | null;
 };
 
 export type Data = {

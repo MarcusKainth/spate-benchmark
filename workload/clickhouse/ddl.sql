@@ -1,6 +1,6 @@
 -- Shared ClickHouse target schema for the cross-framework comparison.
 --
--- Every framework writes THESE tables, with THIS column order. The order is the
+-- Every framework writes THIS table, with THIS column order. The order is the
 -- wire contract for both RowBinary and Native, so a reordering here is a
 -- breaking change to every implementation in entrants/.
 --
@@ -10,31 +10,45 @@
 -- comparable and must not be published.
 
 -- ---------------------------------------------------------------------------
--- Tier A — transport. Decode, flatten, insert. Column mapping only.
+-- The workload: decode, flatten, filter, derive, insert.
 -- ---------------------------------------------------------------------------
+-- Specified work, in this order:
+--   1. drop rows where unit = 'drop'                       (~12.5% of rows)
+--   2. drop rows where quality IS NOT NULL AND quality < 0.2
+--   3. coalesce a null region to ''
+--   4. value_scaled = value * 1000 / (event_seq + 1), integer division,
+--      truncating toward zero
+--   5. name_upper  = ASCII-only uppercase of name
+--
+-- Step 5 is ASCII-only ON PURPOSE. Java's String.toUpperCase() is
+-- locale-dependent, so an unqualified "uppercase" would not be the same
+-- operation in every implementation. Metric names are drawn from a fixed set of
+-- lowercase ASCII identifiers, which makes ASCII uppercase unambiguous.
 CREATE TABLE IF NOT EXISTS sensor_events
 (
-    batch_id   UInt64,
-    event_seq  UInt16,
-    sensor     LowCardinality(String),
+    batch_id     UInt64,
+    event_seq    UInt16,
+    sensor       LowCardinality(String),
     -- NOT LowCardinality(Nullable(String)): the Native encoder rejects a
-    -- non-String inner. The Avro null is coalesced to '' by the pipeline, which
-    -- is why even tier A does a small amount of real work.
-    region     LowCardinality(String),
-    name       LowCardinality(String),
-    unit       LowCardinality(String),
-    value      Int64,
-    quality    Nullable(Float64),
-    tags       Array(LowCardinality(String)),
-    batch_ts   DateTime64(3),
+    -- non-String inner. The Avro null is coalesced to '' by the pipeline —
+    -- step 3 above — which is why the coalesce is specified work rather than
+    -- an incidental detail.
+    region       LowCardinality(String),
+    name_upper   LowCardinality(String),
+    unit         LowCardinality(String),
+    value        Int64,
+    value_scaled Int64,
+    quality      Nullable(Float64),
+    tags         Array(LowCardinality(String)),
+    batch_ts     DateTime64(3),
     -- Producer's INTENDED send time. The Native leaf writer does no DateTime64
     -- rescaling, so the Spate side must use the DateTime64Micros wrapper
     -- newtype here or every value silently lands in 1970.
-    send_ts    DateTime64(6),
+    send_ts      DateTime64(6),
     -- Computed server-side at insert, identically for every framework and every
     -- wire format. This column is the entire latency measurement: no framework
     -- reports its own latency, and there is only one definition of "arrived".
-    ingest_ts  DateTime64(6) MATERIALIZED now64(6)
+    ingest_ts    DateTime64(6) MATERIALIZED now64(6)
 )
 ENGINE = MergeTree
 ORDER BY (sensor, batch_ts, batch_id, event_seq)
@@ -56,41 +70,6 @@ ORDER BY (sensor, batch_ts, batch_id, event_seq)
 -- It is not visible in `entrants/spate/`: the setting is applied by the
 -- framework under test, not by the arm's own source. A review that grepped the
 -- entrant directory concluded no arm sent tokens and was wrong.
-SETTINGS non_replicated_deduplication_window = 1000;
-
--- ---------------------------------------------------------------------------
--- Tier B — transform. Tier A plus filtering and derivation.
--- ---------------------------------------------------------------------------
--- Specified work, in this order:
---   1. drop rows where unit = 'drop'                       (~12.5% of rows)
---   2. drop rows where quality IS NOT NULL AND quality < 0.2
---   3. coalesce a null region to ''
---   4. value_scaled = value * 1000 / (event_seq + 1), integer division,
---      truncating toward zero
---   5. name_upper  = ASCII-only uppercase of name
---
--- Step 5 is ASCII-only ON PURPOSE. Java's String.toUpperCase() is
--- locale-dependent, so an unqualified "uppercase" would not be the same
--- operation in every implementation. Metric names are drawn from a fixed set of
--- lowercase ASCII identifiers, which makes ASCII uppercase unambiguous.
-CREATE TABLE IF NOT EXISTS sensor_events_t
-(
-    batch_id     UInt64,
-    event_seq    UInt16,
-    sensor       LowCardinality(String),
-    region       LowCardinality(String),
-    name_upper   LowCardinality(String),
-    unit         LowCardinality(String),
-    value        Int64,
-    value_scaled Int64,
-    quality      Nullable(Float64),
-    tags         Array(LowCardinality(String)),
-    batch_ts     DateTime64(3),
-    send_ts      DateTime64(6),
-    ingest_ts    DateTime64(6) MATERIALIZED now64(6)
-)
-ENGINE = MergeTree
-ORDER BY (sensor, batch_ts, batch_id, event_seq)
 SETTINGS non_replicated_deduplication_window = 1000;
 
 -- ---------------------------------------------------------------------------
@@ -128,7 +107,7 @@ SETTINGS non_replicated_deduplication_window = 1000;
 --
 --   SELECT sum(toInt128(reinterpretAsUInt64(CAST(name_upper AS String)))
 --            + toInt128(reinterpretAsUInt64(reverse(CAST(name_upper AS String)))))
---     FROM (SELECT DISTINCT batch_id, event_seq, name_upper FROM sensor_events_t);
+--     FROM (SELECT DISTINCT batch_id, event_seq, name_upper FROM sensor_events);
 --
 -- Two columns cannot be checksummed and are checked as far as they can be.
 -- `quality` is Float64, and a sum of floats depends on the order the server added

@@ -7,7 +7,7 @@
 //!
 //! That buys three things a random or timestamp-seeded generator could not:
 //!
-//! * The expected row count, the expected checksum, and the expected per-tier
+//! * The expected row count, the expected checksum, and the expected
 //!   filtered counts are all computable without reading what any framework
 //!   produced — so a framework that silently transforms wrongly fails the gate
 //!   just as loudly as one that drops rows.
@@ -24,15 +24,15 @@
 //!
 //! One deliberate property worth stating: `value` is always non-negative
 //! (a `%` of a positive modulus over unsigned arithmetic). That removes a real
-//! cross-language hazard from tier B — integer division truncates toward zero in
-//! Rust, Java and ClickHouse alike for non-negative operands, so
+//! cross-language hazard from the transform — integer division truncates toward
+//! zero in Rust, Java and ClickHouse alike for non-negative operands, so
 //! `value * 1000 / (event_seq + 1)` cannot disagree between implementations the
 //! way it could if the sign varied.
 //!
 //! # The corpus-version markers
 //!
 //! Two marker comments below delimit the part of this file that determines a
-//! byte of the corpus: the field derivations, the tier-B transform definitions,
+//! byte of the corpus: the field derivations, the transform definitions,
 //! the Avro encoding, the Confluent framing and the prefill timestamp.
 //! `harness/build.rs` hashes exactly that region — comments stripped, whitespace
 //! collapsed — into `DATASET_VERSION`.
@@ -155,7 +155,7 @@ pub fn tags_of(batch_id: u64, seq: u32) -> Vec<String> {
         .collect()
 }
 
-/// ASCII-only uppercase, the tier-B `name_upper` derivation.
+/// ASCII-only uppercase, the `name_upper` derivation.
 ///
 /// ASCII-only is specified rather than incidental: Java's
 /// `String.toUpperCase()` is locale-dependent, so an unqualified "uppercase"
@@ -165,15 +165,16 @@ pub fn ascii_upper(s: &str) -> String {
     s.to_ascii_uppercase()
 }
 
-/// The tier-B `value_scaled` derivation.
+/// The `value_scaled` derivation.
 #[must_use]
 pub fn value_scaled_of(value: i64, seq: u32) -> i64 {
     value * 1000 / i64::from(seq + 1)
 }
 
-/// Whether tier B keeps this event.
+/// Whether the workload keeps this event: the unit sentinel and the quality
+/// floor are the two filter predicates every arm must apply.
 #[must_use]
-pub fn tier_b_keeps(batch_id: u64, seq: u32) -> bool {
+pub fn keeps(batch_id: u64, seq: u32) -> bool {
     if unit_of(batch_id, seq) == DROP_UNIT {
         return false;
     }
@@ -371,7 +372,7 @@ pub struct Event {
     pub seq: i32,
     /// Metric name.
     pub name: String,
-    /// Metric unit; `"drop"` is the tier-B filter sentinel.
+    /// Metric unit; `"drop"` is the filter sentinel.
     pub unit: String,
     /// Metric value.
     pub value: i64,
@@ -381,24 +382,13 @@ pub struct Event {
     pub tags: Vec<String>,
 }
 
-/// Tier A columns, positional — used to build the Native schema and the sink
-/// `columns` list from one definition.
-pub const COLUMNS_A: &[(&str, &str)] = &[
-    ("batch_id", "UInt64"),
-    ("event_seq", "UInt16"),
-    ("sensor", "LowCardinality(String)"),
-    ("region", "LowCardinality(String)"),
-    ("name", "LowCardinality(String)"),
-    ("unit", "LowCardinality(String)"),
-    ("value", "Int64"),
-    ("quality", "Nullable(Float64)"),
-    ("tags", "Array(LowCardinality(String))"),
-    ("batch_ts", "DateTime64(3)"),
-    ("send_ts", "DateTime64(6)"),
-];
+/// The target table every arm writes.
+pub const TABLE: &str = "sensor_events";
 
-/// Tier B columns, positional.
-pub const COLUMNS_B: &[(&str, &str)] = &[
+/// The target columns, positional — used to build the Native schema and the
+/// sink `columns` list from one definition. The order is the RowBinary and
+/// Native wire contract.
+pub const COLUMNS: &[(&str, &str)] = &[
     ("batch_id", "UInt64"),
     ("event_seq", "UInt16"),
     ("sensor", "LowCardinality(String)"),
@@ -416,44 +406,6 @@ pub const COLUMNS_B: &[(&str, &str)] = &[
 // ---------------------------------------------------------------------------
 // Expectations for the correctness gates
 // ---------------------------------------------------------------------------
-
-/// Which workload tier an arm ran.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tier {
-    /// Decode, flatten, insert. Column mapping only.
-    A,
-    /// Tier A plus the specified filtering and derivation.
-    B,
-}
-
-impl Tier {
-    /// The `tier` variant value recorded on every measurement.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Tier::A => "a",
-            Tier::B => "b",
-        }
-    }
-
-    /// The target table for this tier.
-    #[must_use]
-    pub fn table(self) -> &'static str {
-        match self {
-            Tier::A => "sensor_events",
-            Tier::B => "sensor_events_t",
-        }
-    }
-
-    /// The positional column list for this tier.
-    #[must_use]
-    pub fn columns(self) -> &'static [(&'static str, &'static str)] {
-        match self {
-            Tier::A => COLUMNS_A,
-            Tier::B => COLUMNS_B,
-        }
-    }
-}
 
 /// A checksum of one short ASCII string, reproducible byte-for-byte in Rust and
 /// in ClickHouse.
@@ -533,18 +485,15 @@ pub struct Expected {
     /// corpus would overflow the `Int64` that ClickHouse's `sum` would
     /// otherwise return — the gate query casts to `Int128` to match.
     pub value_sum: i128,
-    /// Sum of `value_scaled` over distinct rows; zero for tier A, which has no
-    /// such column.
+    /// Sum of `value_scaled` over distinct rows.
     pub value_scaled_sum: i128,
     /// Sum of [`str_fingerprint`] over the `sensor` column.
     pub sensor_sum: i128,
     /// Sum of [`str_fingerprint`] over the `region` column, with a null region
-    /// fingerprinted as the empty string — which is what the coalesce specified
-    /// for both tiers must have put in the non-nullable target column.
+    /// fingerprinted as the empty string — which is what the specified coalesce
+    /// must have put in the non-nullable target column.
     pub region_sum: i128,
-    /// Sum of [`str_fingerprint`] over the name column: `name` for tier A,
-    /// `name_upper` for tier B. One sum covers both because the column that
-    /// carries the name differs by tier, and so does its expected content.
+    /// Sum of [`str_fingerprint`] over the `name_upper` column.
     pub name_sum: i128,
     /// Sum of [`str_fingerprint`] over the `unit` column.
     pub unit_sum: i128,
@@ -565,18 +514,18 @@ pub struct Expected {
     pub null_quality_rows: u64,
 }
 
-/// Compute what `batches` messages must yield for `tier`.
+/// Compute what `batches` messages must yield.
 ///
 /// Deliberately a loop over the generator rather than a closed form: the point
 /// of the gate is to catch a transform that disagrees with the specification,
 /// and a closed form derived from the same misreading of the spec would agree
 /// with the bug.
 #[must_use]
-pub fn expected(batches: u64, tier: Tier) -> Expected {
-    expected_range(0, batches, tier)
+pub fn expected(batches: u64) -> Expected {
+    expected_range(0, batches)
 }
 
-/// How many rows `batches` messages must yield for `tier`, and nothing else.
+/// How many rows `batches` messages must yield, and nothing else.
 ///
 /// [`expected`] is the gate's oracle and formats a string per string column per
 /// row to get there. That is the right price for a gate — under a second over
@@ -587,13 +536,14 @@ pub fn expected(batches: u64, tier: Tier) -> Expected {
 ///
 /// The duplicated loop is what that costs, and
 /// `the_cheap_row_count_agrees_with_the_full_expectation` is what stops it
-/// drifting into a second, disagreeing definition of which rows tier B keeps.
+/// drifting into a second, disagreeing definition of which rows the workload
+/// keeps.
 #[must_use]
-pub fn expected_rows(batches: u64, tier: Tier) -> u64 {
+pub fn expected_rows(batches: u64) -> u64 {
     let mut rows = 0;
     for batch_id in 0..batches {
         for seq in 0..EVENTS_PER_BATCH {
-            if tier == Tier::B && !tier_b_keeps(batch_id, seq) {
+            if !keeps(batch_id, seq) {
                 continue;
             }
             rows += 1;
@@ -602,7 +552,7 @@ pub fn expected_rows(batches: u64, tier: Tier) -> u64 {
     rows
 }
 
-/// Compute what batches `lo..hi` must yield for `tier`.
+/// Compute what batches `lo..hi` must yield.
 ///
 /// Sustained mode needs this rather than [`expected`]: the producer runs
 /// continuously and the consumer is stopped mid-stream, so the range that
@@ -638,7 +588,7 @@ pub fn expected_rows(batches: u64, tier: Tier) -> u64 {
 /// approach exists to avoid, and a memo keyed on a misread modulus would agree
 /// with a generator that misread it the same way.
 #[must_use]
-pub fn expected_range(lo: u64, hi: u64, tier: Tier) -> Expected {
+pub fn expected_range(lo: u64, hi: u64) -> Expected {
     let mut out = Expected {
         rows: 0,
         value_sum: 0,
@@ -662,19 +612,14 @@ pub fn expected_range(lo: u64, hi: u64, tier: Tier) -> Expected {
         let batch_ts = i128::from(batch_ts_ms_of(batch_id));
 
         for seq in 0..EVENTS_PER_BATCH {
-            if tier == Tier::B && !tier_b_keeps(batch_id, seq) {
+            if !keeps(batch_id, seq) {
                 continue;
             }
             let value = value_of(batch_id, seq);
-            let name = name_of(batch_id, seq);
-            // Tier B's column is `name_upper`; tier A's is `name`. Derived
-            // through `ascii_upper` rather than by upper-casing here, so the
-            // oracle and the specification cannot drift apart.
-            let name = if tier == Tier::B {
-                ascii_upper(&name)
-            } else {
-                name
-            };
+            // The target column is `name_upper`. Derived through `ascii_upper`
+            // rather than by upper-casing here, so the oracle and the
+            // specification cannot drift apart.
+            let name = ascii_upper(&name_of(batch_id, seq));
             let tags = tags_of(batch_id, seq);
 
             out.rows += 1;
@@ -689,9 +634,7 @@ pub fn expected_range(lo: u64, hi: u64, tier: Tier) -> Expected {
             if quality_of(batch_id, seq).is_none() {
                 out.null_quality_rows += 1;
             }
-            if tier == Tier::B {
-                out.value_scaled_sum += i128::from(value_scaled_of(value, seq));
-            }
+            out.value_scaled_sum += i128::from(value_scaled_of(value, seq));
         }
     }
     out
@@ -1294,14 +1237,14 @@ pub struct Gates {
     pub rows_match: bool,
     /// Whether `sum(value)` matches the generator's expectation.
     pub value_sum_match: bool,
-    /// Whether `sum(value_scaled)` matches (tier B only; trivially true for A).
+    /// Whether `sum(value_scaled)` matches the generator's expectation.
     pub value_scaled_match: bool,
     /// Whether the `sensor` column's fingerprint sum matches.
     pub sensor_match: bool,
     /// Whether the `region` column's fingerprint sum matches — the null
     /// coalesce.
     pub region_match: bool,
-    /// Whether the name column's fingerprint sum matches — for tier B, the
+    /// Whether the `name_upper` column's fingerprint sum matches — the
     /// ASCII uppercase.
     pub name_match: bool,
     /// Whether the `unit` column's fingerprint sum matches.
@@ -1373,7 +1316,7 @@ impl Gates {
             why.push("sum(value) disagrees with the generator — the arm did different work".into());
         }
         if !self.value_scaled_match {
-            why.push("sum(value_scaled) disagrees — the tier-B derivation is wrong".into());
+            why.push("sum(value_scaled) disagrees — the value_scaled derivation is wrong".into());
         }
         if !self.sensor_match {
             why.push("the sensor column disagrees — the key was not carried through".into());
@@ -1385,7 +1328,7 @@ impl Gates {
         }
         if !self.name_match {
             why.push(
-                "the name column disagrees — for tier B, the ASCII uppercase was skipped or is \
+                "the name_upper column disagrees — the ASCII uppercase was skipped or is \
                  locale-dependent"
                     .into(),
             );
@@ -1441,7 +1384,7 @@ fn fingerprint_sql(expr: &str) -> String {
     )
 }
 
-/// Run the correctness gates for `tier` against the target table.
+/// Run the correctness gates against the target table.
 ///
 /// **The first and last `batch_id` are excluded.** A sealed sink chunk can split
 /// one message's rows across two batches, so at the instant the driver snapshots
@@ -1477,7 +1420,6 @@ pub fn run_gates(
     port: u16,
     user: &str,
     password: &str,
-    tier: Tier,
     max_batches: u64,
 ) -> Result<Gates, String> {
     let sql = |q: &str| -> Result<Vec<String>, String> {
@@ -1490,7 +1432,7 @@ pub fn run_gates(
             .map_err(|e| format!("gate expected a number, got {s:?}: {e}"))
     };
 
-    let table = tier.table();
+    let table = TABLE;
     let bounds = sql(&format!("SELECT min(batch_id), max(batch_id) FROM {table}"))?;
     if bounds.len() < 2 {
         return Err(format!("gate bounds query returned {bounds:?} for {table}"));
@@ -1540,31 +1482,17 @@ pub fn run_gates(
     //
     // `toInt128` because ClickHouse's `sum` over `Int64` returns `Int64`, which a
     // large corpus would overflow silently.
-    let name_col = if tier == Tier::B {
-        "name_upper"
-    } else {
-        "name"
-    };
-    // Tier A has no `value_scaled` column, so the outer sum reads a literal zero
-    // and the column count of the result is the same for both tiers. Parsing a
-    // result whose width depends on the tier is a bug waiting for whoever adds
-    // the next field.
-    let (scaled_proj, scaled_expr) = if tier == Tier::B {
-        (", value_scaled", "value_scaled")
-    } else {
-        ("", "0")
-    };
     let sensor_fp = fingerprint_sql("sensor");
     let region_fp = fingerprint_sql("region");
-    let name_fp = fingerprint_sql(name_col);
+    let name_fp = fingerprint_sql("name_upper");
     let unit_fp = fingerprint_sql("unit");
     let tag_fp = fingerprint_sql("arrayStringConcat(CAST(tags AS Array(String)), '')");
 
     let sums = sql(&format!(
-        "SELECT sum(toInt128(value)), sum(toInt128({scaled_expr})), sum(sensor_fp), \
+        "SELECT sum(toInt128(value)), sum(toInt128(value_scaled)), sum(sensor_fp), \
                 sum(region_fp), sum(name_fp), sum(unit_fp), sum(toInt128(tag_count)), \
                 sum(tag_fp), sum(toInt128(batch_ts_ms)), sum(toInt128(quality_null)) \
-         FROM (SELECT DISTINCT batch_id, event_seq, value{scaled_proj}, \
+         FROM (SELECT DISTINCT batch_id, event_seq, value, value_scaled, \
                       {sensor_fp} AS sensor_fp, \
                       {region_fp} AS region_fp, \
                       {name_fp} AS name_fp, \
@@ -1589,7 +1517,7 @@ pub fn run_gates(
     let batch_ts_sum = num(&sums[8])?;
     let null_quality_rows = num(&sums[9])?;
 
-    let exp = expected_range(lo, hi, tier);
+    let exp = expected_range(lo, hi);
     Ok(Gates {
         min_batch,
         max_batch,
@@ -1788,15 +1716,14 @@ mod tests {
         }
     }
 
-    /// The committed DDL must yield exactly the two `CREATE TABLE` statements
-    /// and nothing else — in particular the trailing `--` comments documenting
-    /// the gate queries must not be mistaken for executable SQL.
+    /// The committed DDL must yield exactly one `CREATE TABLE` statement and
+    /// nothing else — in particular the trailing `--` comments documenting the
+    /// gate queries must not be mistaken for executable SQL.
     #[test]
-    fn ddl_splits_into_the_two_creates_only() {
+    fn ddl_splits_into_the_single_create_only() {
         let stmts = ddl_statements();
-        assert_eq!(stmts.len(), 2, "expected 2 statements, got {stmts:#?}");
+        assert_eq!(stmts.len(), 1, "expected 1 statement, got {stmts:#?}");
         assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS sensor_events"));
-        assert!(stmts[1].contains("CREATE TABLE IF NOT EXISTS sensor_events_t"));
         for s in &stmts {
             assert!(
                 !s.contains("uniqExact"),
@@ -1812,37 +1739,32 @@ mod tests {
         assert_eq!(stmts[0], "CREATE TABLE t (a UInt64)");
     }
 
-    /// Every column the DDL declares must appear in the positional column list
-    /// for that tier, in the same order. The column order *is* the RowBinary and
-    /// Native wire contract, so a silent divergence here would corrupt every
-    /// row rather than fail loudly.
+    /// Every column the DDL declares must appear in the positional column list,
+    /// in the same order. The column order *is* the RowBinary and Native wire
+    /// contract, so a silent divergence here would corrupt every row rather
+    /// than fail loudly.
     #[test]
     fn declared_columns_match_the_ddl_in_order() {
         let stmts = ddl_statements();
-        for (tier, stmt) in [(Tier::A, &stmts[0]), (Tier::B, &stmts[1])] {
-            let mut cursor = 0usize;
-            for (name, ty) in tier.columns() {
-                let needle = format!("\n    {name} ");
-                let at = stmt[cursor..]
-                    .find(&needle)
-                    .map(|i| i + cursor)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "column {name} missing from {} DDL or out of order",
-                            tier.table()
-                        )
-                    });
-                // The declared type must match too, or Native would encode a
-                // leaf the server reads as a different type.
-                let line_end = stmt[at + 1..].find('\n').map_or(stmt.len(), |i| at + 1 + i);
-                let line = &stmt[at..line_end];
-                assert!(
-                    line.contains(ty),
-                    "column {name} in {} is declared {line:?}, expected type {ty}",
-                    tier.table()
-                );
-                cursor = at + 1;
-            }
+        let stmt = &stmts[0];
+        let mut cursor = 0usize;
+        for (name, ty) in COLUMNS {
+            let needle = format!("\n    {name} ");
+            let at = stmt[cursor..]
+                .find(&needle)
+                .map(|i| i + cursor)
+                .unwrap_or_else(|| {
+                    panic!("column {name} missing from {TABLE} DDL or out of order")
+                });
+            // The declared type must match too, or Native would encode a
+            // leaf the server reads as a different type.
+            let line_end = stmt[at + 1..].find('\n').map_or(stmt.len(), |i| at + 1 + i);
+            let line = &stmt[at..line_end];
+            assert!(
+                line.contains(ty),
+                "column {name} in {TABLE} is declared {line:?}, expected type {ty}"
+            );
+            cursor = at + 1;
         }
     }
 
@@ -1854,94 +1776,86 @@ mod tests {
     /// and it would do so with a message blaming the framework.
     #[test]
     fn a_range_expectation_is_the_difference_of_two_prefixes() {
-        for tier in [Tier::A, Tier::B] {
-            let prefix_700 = expected(700, tier);
-            let prefix_200 = expected(200, tier);
-            let range = expected_range(200, 700, tier);
-            assert_eq!(
-                range.rows,
-                prefix_700.rows - prefix_200.rows,
-                "{tier:?} rows"
-            );
-            assert_eq!(
-                range.null_quality_rows,
-                prefix_700.null_quality_rows - prefix_200.null_quality_rows,
-                "{tier:?} null_quality_rows"
-            );
-            for (label, got, whole, part) in [
-                (
-                    "value_sum",
-                    range.value_sum,
-                    prefix_700.value_sum,
-                    prefix_200.value_sum,
-                ),
-                (
-                    "value_scaled_sum",
-                    range.value_scaled_sum,
-                    prefix_700.value_scaled_sum,
-                    prefix_200.value_scaled_sum,
-                ),
-                (
-                    "sensor_sum",
-                    range.sensor_sum,
-                    prefix_700.sensor_sum,
-                    prefix_200.sensor_sum,
-                ),
-                (
-                    "region_sum",
-                    range.region_sum,
-                    prefix_700.region_sum,
-                    prefix_200.region_sum,
-                ),
-                (
-                    "name_sum",
-                    range.name_sum,
-                    prefix_700.name_sum,
-                    prefix_200.name_sum,
-                ),
-                (
-                    "unit_sum",
-                    range.unit_sum,
-                    prefix_700.unit_sum,
-                    prefix_200.unit_sum,
-                ),
-                (
-                    "tag_count_sum",
-                    range.tag_count_sum,
-                    prefix_700.tag_count_sum,
-                    prefix_200.tag_count_sum,
-                ),
-                (
-                    "tag_sum",
-                    range.tag_sum,
-                    prefix_700.tag_sum,
-                    prefix_200.tag_sum,
-                ),
-                (
-                    "batch_ts_sum",
-                    range.batch_ts_sum,
-                    prefix_700.batch_ts_sum,
-                    prefix_200.batch_ts_sum,
-                ),
-            ] {
-                assert_eq!(got, whole - part, "{tier:?} {label}");
-            }
+        let prefix_700 = expected(700);
+        let prefix_200 = expected(200);
+        let range = expected_range(200, 700);
+        assert_eq!(range.rows, prefix_700.rows - prefix_200.rows, "rows");
+        assert_eq!(
+            range.null_quality_rows,
+            prefix_700.null_quality_rows - prefix_200.null_quality_rows,
+            "null_quality_rows"
+        );
+        for (label, got, whole, part) in [
+            (
+                "value_sum",
+                range.value_sum,
+                prefix_700.value_sum,
+                prefix_200.value_sum,
+            ),
+            (
+                "value_scaled_sum",
+                range.value_scaled_sum,
+                prefix_700.value_scaled_sum,
+                prefix_200.value_scaled_sum,
+            ),
+            (
+                "sensor_sum",
+                range.sensor_sum,
+                prefix_700.sensor_sum,
+                prefix_200.sensor_sum,
+            ),
+            (
+                "region_sum",
+                range.region_sum,
+                prefix_700.region_sum,
+                prefix_200.region_sum,
+            ),
+            (
+                "name_sum",
+                range.name_sum,
+                prefix_700.name_sum,
+                prefix_200.name_sum,
+            ),
+            (
+                "unit_sum",
+                range.unit_sum,
+                prefix_700.unit_sum,
+                prefix_200.unit_sum,
+            ),
+            (
+                "tag_count_sum",
+                range.tag_count_sum,
+                prefix_700.tag_count_sum,
+                prefix_200.tag_count_sum,
+            ),
+            (
+                "tag_sum",
+                range.tag_sum,
+                prefix_700.tag_sum,
+                prefix_200.tag_sum,
+            ),
+            (
+                "batch_ts_sum",
+                range.batch_ts_sum,
+                prefix_700.batch_ts_sum,
+                prefix_200.batch_ts_sum,
+            ),
+        ] {
+            assert_eq!(got, whole - part, "{label}");
         }
     }
 
     /// The cheap row count exists only because the full expectation got
-    /// expensive. Two loops that disagree about which rows tier B keeps would
-    /// make the driver announce one figure and the gate demand another.
+    /// expensive. Two loops that disagree about which rows the workload keeps
+    /// would make the driver announce one figure and the gate demand another.
     #[test]
     fn the_cheap_row_count_agrees_with_the_full_expectation() {
-        for tier in [Tier::A, Tier::B] {
-            for batches in [1u64, 2, 7, 10, 137, 1000] {
-                assert_eq!(
-                    expected_rows(batches, tier),
-                    expected(batches, tier).rows,
-                    "{tier:?} over {batches} batches"
-                );
-            }
+        for batches in [1u64, 2, 7, 10, 137, 1000] {
+            assert_eq!(
+                expected_rows(batches),
+                expected(batches).rows,
+                "over {batches} batches"
+            );
         }
     }
 
@@ -1968,6 +1882,9 @@ mod tests {
         }
         // Everything an event-scoped column can hold. Two full periods of every
         // modulus in the derivations is far more than enough to enumerate them.
+        // The lowercase name is included alongside `name_upper`'s content
+        // because it is what an arm that skipped the uppercase would write, and
+        // that regression test relies on the two summing differently.
         for batch_id in 0..256u64 {
             for seq in 0..EVENTS_PER_BATCH {
                 let name = name_of(batch_id, seq);
@@ -1996,29 +1913,27 @@ mod tests {
     /// expectations existed it passed every gate.
     #[test]
     fn an_arm_that_emits_empty_tags_now_fails_a_closed_form_expectation() {
-        for tier in [Tier::A, Tier::B] {
-            let exp = expected(500, tier);
-            assert_eq!(
-                str_fingerprint(""),
-                0,
-                "an empty array concatenates to the empty string, whose fingerprint is what an \
-                 arm emitting no tags would sum to"
-            );
-            assert_ne!(exp.tag_count_sum, 0, "{tier:?} tag_count_sum");
-            assert_ne!(exp.tag_sum, 0, "{tier:?} tag_sum");
-        }
+        let exp = expected(500);
+        assert_eq!(
+            str_fingerprint(""),
+            0,
+            "an empty array concatenates to the empty string, whose fingerprint is what an \
+             arm emitting no tags would sum to"
+        );
+        assert_ne!(exp.tag_count_sum, 0, "tag_count_sum");
+        assert_ne!(exp.tag_sum, 0, "tag_sum");
     }
 
-    /// Tier B's column is `name_upper`. An arm that writes `name` through
+    /// The target column is `name_upper`. An arm that writes `name` through
     /// unchanged skips a per-row transform on 150,000,000 rows.
     #[test]
     fn an_arm_that_skips_the_ascii_uppercase_now_fails_a_closed_form_expectation() {
         let batches = 500;
-        let exp = expected(batches, Tier::B);
+        let exp = expected(batches);
         let mut lower = 0i128;
         for batch_id in 0..batches {
             for seq in 0..EVENTS_PER_BATCH {
-                if !tier_b_keeps(batch_id, seq) {
+                if !keeps(batch_id, seq) {
                     continue;
                 }
                 lower += str_fingerprint(&name_of(batch_id, seq));
@@ -2032,31 +1947,32 @@ mod tests {
     /// zero that any such arm misses it by orders of magnitude.
     #[test]
     fn an_arm_that_loses_the_datetime64_scaling_now_fails_a_closed_form_expectation() {
-        for tier in [Tier::A, Tier::B] {
-            let exp = expected(500, tier);
-            let floor = i128::from(BASE_TS_MS) * i128::from(exp.rows);
-            assert!(
-                exp.batch_ts_sum >= floor,
-                "{tier:?} batch_ts_sum {} is below {floor}, so an arm landing in 1970 could \
-                 coincide with it",
-                exp.batch_ts_sum
-            );
-        }
+        let exp = expected(500);
+        let floor = i128::from(BASE_TS_MS) * i128::from(exp.rows);
+        assert!(
+            exp.batch_ts_sum >= floor,
+            "batch_ts_sum {} is below {floor}, so an arm landing in 1970 could coincide with it",
+            exp.batch_ts_sum
+        );
     }
 
-    /// Both tiers must coalesce a null `region` to `''` — the target column is
+    /// Every arm must coalesce a null `region` to `''` — the target column is
     /// `LowCardinality(String)`, not `LowCardinality(Nullable(String))`. An arm
     /// that writes the region of every batch, null ones included, disagrees.
     #[test]
     fn an_arm_that_drops_the_null_region_coalesce_now_fails_a_closed_form_expectation() {
         let batches = 500;
-        let exp = expected(batches, Tier::A);
+        let exp = expected(batches);
         let mut uncoalesced = 0i128;
         for batch_id in 0..batches {
             // What an arm that forgot the null branch would most plausibly write:
-            // the region string the batch would have had.
+            // the region string the batch would have had. Summed over the rows
+            // the workload keeps, so the two sums differ only in the coalesce.
             let fp = str_fingerprint(&format!("region-{}", batch_id % 7));
-            for _ in 0..EVENTS_PER_BATCH {
+            for seq in 0..EVENTS_PER_BATCH {
+                if !keeps(batch_id, seq) {
+                    continue;
+                }
                 uncoalesced += fp;
             }
         }
@@ -2071,29 +1987,26 @@ mod tests {
         assert_eq!(ascii_upper("straße"), "STRAßE");
     }
 
-    /// Tier A keeps everything; tier B must drop strictly more than nothing and
-    /// strictly less than everything, or the filter is not being exercised.
+    /// The filter must drop strictly more than nothing and strictly less than
+    /// everything, or it is not being exercised.
     #[test]
-    fn tier_b_filters_a_meaningful_fraction() {
+    fn the_filter_drops_a_meaningful_fraction() {
         let batches = 500;
-        let a = expected(batches, Tier::A);
-        let b = expected(batches, Tier::B);
-        assert_eq!(a.rows, batches * u64::from(EVENTS_PER_BATCH));
-        assert_eq!(a.value_scaled_sum, 0, "tier A has no scaled column");
+        let total = batches * u64::from(EVENTS_PER_BATCH);
+        let exp = expected(batches);
         assert!(
-            b.rows > 0 && b.rows < a.rows,
-            "tier B dropped {} of {}",
-            a.rows - b.rows,
-            a.rows
+            exp.rows > 0 && exp.rows < total,
+            "the filter dropped {} of {total}",
+            total - exp.rows,
         );
         // The unit sentinel alone removes one row in eight; the quality floor
         // removes more. Anything outside this band means a derivation drifted.
-        let dropped = (a.rows - b.rows) as f64 / a.rows as f64;
+        let dropped = (total - exp.rows) as f64 / total as f64;
         assert!(
             (0.12..0.45).contains(&dropped),
-            "tier B dropped {dropped:.3} of rows, outside the expected band"
+            "the filter dropped {dropped:.3} of rows, outside the expected band"
         );
-        assert!(b.value_scaled_sum > 0);
+        assert!(exp.value_scaled_sum > 0);
     }
 
     /// `expected` must agree with an independent flatten of the same corpus,
@@ -2123,7 +2036,7 @@ mod tests {
             let b: SensorBatch = apache_avro::from_value(&v).expect("into struct");
             for ev in &b.events {
                 let seq = u32::try_from(ev.seq).unwrap();
-                if !tier_b_keeps(batch_id, seq) {
+                if !keeps(batch_id, seq) {
                     continue;
                 }
                 rows += 1;
@@ -2140,7 +2053,7 @@ mod tests {
                 }
             }
         }
-        let exp = expected(batches, Tier::B);
+        let exp = expected(batches);
         assert_eq!(exp.rows, rows);
         assert_eq!(exp.value_sum, sum);
         assert_eq!(exp.sensor_sum, sensor_sum);

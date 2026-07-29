@@ -46,7 +46,7 @@
 //! Each test brings up its **own** container on its own port and removes it on
 //! the way out, including on a panic, so they are safe to run in parallel and
 //! leave nothing behind. That costs a few container starts and buys the property
-//! that a failure names one (format, tier) rather than one shared fixture.
+//! that a failure names one format rather than one shared fixture.
 //!
 //! This is the repository's first Docker-requiring test. If you add another,
 //! copy the shape: a guard value constructed before anything is started, a
@@ -56,7 +56,7 @@
 use std::time::{Duration, Instant};
 
 use spate_benchmark_harness::ceiling::{Format, encode_insert_block, insert_encoded_block};
-use spate_benchmark_harness::corpus::{self, Tier};
+use spate_benchmark_harness::corpus;
 use spate_benchmark_harness::{docker, http};
 
 /// The server these blocks are proven against.
@@ -84,7 +84,7 @@ const READY_TIMEOUT_S: u64 = 300;
 ///
 /// It also has to leave the gate something to check: `corpus::run_gates`
 /// excludes the lowest and highest `batch_id`, so this is 398 gated batches and
-/// roughly 40,000 tier-A rows.
+/// roughly 29,000 rows after the workload's filters.
 const BATCHES: u64 = 400;
 
 // ---------------------------------------------------------------------------
@@ -138,8 +138,8 @@ impl Server {
             std::thread::sleep(Duration::from_millis(500));
         }
 
-        // The committed DDL, verbatim. A hand-written simplification of these
-        // tables would prove the encoder against a target no arm writes to —
+        // The committed DDL, verbatim. A hand-written simplification of the
+        // table would prove the encoder against a target no arm writes to —
         // and `LowCardinality`, `Nullable` and `Array(LowCardinality(String))`
         // are exactly the columns a simplification would drop.
         for stmt in corpus::ddl_statements() {
@@ -172,63 +172,51 @@ impl Drop for Server {
 /// hand-written expected row count or expected sum: `corpus::run_gates` derives
 /// them from the generator, so a test that agreed with a mistaken expectation
 /// would be agreeing with the same mistake the gate would.
-fn block_satisfies_every_closed_form_expectation(server: &Server, tier: Tier, format: Format) {
-    server.sql(&format!("TRUNCATE TABLE {}", tier.table()));
+fn block_satisfies_every_closed_form_expectation(server: &Server, format: Format) {
+    server.sql(&format!("TRUNCATE TABLE {}", corpus::TABLE));
 
-    let block = encode_insert_block(tier, format, 0, BATCHES);
+    let block = encode_insert_block(format, 0, BATCHES);
     assert_eq!(
         block.rows,
-        corpus::expected_rows(BATCHES, tier),
-        "{format:?} tier {} block carries the wrong number of rows before it is even sent",
-        tier.name()
+        corpus::expected_rows(BATCHES),
+        "{format:?} block carries the wrong number of rows before it is even sent",
     );
     insert_encoded_block(
         "localhost",
         server.port,
         "default",
         PASSWORD,
-        tier,
         format,
         &block,
     )
-    .unwrap_or_else(|e| {
-        panic!(
-            "{format:?} tier {}: the server refused the block: {e}",
-            tier.name()
-        )
-    });
+    .unwrap_or_else(|e| panic!("{format:?}: the server refused the block: {e}"));
 
     // A refused insert answers with an exception and is caught above; a block
     // the server accepts and reads as fewer rows than it holds is the quieter
     // failure, so the landed count is checked before the gate runs.
     let landed: u64 = server
-        .sql(&format!("SELECT count() FROM {}", tier.table()))
+        .sql(&format!("SELECT count() FROM {}", corpus::TABLE))
         .trim()
         .parse()
         .expect("a row count");
     assert_eq!(
-        landed,
-        block.rows,
-        "{format:?} tier {}: the server accepted the block and landed {landed} of {} rows",
-        tier.name(),
+        landed, block.rows,
+        "{format:?}: the server accepted the block and landed {landed} of {} rows",
         block.rows
     );
 
-    let gates = corpus::run_gates("localhost", server.port, "default", PASSWORD, tier, BATCHES)
-        .unwrap_or_else(|e| panic!("{format:?} tier {}: the gate failed: {e}", tier.name()));
+    let gates = corpus::run_gates("localhost", server.port, "default", PASSWORD, BATCHES)
+        .unwrap_or_else(|e| panic!("{format:?}: the gate failed: {e}"));
 
     assert_eq!(
         gates.failure(),
         None,
-        "{format:?} tier {}: the landed rows disagree with the generator",
-        tier.name()
+        "{format:?}: the landed rows disagree with the generator",
     );
     assert!(gates.passed());
     assert_eq!(
-        gates.duplicates,
-        0,
-        "{format:?} tier {}: one block cannot legitimately duplicate a row",
-        tier.name()
+        gates.duplicates, 0,
+        "{format:?}: one block cannot legitimately duplicate a row",
     );
 }
 
@@ -236,34 +224,24 @@ fn block_satisfies_every_closed_form_expectation(server: &Server, tier: Tier, fo
 // The tests
 // ---------------------------------------------------------------------------
 
-/// Tier A is where the encoder's hard columns live: four `LowCardinality(String)`
+/// The encoder's hard columns, live: four `LowCardinality(String)`
 /// columns, a `Nullable(Float64)` and an `Array(LowCardinality(String))`, at a
-/// block wide enough to force two-byte dictionary indexes on `sensor`.
+/// block wide enough to force two-byte dictionary indexes on `sensor` — plus
+/// the filtered row set, the uppercased name column and `value_scaled`.
 #[test]
 #[ignore = "needs a Docker daemon; run with `cargo test --test native_encoder_matches_clickhouse -- --ignored`"]
-fn a_native_block_of_tier_a_rows_satisfies_every_closed_form_expectation() {
-    let server = Server::start("spate-bench-native-encoder-a", 18131);
-    block_satisfies_every_closed_form_expectation(&server, Tier::A, Format::Native);
-}
-
-/// Tier B is a different table with an extra `Int64`, a filtered row set and an
-/// uppercased name column, so it is a second insert rather than the same one
-/// again — which is why the ceiling is keyed by tier as well as by format.
-#[test]
-#[ignore = "needs a Docker daemon; run with `cargo test --test native_encoder_matches_clickhouse -- --ignored`"]
-fn a_native_block_of_tier_b_rows_satisfies_every_closed_form_expectation() {
-    let server = Server::start("spate-bench-native-encoder-b", 18132);
-    block_satisfies_every_closed_form_expectation(&server, Tier::B, Format::Native);
+fn a_native_block_satisfies_every_closed_form_expectation() {
+    let server = Server::start("spate-bench-native-encoder", 18131);
+    block_satisfies_every_closed_form_expectation(&server, Format::Native);
 }
 
 /// The control. RowBinary is already trusted and already measured, so it must
-/// pass this rig at both tiers; if it does not, the container, the DDL or the
+/// pass this rig; if it does not, the container, the DDL or the
 /// gate window is wrong rather than the Native encoder. Without this, every rig
 /// bug would present as a Native defect and cost an afternoon.
 #[test]
 #[ignore = "needs a Docker daemon; run with `cargo test --test native_encoder_matches_clickhouse -- --ignored`"]
 fn the_rowbinary_control_satisfies_the_same_expectations_through_the_same_rig() {
     let server = Server::start("spate-bench-native-encoder-control", 18133);
-    block_satisfies_every_closed_form_expectation(&server, Tier::A, Format::RowBinary);
-    block_satisfies_every_closed_form_expectation(&server, Tier::B, Format::RowBinary);
+    block_satisfies_every_closed_form_expectation(&server, Format::RowBinary);
 }

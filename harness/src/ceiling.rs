@@ -43,7 +43,7 @@
 //! the same number anyway: it POSTed at the consume pass's four, and could not
 //! have been raised past the topic's eight without the consume pass refusing the
 //! flag. Meanwhile the arm that figure was the denominator for ran four shards
-//! times four in-flight requests. Measured afterwards, tier-A Native gave
+//! times four in-flight requests. Measured afterwards, Native gave
 //! 3,416,495 rows/s at four inserters and 4,427,028 at eight — 29.6% more, and
 //! still climbing.
 //!
@@ -72,9 +72,9 @@
 //! container-to-container and never crosses that boundary**.
 //!
 //! Four readings said so, and none of them is an inference from this rig's own
-//! clock. Every format and tier plateaued at 246–264 MB/s on the wire regardless
+//! clock. Every format plateaued at 246–264 MB/s on the wire regardless
 //! of row width, which is a byte wall rather than a row wall. ClickHouse's own
-//! `system.query_log` put 84.9% (tier A) and 85.5% (tier B) of total insert
+//! `system.query_log` put 84.9–85.5% of total insert
 //! duration in `NetworkReceiveElapsed` — the server blocked reading the request
 //! body — against 5.7ms of user and 17.3ms of system CPU per 697ms insert. The
 //! container sat at 270–315% of its 500% cap, so the target was not saturated.
@@ -94,8 +94,8 @@
 //!
 //! # The fourth defect: the target deduplicated the rig's own blocks
 //!
-//! A rung POSTing 38,000,000 rows left exactly 800,000 in the table — 588,000 at
-//! tier B. The committed DDL sets `non_replicated_deduplication_window = 1000`
+//! A rung POSTing 38,000,000 rows left exactly 800,000 in the table.
+//! The committed DDL sets `non_replicated_deduplication_window = 1000`
 //! and the rig cycles a pool of pre-encoded blocks, so after the first turn
 //! through the pool ClickHouse parsed, sorted, compressed and part-wrote every
 //! repeat and then dropped it at commit as a duplicate.
@@ -115,12 +115,12 @@
 //! # What the two together changed, measured
 //!
 //! With both closed, the target is the constraint and says so in its own
-//! accounting. At the winning rung of every format and tier it runs at 100–102%
+//! accounting. At the winning rung of every format it runs at 100–102%
 //! of its five-core cap and is CFS-throttled; 1–2% of insert duration is
 //! `NetworkReceiveElapsed`, down from 85%; every row POSTed is still in the
 //! table when the rung ends; and `system.part_log` shows 48–113% of the rows
-//! written merged again inside the same sweep. Native at tier A rose from a
-//! 246–264 MB/s wall to 855–859 MB/s — 14.85M rows/s — while RowBinary rose only
+//! written merged again inside the same sweep. Native rose from a
+//! 246–264 MB/s wall to 855–859 MB/s while RowBinary rose only
 //! from ~250 to ~337 MB/s, which is the shape the diagnosis predicted: lifting a
 //! byte wall does nothing for a format that was already CPU-bound server-side.
 //!
@@ -178,8 +178,8 @@
 //! With the passes measured from the right side of the network, the numbers
 //! finally described the infrastructure — and what they described was an
 //! infrastructure allocated the wrong way round. Against the first honest
-//! ceilings, `spate:tier-b-rowbinary` sat at **72.5%** of the ClickHouse ingest
-//! ceiling and `spate:tier-a-rowbinary` at **67.9%**, both of which become 80.4%
+//! ceilings, the vendor's RowBinary arms sat at **72.5%** and **67.9%** of the
+//! ClickHouse ingest ceiling, both of which become 80.4%
 //! and 75.3% once the retracted drain-window defect is corrected for. Two arms
 //! over or at the limit, and both of them the vendor's own.
 //!
@@ -197,7 +197,7 @@
 //! the environment profile, which is what this module gates against.
 //!
 //! Two things in this module exist because of it. [`select_combinations`] lets a
-//! pass measure the combination that actually binds instead of all six, because a
+//! pass measure the format that actually binds instead of all three, because a
 //! search is a dozen passes and a fifteen-minute pass makes it a day; and
 //! [`Ceilings::measured_under_other_envelopes`] refuses to commit the half-file
 //! that a narrowed pass under new caps would otherwise leave behind. Neither
@@ -221,13 +221,11 @@
 //!   against an arm whose work is per-message. Both are recorded, both are
 //!   gated, and the stricter of the two binds.
 //! * The **ClickHouse ingest ceiling** is a property of the target, and it is
-//!   stored **per insert format and per tier**. Rule 5 of the methodology says
+//!   stored **per insert format**. Rule 5 of the methodology says
 //!   Native, RowBinary and JSONEachRow are not the same amount of server-side
 //!   work; a single ClickHouse number would therefore gate every arm against
 //!   work it does not do, and it would err leniently for exactly the arms whose
-//!   format is cheapest server-side. Tier is part of the key for the same
-//!   reason: tier B carries an extra `Int64` column and drops about a quarter of
-//!   the rows, so it is not the same insert.
+//!   format is cheapest server-side.
 //!
 //! # What the ingest ceiling can honestly be measured for
 //!
@@ -301,7 +299,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::corpus::{self, Tier};
+use crate::corpus;
 use crate::docker;
 use crate::infra::Endpoints;
 
@@ -358,7 +356,7 @@ pub struct Ceilings {
     /// What the broker's fetch path sustained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consume: Option<ConsumeCeiling>,
-    /// What ClickHouse absorbed, one entry per (insert format, tier).
+    /// What ClickHouse absorbed, one entry per insert format.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clickhouse: Vec<IngestCeiling>,
 }
@@ -430,8 +428,8 @@ impl Location {
 
 /// The location a `"inside"`/`"outside"` string names.
 ///
-/// A `String` on the ceiling rather than an enum, and resolved here, for the
-/// same reason [`tier_named`] exists: a value nobody recognises has to be a
+/// A `String` on the ceiling rather than an enum, and resolved here, so that
+/// a value nobody recognises is a
 /// *refusal with a reason* rather than a parse failure that takes the whole
 /// committed file down. `""` — which is what every ceiling measured before this
 /// field existed deserialises to — is one of those values, and it is exactly the
@@ -534,7 +532,7 @@ pub struct ConsumeCeiling {
     pub provenance: Provenance,
 }
 
-/// What ClickHouse absorbed for one insert format at one tier.
+/// What ClickHouse absorbed for one insert format.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestCeiling {
@@ -542,9 +540,6 @@ pub struct IngestCeiling {
     /// `rowbinary`, `rowbinary_nt`. An arm declaring anything else is not gated
     /// against ClickHouse, because it does not do this work.
     pub format: String,
-    /// Tier, `a` or `b`. Part of the key because the two tiers insert different
-    /// columns into different tables.
-    pub tier: String,
     /// Rows per second the target absorbed.
     pub rows_per_s: u64,
     /// Megabytes per second on the wire, where a megabyte is 10^6 bytes.
@@ -796,14 +791,13 @@ impl Ceilings {
             let at = self
                 .clickhouse
                 .iter()
-                .position(|c| c.format == measured.format && c.tier == measured.tier);
+                .position(|c| c.format == measured.format);
             match at {
                 Some(i) => self.clickhouse[i] = measured,
                 None => self.clickhouse.push(measured),
             }
         }
-        self.clickhouse
-            .sort_by(|a, b| (&a.format, &a.tier).cmp(&(&b.format, &b.tier)));
+        self.clickhouse.sort_by(|a, b| a.format.cmp(&b.format));
     }
 
     /// Which ceilings in this file were measured under some **other**
@@ -838,9 +832,8 @@ impl Ceilings {
         for c in &self.clickhouse {
             if c.provenance.infra_digest != infra_digest {
                 stale.push(format!(
-                    "the ClickHouse ingest ceiling for {} at tier {} ({})",
+                    "the ClickHouse ingest ceiling for {} ({})",
                     c.format,
-                    c.tier,
                     described_envelope(&c.provenance.infra_digest)
                 ));
             }
@@ -919,39 +912,24 @@ impl Ceilings {
 
         let mut ingest = Vec::new();
         for c in &self.clickhouse {
-            // The tier is half the key, so a tier nobody recognises is a ceiling
-            // that would silently gate nothing — the same shape of dead number
-            // the old top-level `consume_msgs_per_s` was.
-            if tier_named(&c.tier).is_none() {
-                refusals.push(format!(
-                    "the ClickHouse ingest ceiling for {} names tier {:?}, which is neither \
-                     \"a\" nor \"b\", so no arm can be gated against it.",
-                    c.format, c.tier
-                ));
-                continue;
-            }
             if c.provenance.infra_digest.is_empty() || c.provenance.infra_digest != infra_digest {
                 refusals.push(format!(
-                    "the ClickHouse ingest ceiling for {} at tier {} was measured under \
+                    "the ClickHouse ingest ceiling for {} was measured under \
                      infrastructure envelope {:?} but this environment is {infra_digest}. \
                      Re-measure with `bench ceiling --measure`.",
-                    c.format, c.tier, c.provenance.infra_digest
+                    c.format, c.provenance.infra_digest
                 ));
                 continue;
             }
             if location_named(&c.client) != Some(Location::Inside) {
                 refusals.push(wrong_side_refusal(
-                    &format!(
-                        "the ClickHouse ingest ceiling for {} at tier {}",
-                        c.format, c.tier
-                    ),
+                    &format!("the ClickHouse ingest ceiling for {}", c.format),
                     &c.client,
                 ));
                 continue;
             }
             ingest.push(GateableIngest {
                 format: c.format.clone(),
-                tier: c.tier.clone(),
                 rows_per_s: c.rows_per_s,
             });
         }
@@ -974,7 +952,6 @@ impl Ceilings {
 #[derive(Debug, Clone)]
 struct GateableIngest {
     format: String,
-    tier: String,
     rows_per_s: u64,
 }
 
@@ -1008,15 +985,13 @@ pub struct Ceiling {
 #[derive(Debug, Clone, Copy)]
 pub struct Achieved<'a> {
     /// Messages per second the arm consumed. The driver has rows per second and
-    /// the tier's row yield per message; the conversion belongs at the call site
-    /// because only the driver knows the yield it actually measured.
+    /// the workload's row yield per message; the conversion belongs at the call
+    /// site because only the driver knows the yield it actually measured.
     pub msgs_per_s: f64,
     /// Rows per second the arm inserted.
     pub rows_per_s: f64,
     /// The arm's declared `reports.wire_format`.
     pub wire_format: &'a str,
-    /// The tier the arm ran.
-    pub tier: Tier,
 }
 
 /// Which ceiling a [`Share`] was taken against.
@@ -1029,7 +1004,7 @@ pub struct Achieved<'a> {
 pub enum Against {
     /// The broker's consume path, at this corpus's message size.
     BrokerConsume,
-    /// ClickHouse's ingest path, for this arm's insert format and tier.
+    /// ClickHouse's ingest path, for this arm's insert format.
     ClickHouseIngest,
 }
 
@@ -1084,21 +1059,16 @@ impl Ceiling {
             });
         }
 
-        let tier = arm.tier.name();
-        match self
-            .ingest
-            .iter()
-            .find(|c| c.format == arm.wire_format && c.tier == tier)
-        {
+        match self.ingest.iter().find(|c| c.format == arm.wire_format) {
             Some(c) if c.rows_per_s > 0 => shares.push(Share {
                 kind: Against::ClickHouseIngest,
-                against: format!("clickhouse ingest ({} tier {tier})", c.format),
+                against: format!("clickhouse ingest ({})", c.format),
                 share: arm.rows_per_s / c.rows_per_s as f64,
                 ceiling: c.rows_per_s,
             }),
             _ => unproven.push(format!(
-                "no ClickHouse ingest ceiling has been measured for wire format {:?} at tier \
-                 {tier}, so this arm is not gated against the target. It is deliberately NOT \
+                "no ClickHouse ingest ceiling has been measured for wire format {:?}, so this \
+                 arm is not gated against the target. It is deliberately NOT \
                  gated against another format's figure: the insert format materially changes \
                  server-side work, and substituting one for another is the same unmeasured \
                  conversion that produced the message-size defect. Measure it with \
@@ -1270,11 +1240,11 @@ fn mb_to_bytes(mb_per_s: f64) -> u64 {
 /// [`Ceiling::headroom`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// ClickHouse's own columnar block format. What every headline
-    /// `spate:*-native` arm writes, and the format whose absence left those arms
+    /// ClickHouse's own columnar block format. What the headline
+    /// `spate:native` arm writes, and the format whose absence left that arm
     /// ungated against the target.
     Native,
-    /// Rows only. What `spate:*-rowbinary` writes.
+    /// Rows only. What `spate:rowbinary` writes.
     RowBinary,
     /// Rows behind a name-and-type header, so the server validates the column
     /// contract rather than trusting position. What the Flink arm writes.
@@ -1322,49 +1292,34 @@ impl Format {
     }
 }
 
-/// The tier a `"a"`/`"b"` string names.
+/// Every insert format the ingest pass can measure, in the order it measures
+/// them.
 ///
-/// Lives here rather than on `Tier` because the string form is this file's
-/// serialisation, not the corpus's.
-fn tier_named(name: &str) -> Option<Tier> {
-    match name {
-        "a" => Some(Tier::A),
-        "b" => Some(Tier::B),
-        _ => None,
-    }
-}
-
-/// Every `(insert format, tier)` combination the ingest pass can measure, in the
-/// order it measures them.
-///
-/// One list rather than a nested loop written out at the call site, because
+/// One list rather than a loop written out at the call site, because
 /// [`select_combinations`] has to be able to filter it and a test has to be able
 /// to assert what a restriction selected without standing up a server.
 #[must_use]
-pub fn all_combinations() -> Vec<(Format, Tier)> {
-    FORMATS
-        .into_iter()
-        .flat_map(|f| [(f, Tier::A), (f, Tier::B)])
-        .collect()
+pub fn all_combinations() -> Vec<Format> {
+    FORMATS.to_vec()
 }
 
-/// The combinations a `--only` argument names, or all of them when none is given.
+/// The formats a `--only` argument names, or all of them when none is given.
 ///
 /// # Why a restriction exists at all
 ///
-/// A full pass measures six combinations and takes about fifteen minutes, which
+/// A full pass measures three formats and takes minutes apiece, which
 /// is the right cost for the pass that produces a committed ceiling and the wrong
 /// cost for the pass that is one point of a **search**. A search over
 /// infrastructure allocations needs the ClickHouse ingest ceiling at each of
-/// them, and only the combination that actually binds decides it; measuring the
-/// other four at every point would buy nothing and spend an hour.
+/// them, and only the format that actually binds decides it; measuring the
+/// others at every point would buy nothing and spend the difference.
 ///
 /// # Why it does not weaken anything
 ///
 /// A restriction changes **which** ceilings a pass measures and never **how**.
-/// Every combination it does measure goes through the same sweep, the same
+/// Every format it does measure goes through the same sweep, the same
 /// dedicated ceiling table, the same landed-row check and the same refusals; a
-/// combination it skips is simply not re-measured, and [`Ceilings::merge`] has
+/// format it skips is simply not re-measured, and [`Ceilings::merge`] has
 /// always merged by key for exactly that reason. What the restriction must not be
 /// allowed to do is leave a *committed* file half-describing one envelope and
 /// half another, and that is refused separately — see
@@ -1372,29 +1327,24 @@ pub fn all_combinations() -> Vec<(Format, Tier)> {
 ///
 /// # The grammar
 ///
-/// `format` selects both tiers; `format:tier` selects one. Repeatable, and
-/// duplicates collapse, so `--only rowbinary --only rowbinary:a` is
-/// `--only rowbinary`.
+/// `--only <format>` selects one format. Repeatable, and duplicates collapse,
+/// so `--only rowbinary --only rowbinary` is `--only rowbinary`.
 ///
 /// # Errors
 ///
-/// If a spec names a format this rig cannot emit or a tier that does not exist.
+/// If a spec names a format this rig cannot emit.
 /// A refusal with the available names rather than a silent empty selection: a
 /// typo that measured nothing would look exactly like a pass that had nothing to
 /// measure.
-pub fn select_combinations(specs: &[String]) -> Result<Vec<(Format, Tier)>, String> {
+pub fn select_combinations(specs: &[String]) -> Result<Vec<Format>, String> {
     if specs.is_empty() {
         return Ok(all_combinations());
     }
-    let mut chosen: Vec<(Format, Tier)> = Vec::new();
+    let mut chosen: Vec<Format> = Vec::new();
     for spec in specs {
-        let (format_name, tier_name) = match spec.split_once(':') {
-            Some((f, t)) => (f, Some(t)),
-            None => (spec.as_str(), None),
-        };
-        let format = Format::parse(format_name).ok_or_else(|| {
+        let format = Format::parse(spec).ok_or_else(|| {
             format!(
-                "--only {spec:?} names insert format {format_name:?}, which this rig cannot \
+                "--only {spec:?} names insert format {spec:?}, which this rig cannot \
                  emit. It measures the formats it can encode itself, from the committed \
                  column list, with no dependency on any system under test: {}.",
                 FORMATS
@@ -1404,16 +1354,8 @@ pub fn select_combinations(specs: &[String]) -> Result<Vec<(Format, Tier)>, Stri
                     .join(", ")
             )
         })?;
-        let tiers = match tier_name {
-            None => vec![Tier::A, Tier::B],
-            Some(t) => vec![tier_named(t).ok_or_else(|| {
-                format!("--only {spec:?} names tier {t:?}, which is neither \"a\" nor \"b\".")
-            })?],
-        };
-        for tier in tiers {
-            if !chosen.contains(&(format, tier)) {
-                chosen.push((format, tier));
-            }
+        if !chosen.contains(&format) {
+            chosen.push(format);
         }
     }
     // Back into the canonical order, so that a pass's terminal output and its
@@ -1430,13 +1372,13 @@ pub fn select_combinations(specs: &[String]) -> Result<Vec<(Format, Tier)>, Stri
 /// unchanged. A restricted pass says so, because the rig string's job is to let
 /// the pass be reproduced by hand and reproducing this one exactly means typing
 /// the same restriction.
-fn describe_restriction(chosen: &[(Format, Tier)]) -> String {
+fn describe_restriction(chosen: &[Format]) -> String {
     if chosen.len() == all_combinations().len() {
         return String::new();
     }
     chosen
         .iter()
-        .map(|(f, t)| format!(" --only {}:{}", f.wire_format(), t.name()))
+        .map(|f| format!(" --only {}", f.wire_format()))
         .collect()
 }
 
@@ -1473,14 +1415,14 @@ pub struct PassOptions {
     /// looking, because every rung costs a window. [`Sweep`] states what happens
     /// when the ladder runs out before the throughput does.
     pub ingest_max_concurrency: u64,
-    /// The `(insert format, tier)` combinations the ingest pass measures.
+    /// The insert formats the ingest pass measures.
     ///
     /// Everything, unless `--only` narrowed it — see [`select_combinations`] for
     /// why a narrowing exists and what it may not do. Held as a resolved list
     /// rather than as the operator's strings so that the parse, and its refusal
     /// of a format this rig cannot emit, happens once and before a container
     /// starts.
-    pub ingest: Vec<(Format, Tier)>,
+    pub ingest: Vec<Format>,
     /// `YYYY-MM-DD` to stamp on the provenance.
     ///
     /// Supplied by the caller rather than read from a clock here, so that the
@@ -1494,7 +1436,7 @@ pub struct PassOptions {
 pub struct Pass {
     /// What the broker's fetch path sustained.
     pub consume: ConsumeCeiling,
-    /// What ClickHouse absorbed, one entry per (format, tier).
+    /// What ClickHouse absorbed, one entry per format.
     pub ingest: Vec<IngestCeiling>,
 }
 
@@ -1549,13 +1491,12 @@ pub fn measure(
     }
 
     let mut ingest = Vec::new();
-    for (format, tier) in opts.ingest.iter().copied() {
-        let measured = measure_ingest(ep, opts, format, tier, cap_cores)?;
+    for format in opts.ingest.iter().copied() {
+        let measured = measure_ingest(ep, opts, format, cap_cores)?;
         eprintln!(
-            "clickhouse ceiling: {} tier {} — {} rows/s, {:.1} MB/s at {} B/row, {} \
+            "clickhouse ceiling: {} — {} rows/s, {:.1} MB/s at {} B/row, {} \
              inserters (swept {})",
             format.wire_format(),
-            tier.name(),
             measured.ceiling.rows_per_s,
             measured.ceiling.mb_per_s,
             measured.ceiling.row_bytes,
@@ -1675,10 +1616,7 @@ pub fn measure(
                         describe_restriction(&opts.ingest),
                         INSERT_BLOCK_BATCHES,
                         crate::docker::NETWORK,
-                        tier_named(&m.tier).map_or_else(
-                            || "the ceiling table".to_owned(),
-                            |t| ceiling_table(t).to_owned()
-                        ),
+                        ceiling_table(),
                         m.threads
                     ));
                     m
@@ -2016,8 +1954,8 @@ impl From<ServerCost> for Cgroup {
 // The ClickHouse ingest pass
 // ---------------------------------------------------------------------------
 
-/// Batches encoded into one insert block. A thousand batches is 100,000 tier-A
-/// rows, which is the order of block a real arm sends.
+/// Batches encoded into one insert block. A thousand batches is 73,500 rows
+/// after the workload's filters, which is the order of block a real arm sends.
 const INSERT_BLOCK_BATCHES: u64 = 1_000;
 /// Distinct blocks pre-encoded before the clock starts.
 ///
@@ -2068,11 +2006,11 @@ const INGEST_CONCURRENCY_STEP: u64 = 2;
 /// requests in flight and the Spate arm four shards times four — and that
 /// reasoning was about the arms rather than about the target, which is why it
 /// stopped being true the moment the inserter moved inside the bench network. On
-/// the first pass from inside, Native at tier A was still climbing at 64
+/// the first pass from inside, Native was still climbing at 64
 /// (5.97M rows/s at 2, then 6.31M, 6.69M, 9.31M, 13.92M, 14.91M) and the pass
 /// correctly refused to publish a floor as a ceiling. It plateaus at 64–128 and
 /// falls back at 256, so this is two doublings past the highest winner any
-/// format and tier has shown — enough ladder for the plateau to be demonstrated
+/// format has shown — enough ladder for the plateau to be demonstrated
 /// rather than assumed, and still far under the server's
 /// `max_concurrent_queries`.
 ///
@@ -2365,7 +2303,7 @@ impl Burst {
     }
 }
 
-/// Measures how fast ClickHouse absorbs rows for one format at one tier, at the
+/// Measures how fast ClickHouse absorbs rows for one format, at the
 /// concurrency it absorbs them fastest at.
 ///
 /// Uses the committed DDL's table and the committed positional column list, so
@@ -2410,17 +2348,16 @@ fn measure_ingest(
     ep: &Endpoints,
     opts: &PassOptions,
     format: Format,
-    tier: Tier,
     cap_cores: f64,
 ) -> Result<MeasuredIngest, String> {
     let pool: Vec<Block> = (0..INSERT_BLOCK_POOL)
-        .map(|k| encode_block(tier, format, k * INSERT_BLOCK_BATCHES))
+        .map(|k| encode_block(format, k * INSERT_BLOCK_BATCHES))
         .collect();
     // Removed by its own `Drop`, so every way out of this function takes it with
     // it — including the four that are refusals.
-    let ceiling_table = CeilingTable::create(ep, tier)?;
+    let ceiling_table = CeilingTable::create(ep)?;
     let table = ceiling_table.name();
-    let sql = insert_sql_into(table, tier, format);
+    let sql = insert_sql_into(table, format);
     let window = Duration::from_secs(opts.seconds.max(1));
 
     // Started once for the whole ladder, so the pool crosses the pipe once and
@@ -2475,9 +2412,8 @@ fn measure_ingest(
             // ceilings to report that the rig cannot saturate its own transport.
             Err(e) if !bursts.is_empty() => {
                 eprintln!(
-                    "  {} tier {}: {concurrency} inserters — UNDRIVABLE, ending the sweep: {e}",
+                    "  {}: {concurrency} inserters — UNDRIVABLE, ending the sweep: {e}",
                     format.wire_format(),
-                    tier.name(),
                 );
                 undrivable = Some((concurrency, e));
                 break;
@@ -2485,10 +2421,9 @@ fn measure_ingest(
             Err(e) => return Err(e),
         };
         eprintln!(
-            "  {} tier {}: {concurrency} inserters — {} rows/s, {:.1} MB/s{}, {} landed, \
+            "  {}: {concurrency} inserters — {} rows/s, {:.1} MB/s{}, {} landed, \
              settled in {:.1}s{}",
             format.wire_format(),
-            tier.name(),
             burst.rows_per_s(),
             burst.mb_per_s(),
             describe_server(burst),
@@ -2505,20 +2440,18 @@ fn measure_ingest(
 
     let best = sweep.best().ok_or_else(|| {
         format!(
-            "REFUSED: the {} tier {} ingest sweep ran no rungs",
+            "REFUSED: the {} ingest sweep ran no rungs",
             format.wire_format(),
-            tier.name()
         )
     })?;
     if sweep.still_climbing() {
         return Err(format!(
-            "REFUSED: the {} tier {} ingest sweep was still climbing when it ran out of \
+            "REFUSED: the {} ingest sweep was still climbing when it ran out of \
              ladder — its best figure is at {}, the highest concurrency it tried ({}){}. A \
              figure the rig was never shown to be unable to beat is a floor, not a ceiling, \
              and gating arms against it would mark honest arms infra_bound against this \
              rig's own limit. Re-run with a higher `--ingest-max`.",
             format.wire_format(),
-            tier.name(),
             best.concurrency,
             describe_sweep(sweep.points()),
             undrivable.map_or_else(String::new, |(c, e)| format!(
@@ -2561,7 +2494,6 @@ fn measure_ingest(
     Ok(MeasuredIngest {
         ceiling: IngestCeiling {
             format: format.wire_format().to_owned(),
-            tier: tier.name().to_owned(),
             rows_per_s: burst.rows_per_s(),
             mb_per_s: burst.mb_per_s(),
             row_bytes: burst.row_bytes(),
@@ -2827,10 +2759,10 @@ fn server_cost(
 /// because what it proves is that the bytes this rig sends satisfy the same
 /// closed-form oracle an arm is gated on, and that has to be checked against the
 /// real target.
-fn insert_sql_into(table: &str, tier: Tier, format: Format) -> String {
+fn insert_sql_into(table: &str, format: Format) -> String {
     format!(
         "INSERT INTO {table} ({}) FORMAT {}",
-        tier.columns()
+        corpus::COLUMNS
             .iter()
             .map(|(n, _)| *n)
             .collect::<Vec<_>>()
@@ -2840,8 +2772,8 @@ fn insert_sql_into(table: &str, tier: Tier, format: Format) -> String {
 }
 
 /// The statement the encoder's live correctness test POSTs: the arms' own table.
-fn insert_sql(tier: Tier, format: Format) -> String {
-    insert_sql_into(tier.table(), tier, format)
+fn insert_sql(format: Format) -> String {
+    insert_sql_into(corpus::TABLE, format)
 }
 
 // ---------------------------------------------------------------------------
@@ -2851,20 +2783,16 @@ fn insert_sql(tier: Tier, format: Format) -> String {
 /// The setting whose value is the fourth defect.
 const DEDUPLICATION_WINDOW: &str = "non_replicated_deduplication_window";
 
-/// The table one tier's ingest ceiling is measured against.
+/// The table the ingest ceilings are measured against.
 ///
 /// Prefixed rather than suffixed so that no ceiling table can ever be mistaken
-/// for a tier of the real one — `sensor_events_t` is tier B, and a
-/// `sensor_events_ceiling` sitting beside it is one careless `SHOW TABLES` away
-/// from being read as a third tier.
-fn ceiling_table(tier: Tier) -> &'static str {
-    match tier {
-        Tier::A => "ceiling_sensor_events",
-        Tier::B => "ceiling_sensor_events_t",
-    }
+/// for the arms' own — a `sensor_events_ceiling` sitting beside `sensor_events`
+/// is one careless `SHOW TABLES` away from being read as a second target.
+fn ceiling_table() -> &'static str {
+    "ceiling_sensor_events"
 }
 
-/// The ceiling table's DDL, derived from the committed DDL for the same tier.
+/// The ceiling table's DDL, derived from the committed DDL.
 ///
 /// **Derived, not written.** The methodology's requirement is that the table a
 /// ceiling is measured against has the same schema as the one the arms write,
@@ -2900,12 +2828,12 @@ fn ceiling_table(tier: Tier) -> &'static str {
 ///
 /// # Errors
 ///
-/// If the committed DDL has no statement for this tier, or no deduplication
-/// window to turn off. Both are refusals rather than defaults: a ceiling table
-/// silently created *with* a deduplication window would restore the defect this
-/// exists to close, and would do it invisibly.
-fn ceiling_table_ddl(tier: Tier) -> Result<String, String> {
-    let head = format!("CREATE TABLE IF NOT EXISTS {}", tier.table());
+/// If the committed DDL has no statement for the target table, or no
+/// deduplication window to turn off. Both are refusals rather than defaults: a
+/// ceiling table silently created *with* a deduplication window would restore
+/// the defect this exists to close, and would do it invisibly.
+fn ceiling_table_ddl() -> Result<String, String> {
+    let head = format!("CREATE TABLE IF NOT EXISTS {}", corpus::TABLE);
     let stmt = corpus::ddl_statements()
         .into_iter()
         .find(|s| {
@@ -2914,21 +2842,20 @@ fn ceiling_table_ddl(tier: Tier) -> Result<String, String> {
         })
         .ok_or_else(|| {
             format!(
-                "REFUSED: the committed DDL has no CREATE for {}, so the ceiling table for \
-                 tier {} cannot be derived from it. A hand-written copy is not an \
+                "REFUSED: the committed DDL has no CREATE for {}, so the ceiling table \
+                 cannot be derived from it. A hand-written copy is not an \
                  acceptable substitute: the ceiling has to be measured against the arms' \
                  own column types.",
-                tier.table(),
-                tier.name()
+                corpus::TABLE,
             )
         })?;
 
     let renamed = stmt.replacen(
         &head,
-        &format!("CREATE TABLE IF NOT EXISTS {}", ceiling_table(tier)),
+        &format!("CREATE TABLE IF NOT EXISTS {}", ceiling_table()),
         1,
     );
-    without_deduplication(&renamed, tier)
+    without_deduplication(&renamed)
 }
 
 /// Rewrites a `non_replicated_deduplication_window = N` to zero.
@@ -2937,14 +2864,14 @@ fn ceiling_table_ddl(tier: Tier) -> Result<String, String> {
 /// replacement that silently matched nothing when the committed value changed
 /// would restore the defect and say nothing — and this is a setting somebody
 /// will one day tune.
-fn without_deduplication(ddl: &str, tier: Tier) -> Result<String, String> {
+fn without_deduplication(ddl: &str) -> Result<String, String> {
     let refuse = || {
         format!(
             "REFUSED: the committed DDL for {} does not set {DEDUPLICATION_WINDOW} in a \
              shape this can turn off, so the ceiling table cannot be shown NOT to \
              deduplicate the rig's repeated blocks. That is the difference between a \
              figure that includes the merging of rows that stay and one that does not.",
-            tier.table()
+            corpus::TABLE,
         )
     };
     let at = ddl.find(DEDUPLICATION_WINDOW).ok_or_else(refuse)?;
@@ -2978,11 +2905,10 @@ fn without_deduplication(ddl: &str, tier: Tier) -> Result<String, String> {
 #[derive(Debug)]
 struct CeilingTable<'a> {
     ep: &'a Endpoints,
-    tier: Tier,
 }
 
 impl<'a> CeilingTable<'a> {
-    /// Creates this tier's ceiling table, replacing any left by an earlier pass.
+    /// Creates the ceiling table, replacing any left by an earlier pass.
     ///
     /// Dropped first rather than created `IF NOT EXISTS` alone: a table left
     /// behind by a pass that was killed outright would carry that pass's rows
@@ -2992,22 +2918,22 @@ impl<'a> CeilingTable<'a> {
     /// # Errors
     ///
     /// If the DDL cannot be derived, or the server refuses it.
-    fn create(ep: &'a Endpoints, tier: Tier) -> Result<Self, String> {
-        let ddl = ceiling_table_ddl(tier)?;
-        let table = Self { ep, tier };
+    fn create(ep: &'a Endpoints) -> Result<Self, String> {
+        let ddl = ceiling_table_ddl()?;
+        let table = Self { ep };
         table.remove();
         let body =
             docker::try_clickhouse_sql(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password, &ddl)
-                .map_err(|e| format!("create {}: {e}", ceiling_table(tier)))?;
+                .map_err(|e| format!("create {}: {e}", ceiling_table()))?;
         if body.contains("DB::Exception") {
-            return Err(format!("create {}: {body}", ceiling_table(tier)));
+            return Err(format!("create {}: {body}", ceiling_table()));
         }
         Ok(table)
     }
 
     /// The table's name, for a statement or a log line.
     fn name(&self) -> &'static str {
-        ceiling_table(self.tier)
+        ceiling_table()
     }
 
     /// Removes the table and its data, now rather than in eight minutes.
@@ -3100,7 +3026,7 @@ fn settle(ep: &Endpoints, table: &str) -> Result<f64, String> {
 /// A typed cell rather than raw bytes, so the encoder can be checked against the
 /// committed DDL without a server: [`Cell::declared_type`] names the ClickHouse
 /// type each variant claims to write, and a test asserts that a row's cells
-/// declare exactly the columns `Tier::columns` declares, in order. Column order
+/// declare exactly the columns `corpus::COLUMNS` declares, in order. Column order
 /// is the wire contract for RowBinary, so a silent divergence here would corrupt
 /// every row rather than fail loudly.
 #[derive(Debug, Clone)]
@@ -3138,7 +3064,7 @@ impl Cell {
     /// it.
     ///
     /// Test-only on purpose. A block's name-and-type header is built from
-    /// `Tier::columns()`, which is derived from the DDL itself, so this must
+    /// `corpus::COLUMNS`, which is derived from the DDL itself, so this must
     /// never become a second runtime spelling of the same thing. It exists so a
     /// test can assert the encoder's cells line up with that header, position
     /// for position.
@@ -3460,7 +3386,7 @@ impl Column {
     /// Appends one row's value.
     ///
     /// Panics on a shape mismatch, which cannot happen: every row comes from
-    /// [`row_of`], whose cell shapes are fixed per tier. A panic here would mean
+    /// [`row_of`], whose cell shapes are fixed. A panic here would mean
     /// that stopped being true, and a Native block built from a row whose shape
     /// changed mid-block is not something to recover from — it would be a block
     /// whose columns hold different numbers of rows.
@@ -3599,7 +3525,7 @@ impl Column {
     }
 }
 
-/// Encodes one Native block over `batches` batches of the tier's rows.
+/// Encodes one Native block over `batches` batches of the workload's rows.
 ///
 /// The framing is the server's own: a varuint column count, a varuint row count,
 /// then per column a name string, a type string and that column's values
@@ -3611,25 +3537,25 @@ impl Column {
 ///
 /// A zero-row block writes its header and no column data at all, which is what
 /// ClickHouse's own writer does. It cannot arise from a ceiling pass — every
-/// batch yields rows at both tiers — but a header whose column count promised
-/// data that was not there would be an odd shape to leave lying around.
-fn encode_native_block(tier: Tier, lo: u64, batches: u64) -> Block {
-    let declared = tier.columns();
+/// batch yields rows after the filters — but a header whose column count
+/// promised data that was not there would be an odd shape to leave lying around.
+fn encode_native_block(lo: u64, batches: u64) -> Block {
+    let declared = corpus::COLUMNS;
     let mut columns: Vec<Column> = Vec::new();
     let mut rows = 0u64;
     for batch_id in lo..lo + batches {
         for seq in 0..corpus::EVENTS_PER_BATCH {
-            if tier == Tier::B && !corpus::tier_b_keeps(batch_id, seq) {
+            if !corpus::keeps(batch_id, seq) {
                 continue;
             }
-            let row = row_of(batch_id, seq, tier);
+            let row = row_of(batch_id, seq);
             if columns.is_empty() {
                 columns = row.iter().map(Column::empty_for).collect();
             }
             assert_eq!(
                 columns.len(),
                 row.len(),
-                "a {tier:?} row carries {} cells but the block has {} columns",
+                "a row carries {} cells but the block has {} columns",
                 row.len(),
                 columns.len()
             );
@@ -3641,7 +3567,7 @@ fn encode_native_block(tier: Tier, lo: u64, batches: u64) -> Block {
     }
     assert!(
         columns.is_empty() || columns.len() == declared.len(),
-        "the encoder built {} columns but {tier:?} declares {}",
+        "the encoder built {} columns but the target declares {}",
         columns.len(),
         declared.len()
     );
@@ -3659,44 +3585,36 @@ fn encode_native_block(tier: Tier, lo: u64, batches: u64) -> Block {
     Block { body, rows }
 }
 
-/// One flattened row, in the tier's declared column order.
+/// One flattened row, in the declared column order.
 ///
 /// Every value comes from the corpus's own derivation functions rather than from
 /// a copy of them, so the rows this rig inserts are the rows an arm would insert
 /// and the ceiling is measured against real `LowCardinality` cardinality, real
 /// array lengths and the real null pattern.
-fn row_of(batch_id: u64, seq: u32, tier: Tier) -> Vec<Cell> {
+fn row_of(batch_id: u64, seq: u32) -> Vec<Cell> {
     let value = corpus::value_of(batch_id, seq);
-    let name = corpus::name_of(batch_id, seq);
-    let mut row = vec![
+    vec![
         Cell::UInt64(batch_id),
         Cell::UInt16(u16::try_from(seq).unwrap_or(u16::MAX)),
         Cell::LowCardString(corpus::sensor_of(batch_id)),
-        // The null-region coalesce, which both tiers specify: the target column
-        // is LowCardinality(String), not LowCardinality(Nullable(String)).
+        // The specified null-region coalesce: the target column is
+        // LowCardinality(String), not LowCardinality(Nullable(String)).
         Cell::LowCardString(corpus::region_of(batch_id).unwrap_or_default()),
-        Cell::LowCardString(if tier == Tier::B {
-            corpus::ascii_upper(&name)
-        } else {
-            name
-        }),
+        Cell::LowCardString(corpus::ascii_upper(&corpus::name_of(batch_id, seq))),
         Cell::LowCardString(corpus::unit_of(batch_id, seq).to_owned()),
         Cell::Int64(value),
-    ];
-    if tier == Tier::B {
-        row.push(Cell::Int64(corpus::value_scaled_of(value, seq)));
-    }
-    row.push(Cell::NullableFloat64(corpus::quality_of(batch_id, seq)));
-    row.push(Cell::LowCardStringArray(corpus::tags_of(batch_id, seq)));
-    row.push(Cell::DateTime64 {
-        ticks: corpus::batch_ts_ms_of(batch_id),
-        scale: 3,
-    });
-    row.push(Cell::DateTime64 {
-        ticks: corpus::send_ts_us_prefill(batch_id),
-        scale: 6,
-    });
-    row
+        Cell::Int64(corpus::value_scaled_of(value, seq)),
+        Cell::NullableFloat64(corpus::quality_of(batch_id, seq)),
+        Cell::LowCardStringArray(corpus::tags_of(batch_id, seq)),
+        Cell::DateTime64 {
+            ticks: corpus::batch_ts_ms_of(batch_id),
+            scale: 3,
+        },
+        Cell::DateTime64 {
+            ticks: corpus::send_ts_us_prefill(batch_id),
+            scale: 6,
+        },
+    ]
 }
 
 /// Pre-encodes one insert block covering batches `lo..lo + INSERT_BLOCK_BATCHES`.
@@ -3705,8 +3623,8 @@ fn row_of(batch_id: u64, seq: u32, tier: Tier) -> Vec<Cell> {
 /// encoding inside the window because encoding is their work; the *ceiling* is
 /// meant to be a property of ClickHouse, so as much of this rig's own cost as
 /// possible is moved outside it.
-fn encode_block(tier: Tier, format: Format, lo: u64) -> Block {
-    encode_batches(tier, format, lo, INSERT_BLOCK_BATCHES)
+fn encode_block(format: Format, lo: u64) -> Block {
+    encode_batches(format, lo, INSERT_BLOCK_BATCHES)
 }
 
 /// [`encode_block`] over an arbitrary number of batches.
@@ -3714,15 +3632,15 @@ fn encode_block(tier: Tier, format: Format, lo: u64) -> Block {
 /// Split out so the encoder's tests can assert over ten batches rather than a
 /// thousand: the block size is chosen for the measurement, and paying it in
 /// every `cargo test` would make a correctness test slow enough to be skipped.
-fn encode_batches(tier: Tier, format: Format, lo: u64, batches: u64) -> Block {
+fn encode_batches(format: Format, lo: u64, batches: u64) -> Block {
     // Native is columnar and shares nothing with the row-oriented path below
     // beyond `row_of`, which both read so that neither can drift from the DDL.
     if format == Format::Native {
-        return encode_native_block(tier, lo, batches);
+        return encode_native_block(lo, batches);
     }
     let mut body = Vec::new();
     if format == Format::RowBinaryWithNamesAndTypes {
-        let columns = tier.columns();
+        let columns = corpus::COLUMNS;
         put_varint(&mut body, columns.len() as u64);
         for (name, _) in columns {
             put_string(&mut body, name);
@@ -3734,10 +3652,10 @@ fn encode_batches(tier: Tier, format: Format, lo: u64, batches: u64) -> Block {
     let mut rows = 0u64;
     for batch_id in lo..lo + batches {
         for seq in 0..corpus::EVENTS_PER_BATCH {
-            if tier == Tier::B && !corpus::tier_b_keeps(batch_id, seq) {
+            if !corpus::keeps(batch_id, seq) {
                 continue;
             }
-            for cell in row_of(batch_id, seq, tier) {
+            for cell in row_of(batch_id, seq) {
                 cell.write(&mut body);
             }
             rows += 1;
@@ -3750,8 +3668,8 @@ fn encode_batches(tier: Tier, format: Format, lo: u64, batches: u64) -> Block {
 // The encoder, for the test that proves it
 // ---------------------------------------------------------------------------
 
-/// Encodes one insert block of `batches` batches of `tier` rows in `format`,
-/// exactly as a ceiling pass would POST it.
+/// Encodes one insert block of `batches` batches of the workload's rows in
+/// `format`, exactly as a ceiling pass would POST it.
 ///
 /// Public for one caller: `harness/tests/native_encoder_matches_clickhouse.rs`,
 /// which sends these bytes at a live ClickHouse and checks what lands against
@@ -3763,11 +3681,11 @@ fn encode_batches(tier: Tier, format: Format, lo: u64, batches: u64) -> Block {
 /// live test's oracle is [`corpus::expected_range`] over the same range, with no
 /// expectation written by hand.
 #[must_use]
-pub fn encode_insert_block(tier: Tier, format: Format, lo: u64, batches: u64) -> Block {
-    encode_batches(tier, format, lo, batches)
+pub fn encode_insert_block(format: Format, lo: u64, batches: u64) -> Block {
+    encode_batches(format, lo, batches)
 }
 
-/// POSTs one encoded block into `tier`'s table, behind the same statement a
+/// POSTs one encoded block into the target table, behind the same statement a
 /// ceiling pass sends.
 ///
 /// # Errors
@@ -3780,18 +3698,10 @@ pub fn insert_encoded_block(
     port: u16,
     user: &str,
     password: &str,
-    tier: Tier,
     format: Format,
     block: &Block,
 ) -> Result<(), String> {
-    insert(
-        host,
-        port,
-        user,
-        password,
-        &insert_sql(tier, format),
-        &block.body,
-    )
+    insert(host, port, user, password, &insert_sql(format), &block.body)
 }
 
 // ---------------------------------------------------------------------------
@@ -3938,10 +3848,9 @@ pub fn describe(ceilings: &Ceilings, gate: &Ceiling) -> String {
     }
     for c in &ceilings.clickhouse {
         out.push_str(&format!(
-            "clickhouse: {} tier {} — {} rows/s, {:.1} MB/s at {} B/row, {} inserters \
+            "clickhouse: {} — {} rows/s, {:.1} MB/s at {} B/row, {} inserters \
              (measured {}, client {})\n",
             c.format,
-            c.tier,
             c.rows_per_s,
             c.mb_per_s,
             c.row_bytes,
@@ -4002,10 +3911,9 @@ mod tests {
         }
     }
 
-    fn ingest_of(format: &str, tier: &str, rows_per_s: u64, digest: &str) -> IngestCeiling {
+    fn ingest_of(format: &str, rows_per_s: u64, digest: &str) -> IngestCeiling {
         IngestCeiling {
             format: format.to_owned(),
-            tier: tier.to_owned(),
             rows_per_s,
             mb_per_s: 1.0,
             row_bytes: 91,
@@ -4037,28 +3945,22 @@ mod tests {
     /// A pass with no restriction measures the whole rig, which is what every
     /// committed ceiling has to have been produced by.
     #[test]
-    fn a_pass_with_no_restriction_measures_every_format_at_every_tier() {
+    fn a_pass_with_no_restriction_measures_every_format() {
         let all = select_combinations(&[]).expect("an empty restriction selects everything");
         assert_eq!(all, all_combinations());
-        assert_eq!(all.len(), FORMATS.len() * 2);
+        assert_eq!(all.len(), FORMATS.len());
         // And it says nothing about itself in the rig string, so a full pass's
         // provenance reads exactly as it did before the flag existed.
         assert_eq!(describe_restriction(&all), "");
     }
 
-    /// The narrowing the envelope search needed: one insert format, both tiers,
-    /// because the combination that binds is a format rather than a tier.
+    /// The narrowing the envelope search needed: one insert format, because the
+    /// combination that binds is a format.
     #[test]
-    fn naming_a_format_selects_both_of_its_tiers_and_records_the_restriction() {
+    fn naming_a_format_selects_it_and_records_the_restriction() {
         let only = select_combinations(&["rowbinary".to_owned()]).expect("rowbinary is measurable");
-        assert_eq!(
-            only,
-            vec![(Format::RowBinary, Tier::A), (Format::RowBinary, Tier::B)]
-        );
-        assert_eq!(
-            describe_restriction(&only),
-            " --only rowbinary:a --only rowbinary:b"
-        );
+        assert_eq!(only, vec![Format::RowBinary]);
+        assert_eq!(describe_restriction(&only), " --only rowbinary");
     }
 
     /// A restriction is a set, so asking for the same work twice is asking for it
@@ -4067,17 +3969,13 @@ mod tests {
     #[test]
     fn a_restriction_collapses_duplicates_and_keeps_the_rigs_own_order() {
         let typed = [
-            "rowbinary:b".to_owned(),
-            "native:a".to_owned(),
+            "rowbinary".to_owned(),
+            "native".to_owned(),
             "rowbinary".to_owned(),
         ];
         assert_eq!(
             select_combinations(&typed).expect("every name is measurable"),
-            vec![
-                (Format::Native, Tier::A),
-                (Format::RowBinary, Tier::A),
-                (Format::RowBinary, Tier::B),
-            ]
+            vec![Format::Native, Format::RowBinary]
         );
     }
 
@@ -4094,8 +3992,10 @@ mod tests {
         assert!(e.contains("native"), "{e}");
         assert!(e.contains("rowbinary_nt"), "{e}");
 
+        // A ':' does not name an axis; the whole argument is read as a format
+        // name and refused as one nobody can emit.
         let e = select_combinations(&["rowbinary:c".to_owned()]).expect_err("must refuse");
-        assert!(e.contains("neither"), "{e}");
+        assert!(e.contains("cannot"), "{e}");
     }
 
     /// The state `--only` made reachable, and the reason writing it is refused:
@@ -4106,8 +4006,8 @@ mod tests {
         let mut c = Ceilings {
             consume: Some(consume_at(4056, 1_600_000, "new")),
             clickhouse: vec![
-                ingest_of("rowbinary", "a", 5_000_000, "new"),
-                ingest_of("native", "a", 15_000_000, "old"),
+                ingest_of("rowbinary", 5_000_000, "new"),
+                ingest_of("native", 15_000_000, "old"),
             ],
         };
         let stale = c.measured_under_other_envelopes("new");
@@ -4117,7 +4017,7 @@ mod tests {
 
         // A full pass leaves nothing behind, which is what makes the refusal
         // actionable rather than permanent.
-        c.clickhouse[1] = ingest_of("native", "a", 15_000_000, "new");
+        c.clickhouse[1] = ingest_of("native", 15_000_000, "new");
         assert!(c.measured_under_other_envelopes("new").is_empty());
 
         // A ceiling that records no envelope at all is not one measured under an
@@ -4196,7 +4096,6 @@ mod tests {
             msgs_per_s: 50_000.0,
             rows_per_s: 5_000_000.0,
             wire_format: "rowbinary",
-            tier: Tier::A,
         });
         let consume = headroom
             .shares()
@@ -4234,7 +4133,7 @@ mod tests {
     fn a_ceiling_measured_under_another_envelope_is_refused() {
         let ceilings = Ceilings {
             consume: Some(consume_at(corpus_message_bytes(), 300_000, "old-envelope")),
-            clickhouse: vec![ingest_of("rowbinary", "a", 6_000_000, "old-envelope")],
+            clickhouse: vec![ingest_of("rowbinary", 6_000_000, "old-envelope")],
         };
         let gate = ceilings.gate(corpus_message_bytes(), "new-envelope");
         assert_eq!(gate.consume_msgs_per_s, 0);
@@ -4250,7 +4149,7 @@ mod tests {
     #[test]
     fn a_ceiling_that_does_not_say_where_its_client_ran_is_refused_rather_than_assumed_inside() {
         let mut consume = consume_at(corpus_message_bytes(), 300_000, "envelope");
-        let mut ingest = ingest_of("rowbinary", "a", 6_000_000, "envelope");
+        let mut ingest = ingest_of("rowbinary", 6_000_000, "envelope");
         consume.client = String::new();
         ingest.client = String::new();
         let gate = Ceilings {
@@ -4275,7 +4174,6 @@ mod tests {
             msgs_per_s: 40_562.0,
             rows_per_s: 4_056_210.0,
             wire_format: "rowbinary",
-            tier: Tier::A,
         });
         assert!(headroom.shares().is_empty(), "{:?}", headroom.shares());
         assert!(!headroom.is_proven());
@@ -4288,7 +4186,7 @@ mod tests {
     fn a_ceiling_measured_from_outside_the_bench_network_is_refused_by_the_gate() {
         let mut consume = consume_at(corpus_message_bytes(), 68_000, "envelope");
         consume.client = Location::Outside.name().to_owned();
-        let mut ingest = ingest_of("native", "a", 2_400_000, "envelope");
+        let mut ingest = ingest_of("native", 2_400_000, "envelope");
         ingest.client = "somewhere".to_owned();
         let gate = Ceilings {
             consume: Some(consume),
@@ -4322,7 +4220,6 @@ mod tests {
             msgs_per_s: 1.0,
             rows_per_s: 1.0,
             wire_format: "rowbinary",
-            tier: Tier::A,
         });
         assert!(!headroom.is_proven());
         assert!(!headroom.infra_bound(), "an unproven gate is not a breach");
@@ -4336,7 +4233,7 @@ mod tests {
         let current = corpus_message_bytes();
         let ceilings = Ceilings {
             consume: Some(consume_at(current, 1_000_000, "envelope")),
-            clickhouse: vec![ingest_of("rowbinary", "a", 5_000_000, "envelope")],
+            clickhouse: vec![ingest_of("rowbinary", 5_000_000, "envelope")],
         };
         let gate = ceilings.gate(current, "envelope");
         let headroom = gate.headroom(Achieved {
@@ -4344,34 +4241,13 @@ mod tests {
             msgs_per_s: 50_000.0,
             rows_per_s: 4_500_000.0,
             wire_format: "rowbinary",
-            tier: Tier::A,
         });
         assert!(headroom.is_proven());
         assert!(headroom.infra_bound());
         assert_eq!(
             headroom.binding().expect("a binding ceiling").against,
-            "clickhouse ingest (rowbinary tier a)"
+            "clickhouse ingest (rowbinary)"
         );
-    }
-
-    /// Tier is part of the key because the two tiers insert different columns
-    /// into different tables. A tier-B arm checked against tier A's ceiling is
-    /// the same class of mistake harness v2 fixed for the consume ceiling.
-    #[test]
-    fn a_tier_b_arm_is_not_gated_against_a_tier_a_ingest_ceiling() {
-        let current = corpus_message_bytes();
-        let ceilings = Ceilings {
-            consume: Some(consume_at(current, 1_000_000, "envelope")),
-            clickhouse: vec![ingest_of("rowbinary", "a", 5_000_000, "envelope")],
-        };
-        let headroom = ceilings.gate(current, "envelope").headroom(Achieved {
-            msgs_per_s: 50_000.0,
-            rows_per_s: 4_500_000.0,
-            wire_format: "rowbinary",
-            tier: Tier::B,
-        });
-        assert!(!headroom.is_proven(), "tier B has no ceiling here");
-        assert!(!headroom.infra_bound());
     }
 
     /// Rule 5 says the insert format materially changes server-side work, so an
@@ -4383,14 +4259,13 @@ mod tests {
         let current = corpus_message_bytes();
         let ceilings = Ceilings {
             consume: Some(consume_at(current, 1_000_000, "envelope")),
-            clickhouse: vec![ingest_of("rowbinary", "a", 5_000_000, "envelope")],
+            clickhouse: vec![ingest_of("rowbinary", 5_000_000, "envelope")],
         };
         let headroom = ceilings.gate(current, "envelope").headroom(Achieved {
             msgs_per_s: 50_000.0,
             // Far over the RowBinary ceiling, and deliberately not gated by it.
             rows_per_s: 50_000_000.0,
             wire_format: "jsoneachrow",
-            tier: Tier::A,
         });
         assert!(!headroom.infra_bound());
         assert!(!headroom.is_proven());
@@ -4414,13 +4289,12 @@ mod tests {
         let current = corpus_message_bytes();
         let ceilings = Ceilings {
             consume: Some(consume_at(current, 1_000_000, "envelope")),
-            clickhouse: vec![ingest_of("native", "a", 5_000_000, "envelope")],
+            clickhouse: vec![ingest_of("native", 5_000_000, "envelope")],
         };
         let headroom = ceilings.gate(current, "envelope").headroom(Achieved {
             msgs_per_s: 50_000.0,
             rows_per_s: 4_500_000.0,
             wire_format: "native",
-            tier: Tier::A,
         });
         assert!(headroom.is_proven(), "{:?}", headroom.unproven());
         assert!(
@@ -4452,20 +4326,17 @@ mod tests {
     /// the most expensive possible number to publish.
     #[test]
     fn every_encoded_row_declares_the_columns_the_ddl_declares_in_order() {
-        for tier in [Tier::A, Tier::B] {
-            let declared: Vec<String> = tier
-                .columns()
-                .iter()
-                .map(|(_, ty)| (*ty).to_owned())
-                .collect();
-            for batch_id in [0u64, 1, 9, 10, 137] {
-                for seq in [0u32, 1, 7] {
-                    let row: Vec<String> = row_of(batch_id, seq, tier)
-                        .iter()
-                        .map(Cell::declared_type)
-                        .collect();
-                    assert_eq!(row, declared, "{tier:?} row {batch_id}/{seq}");
-                }
+        let declared: Vec<String> = corpus::COLUMNS
+            .iter()
+            .map(|(_, ty)| (*ty).to_owned())
+            .collect();
+        for batch_id in [0u64, 1, 9, 10, 137] {
+            for seq in [0u32, 1, 7] {
+                let row: Vec<String> = row_of(batch_id, seq)
+                    .iter()
+                    .map(Cell::declared_type)
+                    .collect();
+                assert_eq!(row, declared, "row {batch_id}/{seq}");
             }
         }
     }
@@ -4507,33 +4378,31 @@ mod tests {
     /// committed list the rows are.
     #[test]
     fn the_names_and_types_header_carries_every_declared_column() {
-        let plain = encode_batches(Tier::A, Format::RowBinary, 0, 10);
-        let headed = encode_batches(Tier::A, Format::RowBinaryWithNamesAndTypes, 0, 10);
+        let plain = encode_batches(Format::RowBinary, 0, 10);
+        let headed = encode_batches(Format::RowBinaryWithNamesAndTypes, 0, 10);
         assert_eq!(plain.rows, headed.rows);
         assert!(headed.body.len() > plain.body.len());
         let header = String::from_utf8_lossy(&headed.body[..headed.body.len() - plain.body.len()])
             .into_owned();
-        for (name, ty) in Tier::A.columns() {
+        for (name, ty) in corpus::COLUMNS {
             assert!(header.contains(name), "header omits {name}");
             assert!(header.contains(ty), "header omits type {ty}");
         }
     }
 
-    /// Tier B filters, so its block carries fewer rows than tier A's over the
-    /// same batches. If the two ever agreed, the rig would be measuring tier A
-    /// twice and gating tier B against it.
+    /// The workload filters, so a block carries fewer rows than the batches'
+    /// event count — and exactly the count the corpus's own oracle expects. A
+    /// block that carried every event would be measuring an insert nobody
+    /// performs.
     #[test]
-    fn a_tier_b_block_carries_fewer_rows_than_a_tier_a_block() {
+    fn a_block_carries_exactly_the_rows_the_workload_keeps() {
         for format in FORMATS {
-            let a = encode_batches(Tier::A, format, 0, 10);
-            let b = encode_batches(Tier::B, format, 0, 10);
-            assert_eq!(
-                a.rows,
-                10 * u64::from(corpus::EVENTS_PER_BATCH),
+            let block = encode_batches(format, 0, 10);
+            assert_eq!(block.rows, corpus::expected_rows(10), "{format:?}");
+            assert!(
+                block.rows < 10 * u64::from(corpus::EVENTS_PER_BATCH),
                 "{format:?}"
             );
-            assert_eq!(b.rows, corpus::expected_rows(10, Tier::B), "{format:?}");
-            assert!(b.rows < a.rows, "{format:?}");
         }
     }
 
@@ -4795,40 +4664,34 @@ mod tests {
     /// deduplicate the rig's repeated blocks away.
     #[test]
     fn the_ceiling_table_carries_the_committed_columns_and_no_deduplication_window() {
-        for tier in [Tier::A, Tier::B] {
-            let ddl = ceiling_table_ddl(tier).expect("the committed DDL yields a ceiling table");
-            assert!(
-                ddl.contains(&format!(
-                    "CREATE TABLE IF NOT EXISTS {}",
-                    ceiling_table(tier)
-                )),
-                "{ddl}"
-            );
-            assert!(
-                !ddl.contains(&format!("EXISTS {}\n", tier.table())),
-                "the ceiling table must not be the arms' own table: {ddl}"
-            );
-            assert!(
-                ddl.contains(&format!("{DEDUPLICATION_WINDOW} = 0")),
-                "{ddl}"
-            );
-            // Every column, with its type, exactly as the arms' table declares
-            // it: the column types are most of the server-side work, so a
-            // ceiling measured against anything else describes another insert.
-            for (name, ty) in tier.columns() {
-                assert!(ddl.contains(name), "{ddl} omits {name}");
-                assert!(ddl.contains(ty), "{ddl} omits {ty}");
-            }
-            // The materialised column is server-side work per row and is part of
-            // the schema whether or not the rig writes it.
-            assert!(ddl.contains("MATERIALIZED now64(6)"), "{ddl}");
-            assert!(ddl.contains("ENGINE = MergeTree"), "{ddl}");
-            assert!(
-                ddl.contains("ORDER BY (sensor, batch_ts, batch_id, event_seq)"),
-                "{ddl}"
-            );
+        let ddl = ceiling_table_ddl().expect("the committed DDL yields a ceiling table");
+        assert!(
+            ddl.contains(&format!("CREATE TABLE IF NOT EXISTS {}", ceiling_table())),
+            "{ddl}"
+        );
+        assert!(
+            !ddl.contains(&format!("EXISTS {}\n", corpus::TABLE)),
+            "the ceiling table must not be the arms' own table: {ddl}"
+        );
+        assert!(
+            ddl.contains(&format!("{DEDUPLICATION_WINDOW} = 0")),
+            "{ddl}"
+        );
+        // Every column, with its type, exactly as the arms' table declares
+        // it: the column types are most of the server-side work, so a
+        // ceiling measured against anything else describes another insert.
+        for (name, ty) in corpus::COLUMNS {
+            assert!(ddl.contains(name), "{ddl} omits {name}");
+            assert!(ddl.contains(ty), "{ddl} omits {ty}");
         }
-        assert_ne!(ceiling_table(Tier::A), ceiling_table(Tier::B));
+        // The materialised column is server-side work per row and is part of
+        // the schema whether or not the rig writes it.
+        assert!(ddl.contains("MATERIALIZED now64(6)"), "{ddl}");
+        assert!(ddl.contains("ENGINE = MergeTree"), "{ddl}");
+        assert!(
+            ddl.contains("ORDER BY (sensor, batch_ts, batch_id, event_seq)"),
+            "{ddl}"
+        );
     }
 
     /// The window is parsed rather than string-matched against the value the DDL
@@ -4838,10 +4701,9 @@ mod tests {
     #[test]
     fn a_deduplication_window_this_cannot_turn_off_is_refused_rather_than_left_on() {
         let with = |settings: &str| {
-            without_deduplication(
-                &format!("CREATE TABLE t (a UInt64) ENGINE = MergeTree {settings}"),
-                Tier::A,
-            )
+            without_deduplication(&format!(
+                "CREATE TABLE t (a UInt64) ENGINE = MergeTree {settings}"
+            ))
         };
         assert!(
             with("SETTINGS non_replicated_deduplication_window = 1000")
@@ -4915,7 +4777,7 @@ mod tests {
     /// chose it survives in the provenance the same rewrite carries.
     #[test]
     fn a_rewritten_ingest_ceiling_keeps_the_concurrency_and_the_ladder_it_was_measured_at() {
-        let mut measured = ingest_of("native", "a", 4_400_000, "envelope");
+        let mut measured = ingest_of("native", 4_400_000, "envelope");
         measured.sweep = vec![
             SweepPoint {
                 concurrency: 8,
@@ -5079,7 +4941,7 @@ mod tests {
     }
 
     /// Reads a Native block back into its declared columns and one cell list per
-    /// row, in the tier's column order.
+    /// row, in the declared column order.
     fn decode_native(body: &[u8]) -> (Vec<(String, String)>, Vec<Vec<Cell>>) {
         let mut r = Reader::new(body);
         let columns = usize::try_from(r.varint()).expect("column count fits usize");
@@ -5159,14 +5021,14 @@ mod tests {
 
     /// The rows a block was built from, so a decoded block can be compared
     /// against them without a second derivation of what a row is.
-    fn rows_of(tier: Tier, lo: u64, batches: u64) -> Vec<Vec<Cell>> {
+    fn rows_of(lo: u64, batches: u64) -> Vec<Vec<Cell>> {
         let mut rows = Vec::new();
         for batch_id in lo..lo + batches {
             for seq in 0..corpus::EVENTS_PER_BATCH {
-                if tier == Tier::B && !corpus::tier_b_keeps(batch_id, seq) {
+                if !corpus::keeps(batch_id, seq) {
                     continue;
                 }
-                rows.push(row_of(batch_id, seq, tier));
+                rows.push(row_of(batch_id, seq));
             }
         }
         rows
@@ -5177,7 +5039,7 @@ mod tests {
     }
 
     /// The load-bearing one. A Native block must read back as exactly the rows
-    /// it was built from — every column, every row, both tiers — or the ceiling
+    /// it was built from — every column, every row — or the ceiling
     /// describes an insert of something else.
     ///
     /// The range starts at 0 and runs long enough to carry `sensor` past 256
@@ -5186,32 +5048,30 @@ mod tests {
     /// leave the single most dangerous branch in the encoder untested.
     #[test]
     fn a_native_block_reads_back_as_exactly_the_rows_it_was_built_from() {
-        for tier in [Tier::A, Tier::B] {
-            let block = encode_batches(tier, Format::Native, 0, 300);
-            let (declared, decoded) = decode_native(&block.body);
-            assert_eq!(
-                declared,
-                tier.columns()
-                    .iter()
-                    .map(|(n, t)| ((*n).to_owned(), (*t).to_owned()))
-                    .collect::<Vec<_>>(),
-                "{tier:?} column header"
-            );
-            let built = rows_of(tier, 0, 300);
-            assert_eq!(block.rows as usize, built.len(), "{tier:?} row count");
-            assert_eq!(debug_rows(&decoded), debug_rows(&built), "{tier:?} rows");
-        }
+        let block = encode_batches(Format::Native, 0, 300);
+        let (declared, decoded) = decode_native(&block.body);
+        assert_eq!(
+            declared,
+            corpus::COLUMNS
+                .iter()
+                .map(|(n, t)| ((*n).to_owned(), (*t).to_owned()))
+                .collect::<Vec<_>>(),
+            "column header"
+        );
+        let built = rows_of(0, 300);
+        assert_eq!(block.rows as usize, built.len(), "row count");
+        assert_eq!(debug_rows(&decoded), debug_rows(&built), "rows");
     }
 
     /// A block that does not span 256 sensors still has to be readable. The
-    /// narrow-dictionary path is the common one at the block sizes a pass sends
-    /// for tier B, and a width selector that only worked above the boundary
+    /// narrow-dictionary path is the common one at short block sizes,
+    /// and a width selector that only worked above the boundary
     /// would pass the test above and corrupt every short block.
     #[test]
     fn a_native_block_narrow_enough_for_one_byte_indexes_reads_back_unchanged() {
-        let block = encode_batches(Tier::A, Format::Native, 0, 4);
+        let block = encode_batches(Format::Native, 0, 4);
         let (_, decoded) = decode_native(&block.body);
-        assert_eq!(debug_rows(&decoded), debug_rows(&rows_of(Tier::A, 0, 4)));
+        assert_eq!(debug_rows(&decoded), debug_rows(&rows_of(0, 4)));
 
         // The dictionary for `sensor` over four batches is four sensors plus the
         // reserved default, so the indexes really are one byte wide here.
@@ -5257,13 +5117,15 @@ mod tests {
     /// `LowCardinality` group is short enough to write out in full.
     #[test]
     fn a_low_cardinality_column_writes_its_key_version_flags_dictionary_and_indexes() {
-        let block = encode_batches(Tier::A, Format::Native, 0, 1);
-        let rows = u64::from(corpus::EVENTS_PER_BATCH);
+        let block = encode_batches(Format::Native, 0, 1);
+        // The workload filters, so one batch yields the kept rows rather than
+        // every event.
+        let rows = corpus::expected_rows(1);
         assert_eq!(block.rows, rows);
 
         // Header, then past `batch_id` and `event_seq` to `sensor`.
         let mut want = Vec::new();
-        put_varint(&mut want, Tier::A.columns().len() as u64);
+        put_varint(&mut want, corpus::COLUMNS.len() as u64);
         put_varint(&mut want, rows);
         assert_eq!(&block.body[..want.len()], &want[..], "block header");
 
@@ -5298,7 +5160,7 @@ mod tests {
     /// the first eight bytes of an offset as a version.
     #[test]
     fn an_array_of_low_cardinality_writes_the_nested_key_version_before_its_offsets() {
-        let block = encode_batches(Tier::A, Format::Native, 0, 1);
+        let block = encode_batches(Format::Native, 0, 1);
         let mut header = Vec::new();
         put_string(&mut header, "tags");
         put_string(&mut header, "Array(LowCardinality(String))");
@@ -5334,22 +5196,22 @@ mod tests {
     /// slot would misalign every row after the first null.
     #[test]
     fn a_native_nullable_column_writes_a_value_slot_for_a_null_row_and_rowbinary_does_not() {
-        let native = encode_batches(Tier::A, Format::Native, 0, 1);
-        let row_binary = encode_batches(Tier::A, Format::RowBinary, 0, 1);
+        let native = encode_batches(Format::Native, 0, 1);
+        let row_binary = encode_batches(Format::RowBinary, 0, 1);
         assert_eq!(native.rows, row_binary.rows);
 
         let (_, decoded) = decode_native(&native.body);
         let nulls = decoded
             .iter()
-            .filter(|row| matches!(row[7], Cell::NullableFloat64(None)))
+            .filter(|row| matches!(row[8], Cell::NullableFloat64(None)))
             .count();
         assert!(nulls > 0, "the corpus nulls one quality in five");
         assert_eq!(
             nulls,
             (0..corpus::EVENTS_PER_BATCH)
-                .filter(|seq| corpus::quality_of(0, *seq).is_none())
+                .filter(|seq| { corpus::keeps(0, *seq) && corpus::quality_of(0, *seq).is_none() })
                 .count(),
-            "the decoded null pattern is the corpus's"
+            "the decoded null pattern is the corpus's, over the rows the workload keeps"
         );
     }
 
@@ -5360,31 +5222,27 @@ mod tests {
     /// what its name says.
     #[test]
     fn a_native_block_is_smaller_than_the_rowbinary_block_carrying_the_same_rows() {
-        for tier in [Tier::A, Tier::B] {
-            let native = encode_batches(tier, Format::Native, 0, 50);
-            let row_binary = encode_batches(tier, Format::RowBinary, 0, 50);
-            assert_eq!(native.rows, row_binary.rows, "{tier:?}");
-            assert!(
-                native.body.len() < row_binary.body.len(),
-                "{tier:?}: native {} vs rowbinary {}",
-                native.body.len(),
-                row_binary.body.len()
-            );
-        }
+        let native = encode_batches(Format::Native, 0, 50);
+        let row_binary = encode_batches(Format::RowBinary, 0, 50);
+        assert_eq!(native.rows, row_binary.rows);
+        assert!(
+            native.body.len() < row_binary.body.len(),
+            "native {} vs rowbinary {}",
+            native.body.len(),
+            row_binary.body.len()
+        );
     }
 
     /// The statement is one definition, so the pass and the encoder's live test
     /// cannot POST different inserts.
     #[test]
-    fn every_format_inserts_behind_the_tier_table_and_its_full_column_list() {
+    fn every_format_inserts_behind_the_target_table_and_its_full_column_list() {
         for format in FORMATS {
-            for tier in [Tier::A, Tier::B] {
-                let sql = insert_sql(tier, format);
-                assert!(sql.starts_with(&format!("INSERT INTO {} (", tier.table())));
-                assert!(sql.ends_with(&format!("FORMAT {}", format.clickhouse_name())));
-                for (name, _) in tier.columns() {
-                    assert!(sql.contains(name), "{sql} omits {name}");
-                }
+            let sql = insert_sql(format);
+            assert!(sql.starts_with(&format!("INSERT INTO {} (", corpus::TABLE)));
+            assert!(sql.ends_with(&format!("FORMAT {}", format.clickhouse_name())));
+            for (name, _) in corpus::COLUMNS {
+                assert!(sql.contains(name), "{sql} omits {name}");
             }
         }
     }
@@ -5396,13 +5254,13 @@ mod tests {
         let mut ceilings = Ceilings {
             consume: Some(consume_at(840, 305_554, "old")),
             clickhouse: vec![
-                ingest_of("rowbinary", "a", 1, "old"),
-                ingest_of("jsoneachrow", "a", 2, "old"),
+                ingest_of("rowbinary", 1, "old"),
+                ingest_of("jsoneachrow", 2, "old"),
             ],
         };
         ceilings.merge(Pass {
             consume: consume_at(4056, 60_000, "new"),
-            ingest: vec![ingest_of("rowbinary", "a", 3, "new")],
+            ingest: vec![ingest_of("rowbinary", 3, "new")],
         });
         assert_eq!(
             ceilings.consume.as_ref().expect("consume").msgs_per_s,
@@ -5482,13 +5340,13 @@ mod tests {
     /// people stop reading. What is pinned instead is the property that failed:
     /// a consume ceiling reaches the gate only if it records the message size,
     /// the envelope and the side of the bench network it was taken on, and the
-    /// size matches this corpus. As committed the file records none of the
-    /// three, so this also asserts that the refusal is firing — which is the
-    /// correct state of the repository until the pass is re-run.
+    /// size matches this corpus. The assertion is an equivalence, so it holds
+    /// whether the committed file currently satisfies the rule or is being
+    /// correctly refused until a pass is re-run.
     #[test]
     fn the_committed_reference_ceiling_reaches_the_gate_only_if_it_says_what_it_measured() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../environments/ceilings/m5max-mbp-docker.json");
+            .join("../environments/ceilings/c8g-8xl-ec2-docker.json");
         let ceilings = Ceilings::load(&path).expect("the committed ceilings file parses");
         let consume = ceilings
             .consume
@@ -5512,14 +5370,6 @@ mod tests {
              measured against: {:?}",
             gate.refusals()
         );
-    }
-
-    #[test]
-    fn a_tier_name_round_trips_and_nothing_else_parses() {
-        assert_eq!(tier_named("a"), Some(Tier::A));
-        assert_eq!(tier_named("b"), Some(Tier::B));
-        assert_eq!(tier_named("A"), None);
-        assert_eq!(tier_named(""), None);
     }
 
     #[test]

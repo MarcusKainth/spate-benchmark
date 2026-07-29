@@ -1,7 +1,7 @@
 ---
 id: workload
 title: The workload
-description: The one pipeline every system implements — schema, target, tiers, and the deterministic corpus.
+description: The one pipeline every system implements — schema, target, transform, and the deterministic corpus.
 ---
 
 One workload, fixed. Every system implements this and nothing else, which is what
@@ -26,14 +26,13 @@ real work rather than a pass-through.
   Schema Registry, so registry-based decoding is exercised as it would be in
   production.
 
-## Two tiers
+## The transform
 
-**Tier A — transport.** Decode, flatten, insert. Column mapping only.
-
-**Tier B — transform.** Tier A plus, in this order: drop rows whose unit is the
-sentinel; drop rows whose `quality` is non-null and below the floor; coalesce a
-null region to the empty string; derive a scaled value by integer division; and
-uppercase the metric name **ASCII-only**.
+Every decoded row passes through one fixed transform, in this order: drop rows
+whose unit is the sentinel; drop rows whose `quality` is non-null and below the
+floor; coalesce a null region to the empty string; derive a scaled value by
+integer division; and uppercase the metric name **ASCII-only**. About 73.5% of
+decoded rows survive the two filters and land in `sensor_events`.
 
 That last constraint looks pedantic and is not. Java's `String.toUpperCase()` is
 locale-dependent, so "uppercase" alone would be a different operation in
@@ -46,7 +45,7 @@ Every field is derived arithmetically from the batch identifier. Three things
 follow, and they are why the correctness gates can say more than "the same number
 of rows arrived":
 
-- The expected row count, checksum and per-tier filtered counts are computable in
+- The expected row count, checksum and post-filter row counts are computable in
   closed form, **without reading what any system produced**. A system that
   transforms wrongly fails as loudly as one that drops rows.
 - `(batch_id, seq)` is a true row identity, so exact-distinct is an exact loss

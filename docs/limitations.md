@@ -44,33 +44,22 @@ nothing forces it to economise, not what it requires. See
 [the resource envelope](./contract/envelope.md) for the full argument. If you want "how small
 can this run?", that is a different sweep and it has not been done.
 
-## The host is rented, and older numbers came from a Mac
+## The host is rented
 
-Current measurements run on a fresh EC2 c8g.8xlarge per run — Linux,
-homogeneous physical cores, no VM layer — which retires what used to be this
-section's headline weakness. What remains true: it is a virtualised
+Measurements run on a fresh EC2 c8g.8xlarge per run — Linux, homogeneous
+physical cores, no VM layer. What that leaves: it is a virtualised
 single-tenant instance rather than bare metal, storage is EBS rather than local
 NVMe (deliberately over-provisioned and recorded in the profile), and AWS is a
 shared platform whose behaviour we do not control, only pin and disclose.
 
-Records from the retired macOS environment are still published in their own
-comparability group, labelled indicative, with the caveats they always carried
-— a hypervisor mapping vCPUs across heterogeneous cores produced run-to-run
-spread of 14.5%. They are historical: read the cloud environment's numbers
-instead, and see [the roadmap](./roadmap.md) for their planned removal.
+## The transform is measured, but it is a very small one
 
-## Tier B is measured, but it is a very small transform
-
-Nine of the current records are tier B — decode, flatten, filter, derive — and
-they are drawn beside the tier-A ones. What tier B is *not* is a hard test of
-transformation. It is two predicates, a coalesce, an integer division and an
+The workload's transform — decode, flatten, filter, derive — is not a hard test
+of transformation. It is two predicates, a coalesce, an integer division and an
 ASCII uppercase, all per-row and entirely stateless, so it separates systems on
-per-row compute cost and on nothing else. The work that actually distinguishes a
-stream processor from a pipe — windows, joins, keyed aggregation — is in neither
-tier, for the reason given above.
-
-Tier B also exists only for the two implemented systems, so today it compares
-Spate against Flink and nothing else.
+per-row compute cost and on nothing else. The work that actually distinguishes
+a stream processor from a pipe — windows, joins, keyed aggregation — is not in
+the workload, for the reason given above.
 
 ## Most systems are not here yet
 

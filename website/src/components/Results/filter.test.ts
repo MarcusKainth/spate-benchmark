@@ -23,7 +23,6 @@ import {compareLanes, niceCeil, visibleMax} from './filter.ts';
 // forbids naming a real entrant anywhere under `src/`, and it is right to: a rule
 // stated in terms of one system is a rule that has already stopped being general.
 const filter = (over = {}) => ({
-  tier: 'a',
   systems: new Set(['alpha', 'beta']),
   showUnranked: true,
   ...over,

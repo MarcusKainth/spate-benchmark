@@ -6,7 +6,7 @@ import java.util.List;
 
 /**
  * The pipeline logic the contract leaves to each arm: the fan-out's per-field
- * conversions and the tier-B derivations.
+ * conversions, the workload's filter constants and its derived columns.
  *
  * <p>{@code methodology/} rule 1 splits framework internals (which we may
  * not hand-write) from pipeline logic (which every arm writes). Everything in this
@@ -14,10 +14,10 @@ import java.util.List;
  */
 final class Rows {
 
-    /** The tier-B filter sentinel; {@code UNITS[3]} in the shared generator. */
+    /** The filter sentinel; {@code UNITS[3]} in the shared generator. */
     static final String DROP_UNIT = "drop";
 
-    /** The tier-B quality floor. */
+    /** The quality floor. */
     static final double QUALITY_FLOOR = 0.2d;
 
     private Rows() {}
@@ -32,7 +32,7 @@ final class Rows {
      * value types — a {@code Utf8} in there fails at checkpoint serialisation, not
      * at write time. So the conversion is required work, not avoidable overhead.
      *
-     * <p>A fresh list per row is deliberate: {@link FlattenTierA} re-uses the row
+     * <p>A fresh list per row is deliberate: {@link FlattenEvents} re-uses the row
      * object, and the sink retains whatever reference it is handed until the batch
      * flushes. A shared mutable list would corrupt buffered rows.
      */
@@ -50,7 +50,7 @@ final class Rows {
     }
 
     /**
-     * ASCII-only uppercase, the tier-B {@code name_upper} derivation.
+     * ASCII-only uppercase, the {@code name_upper} derivation.
      *
      * <p>Specified as ASCII-only precisely because {@code String.toUpperCase()} is
      * locale-dependent and {@code toUpperCase(Locale.ROOT)} is still Unicode-aware

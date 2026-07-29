@@ -78,7 +78,6 @@ named = ["spate-bench-flink-cp:/opt/flink/checkpoints"]
 # Flink's own vocabulary. Sending another arm's variable names would leave Flink
 # on its defaults while the record claimed knob values that were never applied.
 [env]
-TIER                    = "{{tier}}"
 TOPIC                   = "{{topic}}"
 GROUP_ID                = "{{group_id}}"
 STARTING_OFFSETS        = "{{offset_reset}}"
@@ -123,37 +122,13 @@ state, since the sink checkpoints its buffered entries, and on retained payload
 memory across every subtask.
 """
 
+# The connector's typed mode forces RowBinaryWithNamesAndTypes — the Java
+# client has no Native writer (clickhouse-java#2509) — so this is the one wire
+# format the arm can write, and the id says which.
 [[variants]]
-id       = "tier-a"
+id       = "rowbinary-nt"
 label    = "Flink 2.2.1 · RowBinary"
-tier     = "a"
 approach = "realistic"
 default  = true
-env      = { DESER = "shipped" }
 knobs    = { parallelism = 4, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
 reports  = { wire_format = "rowbinary_nt" }
-
-[[variants]]
-id       = "tier-b"
-label    = "Flink 2.2.1 · RowBinary · tier B"
-tier     = "b"
-approach = "realistic"
-env      = { DESER = "shipped" }
-knobs    = { parallelism = 4, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
-reports  = { wire_format = "rowbinary_nt" }
-
-# A secondary arm quantifying what Flink's shipped Avro deserializer costs.
-# `unshipped` is what makes the `stripped` label enforceable rather than
-# conventional: validation refuses any variant naming a non-shipped component
-# that is not labelled `stripped`. Its knobs are identical to `tier-a`'s, because
-# the arm exists to isolate one deserializer and any other difference would put a
-# second variable in the delta.
-[[variants]]
-id        = "tier-a-reusing"
-label     = "Flink 2.2.1 · reusing deserializer"
-tier      = "a"
-approach  = "stripped"
-unshipped = ["ReusingAvroDeserializationSchema"]
-env       = { DESER = "reusing" }
-knobs     = { parallelism = 4, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
-reports   = { wire_format = "rowbinary_nt" }

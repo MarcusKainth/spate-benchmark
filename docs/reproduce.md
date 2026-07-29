@@ -11,7 +11,7 @@ this site comes from anywhere else.
 ## What you need
 
 - Docker, with enough headroom for the infrastructure and one arm at a time.
-  The reference environment gives the Docker VM 18 CPUs and 72 GiB.
+  The environment profile in `environments/` declares the exact allocations.
 - A Rust toolchain. The version is pinned in `rust-toolchain.toml` and must match
   the arm image's base — a test asserts it, because codegen moves throughput and
   a silent divergence would make the recorded toolchain wrong.
@@ -32,7 +32,7 @@ bench run spate --mode sustained --rate 40000    # latency; has to be asked for
 ```
 
 `--dry-run` is worth using before any full sweep. It prints the exact execution
-list — one line per arm, with its entrant, variant, tier, wire format and knobs
+list — one line per arm, with its entrant, variant, wire format and knobs
 — which is how you check that "only Spate" really means only Spate before
 spending hours finding out. (Image digests are resolved and recorded per arm
 when a run actually executes, not in the dry-run.)
@@ -54,12 +54,11 @@ corrected in a commit of its own.
 
 That is useful and I would like to know. The most likely causes, in order:
 
-1. **A different environment.** These results are from a single macOS host with
-   heterogeneous cores. Add your own environment profile rather than comparing
-   across; the site will refuse to draw them on one axis, which is the intended
-   behaviour rather than an obstacle.
-2. **A busy machine.** Run-to-run spread reached 14.5% on throughput even on a
-   quiet host.
+1. **A different environment.** Add your own environment profile rather than
+   comparing across; the site will refuse to draw them on one axis, which is
+   the intended behaviour rather than an obstacle.
+2. **A busy machine.** Background load moves throughput materially, which is
+   why the site shows run-to-run spread on every chart.
 3. **A real defect in the harness.** Open an issue. A benchmark that cannot be
    reproduced is a claim, not evidence.
 

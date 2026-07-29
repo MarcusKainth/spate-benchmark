@@ -85,7 +85,7 @@ bench — the Spate Benchmark driver
   bench stale                    arms whose measurement has fallen behind
   bench prefill                  populate the topic once per corpus (do this first)
   bench ceiling [--measure [--write]] [--seconds N] [--threads N]
-                [--ingest-max N] [--only <format>[:<tier>]]...
+                [--ingest-max N] [--only <format>]...
                                  prove the infrastructure is not the bottleneck.
                                  Without --measure it reports the committed
                                  ceilings and refuses if they cannot be gated
@@ -111,10 +111,10 @@ bench — the Spate Benchmark driver
                                  writes into ceiling tables of its own rather
                                  than the tables the arms are gated on.
                                  --only narrows the ingest pass to one insert
-                                 format, or to one format at one tier, so that a
+                                 format, so that a
                                  SEARCH over infrastructure allocations can
-                                 measure the combination that actually binds
-                                 rather than all six. It changes which ceilings
+                                 measure the format that actually binds
+                                 rather than all three. It changes which ceilings
                                  are measured and never how. Writing a narrowed
                                  pass is refused when it would leave the rest of
                                  the file describing a different envelope.
@@ -156,7 +156,7 @@ selectors:
                                  image instead
 
   spate                          every variant of one system
-  spate:tier-a-rowbinary         one arm
+  spate:rowbinary                one arm
   '*'                            everything runnable
   flink@spate-bench-flink:2.3.0  a specific image — how a new version is measured
 
@@ -373,7 +373,7 @@ struct CeilingArgs {
     threads: u64,
     /// How far the ingest sweep may climb before it gives up and refuses.
     ingest_max: u64,
-    /// Which `(insert format, tier)` combinations the ingest pass measures, as
+    /// Which insert formats the ingest pass measures, as
     /// the operator typed them. Empty means all of them.
     ///
     /// Kept as raw strings here and resolved by [`ceiling::select_combinations`],

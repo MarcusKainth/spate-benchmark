@@ -52,14 +52,15 @@ names = 32
 # Distinct tag values.
 tags = 16
 
-# Units. Index 3 is the tier-B filter sentinel, so one unit in eight is dropped
-# by the transform.
+# Units. Index 3 is the transform's filter sentinel, so one unit in eight is
+# dropped by the transform.
 units = ["count", "bytes", "ms", "drop", "ratio", "celsius", "volts", "rpm"]
 
-# The unit value tier B filters out. Must appear in `units`; asserted at build.
+# The unit value the transform filters out. Must appear in `units`; asserted at
+# build.
 drop_unit = "drop"
 
-# Tier B drops rows whose `quality` is non-null and below this.
+# The transform drops rows whose `quality` is non-null and below this.
 quality_floor = 0.2
 
 # Base event timestamp, epoch milliseconds. Fixed rather than "now" so a

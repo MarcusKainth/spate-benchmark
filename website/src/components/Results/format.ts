@@ -117,31 +117,26 @@ export function fmtReps(m: {
 /**
  * An arm's label with the facts the row states elsewhere taken out of it.
  *
- * Descriptors label variants for a flat list — "Native · tier B", "Flink 2.2.1 ·
- * RowBinary" — because a descriptor cannot know where its arms will be drawn.
- * On a row inside a block whose header already names the tier, beside a line
- * that already carries the measured version, those parts of the label are the
- * same fact spelled a second time. `armLabel` already makes this argument for
- * the system name; this is the rest of it.
+ * A descriptor may repeat the released version in an arm's label —
+ * "Flink 2.2.1 · RowBinary" — because a descriptor cannot know where its arms
+ * will be drawn, and on a row whose meta line already carries the measured
+ * version that part of the label is the same fact spelled a second time.
+ * `armLabel` already makes this argument for the system name; this is the rest
+ * of it.
  *
- * Both removals are matched against what the ROW actually carries rather than
- * against a pattern, so a label cannot be mangled by coincidence:
- *
- *   tier      dropped only when it is this row's own tier
- *   version   dropped only when it is byte-identical to the version read out of
- *             the image that produced the number — and it is that measured one
- *             the meta line prints, not the descriptor's claim about itself
+ * The removal is matched against what the ROW actually carries rather than
+ * against a pattern, so a label cannot be mangled by coincidence: the version
+ * is dropped only when it is byte-identical to the one read out of the image
+ * that produced the number — and it is that measured one the meta line prints,
+ * not the descriptor's claim about itself.
  *
  * Falls back to the untouched label if stripping would leave nothing.
  */
 export function displayLabel(
   label: string,
-  row: {tier: string | null; version: string | null},
+  row: {version: string | null},
 ): string {
   let out = label;
-  if (row.tier) {
-    out = out.replace(new RegExp(`\\s*[·:—-]\\s*tier\\s+${row.tier}\\s*$`, 'i'), '');
-  }
   if (row.version) {
     const v = row.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     // Only as a whole token, so "2.2.1" never eats part of a longer number.

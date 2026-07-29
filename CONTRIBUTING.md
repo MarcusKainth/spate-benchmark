@@ -53,8 +53,8 @@ strict on purpose — unknown keys are an error, not something ignored:
   top, but it requires a `[[deviations]]` entry with `"envelope"` in `affects`.
 - `[guarantees]` — at-least-once, matched to a comparable durability interval.
   Turning fault tolerance off to go faster is not permitted.
-- `[[variants]]` — one per published arm. Each needs `tier` (`a` or `b`), an
-  `approach` (`realistic` / `tuned` / `stripped`), and `reports.wire_format`,
+- `[[variants]]` — one per published arm. Each needs an `approach`
+  (`realistic` / `tuned` / `stripped`) and `reports.wire_format`,
   because Native, RowBinary and JSONEachRow are not the same server-side work.
   Exactly one variant is `default` and it must be `realistic`.
 
@@ -77,8 +77,10 @@ their own, and never bundled with an implementation that depends on them.
 retention is not a matter of anyone remembering. A number later found to be wrong
 is corrected by the maintainer in a commit of its own, so what changed and why is
 in the repository's history rather than in a marker every reader has to step over.
+Retiring an environment is the same discipline: its records and its profile are
+removed in a commit of its own, and the repository's history is the archive.
 
-Measurements are produced on the reference environment, because a number is only
+Measurements are produced on the authoritative environment, because a number is only
 comparable to the others if it came off the same hardware under the same
 protocol. So a PR changes configuration, code and documentation; the
 re-measurement happens after it merges, and the resulting records arrive as a

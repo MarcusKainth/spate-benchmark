@@ -43,19 +43,6 @@ entirely — and it is rentable by anyone, which is the point: the environment i
 reproducible with an AWS account and this repository, not with access to our
 hardware.
 
-## `m5max-mbp-docker` — retired
-
-The original reference environment: an Apple M5 Max MacBook Pro running arms
-under Docker Desktop's Linux VM. Retired as a measurement environment when the
-cloud pipeline landed, for the reasons its profile always carried — a
-hypervisor mapping VM vCPUs across heterogeneous cores non-deterministically
-(run-to-run spread reached **14.5%**), and a JVM-under-VM that was not a JVM on
-Linux. Its records and profile remain in the repository, in their own
-comparability group as always; the site never drew, and never will draw, two
-environments on one axis. Removing its numbers entirely is
-[a planned follow-up](roadmap.md) gated on amending the append-only guarantee
-first.
-
 ## The envelope
 
 **Per system: 4 CPUs and 16 GiB of data plane.** A control plane — a Flink

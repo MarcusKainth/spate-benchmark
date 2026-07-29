@@ -156,8 +156,8 @@ fn main() {
         })
         .collect();
 
-    // The tier-B filter sentinel has to be a unit that actually occurs, or the
-    // transform is a no-op and tier B silently stops testing anything.
+    // The filter sentinel has to be a unit that actually occurs, or the
+    // transform is a no-op and the filter silently stops testing anything.
     assert!(
         units.iter().any(|u| u == &drop_unit),
         "workload.toml: drop_unit {drop_unit:?} is not present in units {units:?}"
@@ -194,18 +194,18 @@ fn main() {
     writeln!(out, "pub const NAMES: u64 = {names};").unwrap();
     writeln!(out, "/// Distinct tag values.").unwrap();
     writeln!(out, "pub const TAGS: u64 = {tags};").unwrap();
-    writeln!(out, "/// Units; one of them is the tier-B filter sentinel.").unwrap();
+    writeln!(out, "/// Units; one of them is the filter sentinel.").unwrap();
     writeln!(
         out,
         "pub const UNITS: [&str; {}] = [{unit_list}];",
         units.len()
     )
     .unwrap();
-    writeln!(out, "/// The unit value tier B filters out.").unwrap();
+    writeln!(out, "/// The unit value the transform filters out.").unwrap();
     writeln!(out, "pub const DROP_UNIT: &str = {drop_unit:?};").unwrap();
     writeln!(
         out,
-        "/// Tier B drops rows whose `quality` is non-null and below this."
+        "/// The transform drops rows whose `quality` is non-null and below this."
     )
     .unwrap();
     writeln!(out, "pub const QUALITY_FLOOR: f64 = {quality_floor:?};").unwrap();

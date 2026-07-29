@@ -32,8 +32,8 @@ for seq in 0..100:
 therefore the loss gate and `count() - uniqExact(...)` the duplicate count — both
 exact, and both taken over a **bounded window** rather than the whole corpus. The
 window is the top 100,000 batches of the landed range, which against the published
-1,500,000-batch corpus is 6.7% of it, about ten million rows before tier-B
-filtering.
+1,500,000-batch corpus is 6.7% of it, about ten million rows before the
+workload's filters.
 
 The bound is not a convenience. Exact-distinct needs a hash set proportional to
 cardinality, and running it across the full 150M-row corpus asked ClickHouse for
@@ -81,14 +81,9 @@ quietly averaging them.
 | `dataset_version` | The corpus changes. Derived — from the parsed values of `workload.toml`, the bytes of the Avro schema, the normalised DDL, and the marked generator region of `harness/src/corpus.rs` — so it moves when the generator's *arithmetic* changes and not when a comment does. It cannot be forgotten. | Whole result set split |
 | `env_id` | Different hardware or a different infrastructure envelope. | Comparable only within an environment |
 
-Two further axes are never drawn together, and they are properties of the
-experiment rather than of the protocol, so they do not version the archive — the
-site simply refuses to put them on one scale.
-
-**Tier.** A tier-B arm decodes the same messages but drops the `drop` unit and
-the low-quality rows, emits 73.5% as many rows, computes two derived columns and
-writes to a different table. Ranking rows/s across tiers compares two different
-amounts of work.
+One further axis is never drawn on one scale, and it is a property of the
+experiment rather than of the protocol, so it does not version the archive — the
+site simply refuses to combine it.
 
 **Mode.** `rows_per_s` means "how fast can this go" in drain and "the rate we
 asked for" in sustained, so two arms of entirely different capacity report the
@@ -110,8 +105,7 @@ asserts it stays in step with the constant in `harness/src/report.rs`.
 
 | Version | Date | Change |
 |---|---|---|
-| 1 | 2026-07-25 | Initial protocol. Full-drain throughput, 1 Hz cgroup sampling, quiesce-then-gate correctness checks, 70%-of-ceiling headroom limit, envelope read back from cgroups. |
-| 2 | 2026-07-25 | **One measurement window** — throughput, mean cores and CPU-per-row all divide by the sampler's own window rather than by a driver clock that also included teardown. **Headroom gated per tier and against both ceilings**, with a ceiling measured at the wrong message size or under a different infrastructure envelope refused rather than extrapolated. **Gate set extended** past row count to cover every derived column. **Sustained mode and latency** implemented. **Peak memory is what an arm held at one instant** across its containers rather than the sum of their separate peaks. Server-side cost, GC pauses and JVM heap measured for the first time. |
+| 1 | 2026-07-29 | Initial protocol. One measurement window — throughput, mean cores and CPU-per-row divide by the sampler's own window. Headroom gated against both ceilings, with a ceiling measured at the wrong message size or under a different infrastructure envelope refused rather than extrapolated. Gate set covers row count and every derived column. Sustained mode and latency. Peak memory is what an arm held at one instant across its containers. Server-side cost, GC pauses and JVM heap measured. |
 
 What each change was and why is in the commit that made it; this table exists to
 say which records may be drawn on one axis.
@@ -143,7 +137,9 @@ where the driver reads it, and is then measured again cleanly as a published run
 
 A run later found to be wrong is corrected by editing the archive in a commit of
 its own, so what changed and why is in the repository's history rather than in a
-marker every reader has to step over.
+marker every reader has to step over. Retiring an environment is the same
+discipline: its records and its profile are removed in a commit of its own, and
+the repository's history is the archive.
 
 Re-running one system does not touch any other system's results. Records are
 partitioned by `results/<env_id>/<entrant>/<YYYY-MM>.jsonl`, so a partial re-run
@@ -158,13 +154,8 @@ between the harness and the kernel. Its environment profile declares
 launch pipeline are committed in this repository, so the environment is
 reproducible with an AWS account rather than with access to anyone's hardware.
 
-The earlier records were produced on Docker Desktop for macOS on Apple Silicon:
-a Linux VM, arm64, with 6 performance and 12 efficiency cores that the
-hypervisor maps to VM vCPUs non-deterministically — a JVM there is not a JVM on
-Linux. Those records remain published under their own environment id with
-`class = "indicative"`, and the site renders that caveat from the field —
-prominently and in its own right rather than in a footnote. It shows run-to-run
-spread on every chart, and carries full environment provenance in every record,
-which is exactly what made the cloud environment an added dataset rather than a
-rewrite. Environments are never drawn on one axis; the retired environment's
-numbers are historical, not comparable to the authoritative ones.
+The site shows run-to-run spread on every chart and carries full environment
+provenance in every record. Environments are never drawn on one axis: results
+from any other hardware live under their own environment id, in their own
+comparability group, with that environment's declared class rendered beside
+them.

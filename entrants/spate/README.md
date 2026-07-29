@@ -6,9 +6,7 @@ this file records only what is specific to Spate.
 
 Delivery is **at-least-once**, with offsets committed every 5 s and never past
 unacknowledged data. Two wire formats are published — `native` and `rowbinary` —
-because they are not the same amount of server-side work, and two decode paths,
-because rule 1 requires the same treatment of our own shipped APIs that we give
-everyone else's.
+because they are not the same amount of server-side work.
 
 **This is the vendor's own entrant.** Everything below is written to be attacked.
 If a competitor's arm is tuned worse than this one, that is a bug in the benchmark
@@ -67,9 +65,8 @@ bench run spate --reps 3
 ```
 
 One container, the full 4 CPU / 16 GiB data-plane envelope, no control plane.
-`FORMAT` selects `native` or `rowbinary`, `DESER` selects `value` or `typed`, and
-`TIER` selects `a` or `b`; the five knobs above arrive as `THREADS`, `SHARDS`,
-`INFLIGHT`, `LINGER_MS` and `MAX_ROWS`.
+`FORMAT` selects `native` or `rowbinary`; the five knobs above arrive as
+`THREADS`, `SHARDS`, `INFLIGHT`, `LINGER_MS` and `MAX_ROWS`.
 
 ## Versions
 
@@ -95,18 +92,13 @@ the recorded toolchain wrong.
   chosen by someone else would be a stronger test, which is why the corpus, the
   DDL and the rules are all committed rather than described.
 - **`native` is not like-for-like with Flink.** It is what a real deployment runs,
-  so it is published — but the arm to read against Flink is `tier-a-rowbinary`,
+  so it is published — but the arm to read against Flink is `rowbinary`,
   because ClickHouse's official Flink connector can only write
   `RowBinaryWithNamesAndTypes`. The gap between the two is server-side rather than
   in our encoder: client CPU per row is near enough equal, while ClickHouse's own
   cost differs by more than 3×. Presenting Native against Flink would be claiming
   credit for a gap in the Java client.
-- **The typed decode path is published even though it loses.** `build_serde` is
-  the ergonomic shipped deserializer and our own documentation notes that it
-  decodes each record twice — "choose it for the clean typed API, not for
-  throughput". Rule 1 requires the same treatment of our own shipped APIs that we
-  give everyone else's, so both are shown.
-- **`tier-a-rowbinary` sits closest to the headroom limit.** Above 70% of the
+- **`rowbinary` sits closest to the headroom limit.** Above 70% of the
   measured ingest ceiling a number describes ClickHouse rather than the framework,
   and the harness records such a run as `infra_bound` rather than publishing it.
   Pinning that variant to a slower configuration to duck the gate would be tuning
@@ -115,16 +107,16 @@ the recorded toolchain wrong.
 
 ## What this arm shares with the harness, and what it must not
 
-The Avro decode is shared: `SensorBatch` comes from the harness, because the
-schema is the wire contract every arm reads off the same registry, and the Flink
-arm parses the same committed `.avsc`. Sharing a decoder for it shares nothing an
-arm is supposed to write.
+The wire contract is shared, and only the wire contract: every arm decodes the
+registry-served `sensor_batch.avsc`, the one schema committed in
+`workload/schema/`, and the Flink arm parses that same `.avsc`. A schema is not
+the transform, and sharing it shares nothing an arm is supposed to write.
 
-**The transform is not shared.** The tier-B filter, the ASCII uppercase, the
+**The transform is not shared.** The filter, the ASCII uppercase, the
 scaled-value arithmetic and both constants are restated here rather than imported
 from `spate_benchmark_harness::corpus` — the module that computes the closed-form
 expectations the correctness gate holds every arm to. Were they imported, this arm
 and the marking scheme could not disagree by construction, while the Flink arm,
 which reimplements all of it in Java, could.
-`harness/tests/each_arm_restates_the_transform.rs` fails if that import returns or
-if either arm's constants drift from `workload/workload.toml`.
+`harness/tests/each_arm_restates_the_transform.rs` fails if such an import
+appears or if either arm's constants drift from `workload/workload.toml`.

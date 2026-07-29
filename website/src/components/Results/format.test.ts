@@ -90,31 +90,25 @@ test('repetitions that agreed say so, rather than reporting a range at zero', ()
 // ---------------------------------------------------------------------------
 
 test('a label drops only the facts its own row states elsewhere', () => {
-  // The tier, when the block header already names it.
-  assert.equal(displayLabel('Native · tier B', {tier: 'b', version: null}), 'Native');
-  assert.equal(displayLabel('RowBinary · tier B', {tier: 'b', version: '0.1.0'}), 'RowBinary');
   // The version, when the descriptor repeated into the label what the meta line
   // prints from the image that actually produced the number.
-  assert.equal(displayLabel('2.2.1 · RowBinary', {tier: 'a', version: '2.2.1'}), 'RowBinary');
-  assert.equal(
-    displayLabel('2.2.1 · RowBinary · tier B', {tier: 'b', version: '2.2.1'}),
-    'RowBinary',
-  );
+  assert.equal(displayLabel('2.2.1 · RowBinary', {version: '2.2.1'}), 'RowBinary');
+  assert.equal(displayLabel('Native 0.1.0', {version: '0.1.0'}), 'Native');
 });
 
 test('label de-duplication never fires on a coincidence', () => {
-  // Not this row's tier.
-  assert.equal(displayLabel('Native · tier B', {tier: 'a', version: null}), 'Native · tier B');
   // Not the version this row measured.
   assert.equal(
-    displayLabel('2.2.1 · RowBinary', {tier: 'a', version: '2.3.0'}),
+    displayLabel('2.2.1 · RowBinary', {version: '2.3.0'}),
     '2.2.1 · RowBinary',
   );
+  // A label with no version at all is left alone.
+  assert.equal(displayLabel('Native', {version: null}), 'Native');
   // A longer number that merely begins with the version.
   assert.equal(
-    displayLabel('2.2.15 · RowBinary', {tier: 'a', version: '2.2.1'}),
+    displayLabel('2.2.15 · RowBinary', {version: '2.2.1'}),
     '2.2.15 · RowBinary',
   );
   // Stripping everything falls back to the label rather than rendering blank.
-  assert.equal(displayLabel('2.2.1', {tier: 'a', version: '2.2.1'}), '2.2.1');
+  assert.equal(displayLabel('2.2.1', {version: '2.2.1'}), '2.2.1');
 });

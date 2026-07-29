@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! spate                          every variant of one entrant
-//! spate:tier-a-rowbinary         one variant
+//! spate:rowbinary                one variant
 //! *                              every active entrant
 //! flink@spate-bench-flink:2.3.0  a specific image, e.g. a new version of an entrant
 //! ```
@@ -148,7 +148,7 @@ pub struct Arm<'a> {
 ///
 /// If a selector names an entrant or variant that does not exist, or matches
 /// nothing. A selector that matches nothing is an error rather than a no-op:
-/// `bench run spate:tier-a-natve` is a typo, and quietly running zero arms would
+/// `bench run spate:natve` is a typo, and quietly running zero arms would
 /// look like success.
 pub fn expand<'a>(entrants: &'a [Entrant], selectors: &[Selector]) -> Result<Vec<Arm<'a>>, String> {
     let mut out: Vec<Arm<'a>> = Vec::new();
@@ -206,9 +206,9 @@ mod tests {
 
     #[test]
     fn parses_the_two_positions() {
-        let s = Selector::parse("spate:tier-a").expect("parses");
+        let s = Selector::parse("spate:rowbinary").expect("parses");
         assert_eq!(s.entrant, "spate");
-        assert_eq!(s.variant, "tier-a");
+        assert_eq!(s.variant, "rowbinary");
         assert_eq!(s.image, None);
     }
 
@@ -260,8 +260,8 @@ mod tests {
     fn an_image_tag_may_still_carry_a_colon() {
         // The rejection of a third component must not reach inside the image
         // override, which is where a version legitimately appears.
-        let s = Selector::parse("flink:tier-a@spate-bench-flink:2.3.0").expect("parses");
-        assert_eq!(s.variant, "tier-a");
+        let s = Selector::parse("flink:rowbinary-nt@spate-bench-flink:2.3.0").expect("parses");
+        assert_eq!(s.variant, "rowbinary-nt");
         assert_eq!(s.image.as_deref(), Some("spate-bench-flink:2.3.0"));
     }
 
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn display_round_trips_through_parse() {
-        for raw in ["spate:tier-a", "*:*", "flink@img:1.2"] {
+        for raw in ["spate:native", "*:*", "flink@img:1.2"] {
             let s = Selector::parse(raw).expect("parses");
             let again = Selector::parse(&s.to_string()).expect("reparses");
             assert_eq!(s, again, "{raw}");

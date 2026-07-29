@@ -51,7 +51,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// numbers?" is a judgement; a content hash would answer yes to every typo fix
 /// and shatter every comparability group in the archive. `methodology/`
 /// carries a row per version and CI asserts the two stay in step.
-pub const HARNESS_VERSION: u32 = 2;
+pub const HARNESS_VERSION: u32 = 1;
 
 /// Version of the **corpus**: the Avro schema, the ClickHouse DDL, and the
 /// generator constants.
@@ -201,8 +201,8 @@ pub enum Flag {
     /// applies to this arm's insert format.
     ///
     /// Both halves matter, and the second was added when the ClickHouse ingest
-    /// ceiling arrived. That ceiling is measured **per insert format and per
-    /// tier**, because Native, RowBinary and `JSONEachRow` are not the same
+    /// ceiling arrived. That ceiling is measured **per insert
+    /// format**, because Native, RowBinary and `JSONEachRow` are not the same
     /// amount of server-side work; an arm whose format has no measured figure is
     /// therefore deliberately not gated against the target at all rather than
     /// gated against another format's number. See `crate::ceiling`.
@@ -454,7 +454,7 @@ pub struct Infra {
     ///
     /// Per **arm** rather than per run, unlike every other field on this type,
     /// and the exception is forced by what the ceiling is: it is measured per
-    /// insert format and per tier, so a single figure for the whole sweep would
+    /// insert format, so a single figure for the whole sweep would
     /// gate every arm against work it does not do — and would err leniently for
     /// exactly the arms whose format is cheapest server-side. `crate::infra`
     /// therefore leaves this zero, because bringing infrastructure up happens
@@ -702,7 +702,7 @@ mod tests {
     fn sut() -> Sut {
         Sut {
             entrant: "spate".to_owned(),
-            variant_id: "tier-a-native".to_owned(),
+            variant_id: "native".to_owned(),
             version: Some("0.1.0-dev".to_owned()),
             commit: Some("6f28a8b8912e".to_owned()),
             image_digest: format!("sha256:{}", "a".repeat(64)),
@@ -737,7 +737,7 @@ mod tests {
             Kind::Measurement,
             Status::Ok,
             sut(),
-            RunMeta::new("mac-m5max", "deadbeef", Trigger::Manual, infra()),
+            RunMeta::new("test-env", "deadbeef", Trigger::Manual, infra()),
         )
     }
 
@@ -745,7 +745,6 @@ mod tests {
     fn round_trips_through_json_on_one_line() {
         let rep = report()
             .rep(2, 3)
-            .variant("tier", "a")
             .variant("format", "native")
             .metric("rows_per_s", Metric::maximize(4_383_663.0, "records/s"))
             .metric("cpu_us_per_row", Metric::minimize(0.6187, "us").with_n(3))

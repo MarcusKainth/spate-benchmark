@@ -9,8 +9,9 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 /**
- * Tier B: tier A plus the specified filters and derivations, in the specified
- * order.
+ * The workload's flatten: one {@code SensorBatch} message becomes one row per
+ * surviving event, with the specified filters and derivations applied in the
+ * specified order.
  *
  * <ol>
  *   <li>drop rows where {@code unit = 'drop'}</li>
@@ -24,31 +25,38 @@ import java.util.List;
  * one string compare and one unbox rather than a full row build. That ordering is
  * also what the contract specifies, so it is not a liberty taken for speed.
  */
-public final class FlattenTierB extends RichFlatMapFunction<GenericRecord, SensorRowT> {
+public final class FlattenEvents extends RichFlatMapFunction<GenericRecord, SensorRow> {
 
     private static final long serialVersionUID = 1L;
 
     private final String schemaJson;
 
-    private transient SensorRowT row;
+    /**
+     * Re-used across the fan-out; see {@link SensorRow} for why that is safe.
+     * Transient because it is per-subtask state, created in {@link #open}.
+     */
+    private transient SensorRow row;
 
-    public FlattenTierB(String schemaJson) {
+    public FlattenEvents(String schemaJson) {
         this.schemaJson = schemaJson;
     }
 
     @Override
     public void open(OpenContext openContext) {
         SensorBatchSchema.assertFieldOrder(SensorBatchSchema.parse(schemaJson));
-        row = new SensorRowT();
+        row = new SensorRow();
     }
 
     @Override
-    public void flatMap(GenericRecord batch, Collector<SensorRowT> out) {
+    public void flatMap(GenericRecord batch, Collector<SensorRow> out) {
         long batchId = (Long) batch.get(SensorBatchSchema.BATCH_ID);
         String sensor = batch.get(SensorBatchSchema.SENSOR).toString();
         Object regionRaw = batch.get(SensorBatchSchema.REGION);
         String region = regionRaw == null ? "" : regionRaw.toString();
 
+        // Hoisted out of the event loop: both timestamps are per-message, so one
+        // LocalDateTime pair is shared by all rows of the batch. LocalDateTime is
+        // immutable, so sharing it across buffered payloads is safe.
         LocalDateTime batchTs =
                 SensorBatchSchema.fromEpochMillis((Long) batch.get(SensorBatchSchema.BATCH_TS_MS));
         LocalDateTime sendTs =
@@ -70,7 +78,7 @@ public final class FlattenTierB extends RichFlatMapFunction<GenericRecord, Senso
             int seq = (Integer) ev.get(SensorBatchSchema.EV_SEQ);
             long value = (Long) ev.get(SensorBatchSchema.EV_VALUE);
 
-            SensorRowT r = row;
+            SensorRow r = row;
             r.batchId = batchId;
             r.eventSeq = seq;
             r.sensor = sensor;

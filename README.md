@@ -62,11 +62,12 @@ system does not re-run or overwrite any other.
 
 ## Current state
 
-Measurements today come from a single macOS host (Docker Desktop, Apple Silicon,
-heterogeneous cores). They are labelled **indicative, not authoritative**, and
-that label is rendered from the environment's declared class, so it will
-disappear on its own when a bare-metal Linux environment is added rather than
-having to be remembered.
+Measurements are produced on `c8g-8xl-ec2-docker`: a fresh, single-tenant EC2
+c8g.8xlarge per run — Linux, 32 homogeneous physical cores, no SMT, no VM
+between the harness and the kernel — launched by an approval-gated pipeline and
+terminated when the run ends. Its profile declares `class = "authoritative"`,
+and that label is rendered from the environment's declared class rather than
+hardcoded anywhere in the site.
 
 ## Repository layout
 
