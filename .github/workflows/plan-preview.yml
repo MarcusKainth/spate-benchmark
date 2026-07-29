@@ -1,0 +1,172 @@
+# Public, credential-free preview of what a change would benchmark. This runs on
+# a push to main that could move a published number and prints the exact arm
+# list to its own run summary — so the proposal is visible in the open even
+# though the launcher itself lives in the private ops repo and holds the AWS
+# credentials.
+#
+# This workflow launches nothing, holds no secret, and touches no cloud. The
+# private ops poller runs the identical script against the identical SHA, so the
+# plan shown here is the plan that gets proposed; approval and the actual spend
+# happen privately, behind the ops repo's aws-bench gate.
+
+name: Plan preview
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "harness/**"
+      - "workload/**"
+      - "entrants/**"
+      - "environments/**"
+      - "rust-toolchain.toml"
+      - "Cargo.lock"
+      - ".github/aws/**"
+  workflow_dispatch:
+    inputs:
+      selector:
+        description: "bench selector ('*', 'spate', 'flink:tier-a', ...)"
+        default: "*"
+      env_id:
+        description: Environment profile to preview against
+        default: c8g-8xl-ec2-docker
+      reps:
+        description: Repetitions per arm (3 is the methodology's floor)
+        default: "3"
+      mode:
+        description: "'run' or 'ceiling-bootstrap'"
+        type: choice
+        options: [run, ceiling-bootstrap]
+        default: run
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plan-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preview:
+    name: Preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The push path diffs before..after to decide what a change
+          # invalidates — the same logic the private poller runs.
+          fetch-depth: 0
+
+      - name: Decide what would be proposed
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          SELECTOR: ${{ inputs.selector }}
+          ENV_ID: ${{ inputs.env_id }}
+          REPS: ${{ inputs.reps }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            selector=$SELECTOR
+            env_id=$ENV_ID
+            reps=$REPS
+            mode=$MODE
+          else
+            before=$EVENT_BEFORE
+            case "$before" in
+              ""|0000000000000000000000000000000000000000) before="${GITHUB_SHA}~1" ;;
+            esac
+            if git rev-parse --verify --quiet "$before^{commit}" >/dev/null; then
+              # Parse the two known keys directly rather than eval-ing stdout.
+              proposal=$(.github/scripts/affected-entrants.sh "$before" "$GITHUB_SHA")
+              selector=$(printf '%s\n' "$proposal" | sed -n 's/^selector=//p')
+            else
+              echo "::warning::cannot resolve $before; nothing to preview"
+              selector=""
+            fi
+            env_id=c8g-8xl-ec2-docker
+            reps=3
+            mode=run
+          fi
+          # Constrain the free-text fields, matching the launcher, so the preview
+          # fails the same way a bad input would rather than mislead.
+          if [ -n "$selector" ] && printf '%s' "$selector" | LC_ALL=C grep -q '[^A-Za-z0-9 :*_-]'; then
+            echo "::error::selector has unexpected characters"; exit 1
+          fi
+          if printf '%s' "$env_id" | LC_ALL=C grep -q '[^A-Za-z0-9._-]'; then
+            echo "::error::env_id has unexpected characters"; exit 1
+          fi
+          case "$reps" in
+            ''|*[!0-9]*) echo "::error::reps must be a positive integer"; exit 1 ;;
+          esac
+          if [ -n "$selector" ] && [ ! -f "environments/$env_id.toml" ]; then
+            echo "::warning::environment $env_id has no profile yet; nothing to preview"
+            selector=""
+          fi
+          {
+            echo "selector=$selector"
+            echo "env_id=$env_id"
+            echo "reps=$reps"
+            echo "mode=$mode"
+          } >> "$GITHUB_OUTPUT"
+          if [ -z "$selector" ]; then
+            echo "This change moves no published number; nothing would be proposed." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Install the pinned toolchain
+        if: steps.decide.outputs.mode == 'run' && steps.decide.outputs.selector != ''
+        run: rustup show active-toolchain || rustup show
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.decide.outputs.mode == 'run' && steps.decide.outputs.selector != ''
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Print the plan that would be proposed
+        if: steps.decide.outputs.selector != ''
+        env:
+          SELECTOR: ${{ steps.decide.outputs.selector }}
+          ENV_ID: ${{ steps.decide.outputs.env_id }}
+          MODE: ${{ steps.decide.outputs.mode }}
+          REPS: ${{ steps.decide.outputs.reps }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Preview: this change would propose a benchmark run"
+            echo
+            echo "_Preview only — no run is launched here. The private ops pipeline"
+            echo "runs the same plan and waits for maintainer approval before spending._"
+            echo
+            echo '| | |'
+            echo '|---|---|'
+            echo "| mode | \`$MODE\` |"
+            echo "| selector | \`$SELECTOR\` |"
+            echo "| environment | \`$ENV_ID\` |"
+            echo "| reps | $REPS |"
+            echo "| sha | \`$GITHUB_SHA\` |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = run ]; then
+            read -ra sel <<< "$SELECTOR"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- \
+              run "${sel[@]}" --dry-run --env "$ENV_ID" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_Ceiling bootstrap: would measure and write environments/ceilings/$ENV_ID.json._" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -6,3 +6,11 @@
 # review queue rather than sitting unnoticed.
 
 * @MarcusKainth
+
+# Explicit, though the wildcard already covers them: the workflows are where a
+# subtle diff can move a trust boundary, and deserve to be named as such. NOTE:
+# "require review from Code Owners" must stay off in branch protection — an
+# author cannot approve their own PR, so with a single maintainer it would block
+# every merge. (The AWS footprint and the launcher/collector live in the private
+# benchmark-ops repo, not here.)
+/.github/ @MarcusKainth
