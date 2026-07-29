@@ -512,7 +512,16 @@ fn cmd_ceiling(root: &Path, args: &[String]) -> Result<(), String> {
         },
     )?;
 
-    let mut ceilings = env.ceilings()?;
+    // A first bootstrap has no committed ceilings file to merge into —
+    // creating it is the point of the pass. Only the missing-file case starts
+    // empty: a file that exists but does not parse is still an error, because
+    // masking corruption here would let the merge silently discard measured
+    // ceilings.
+    let mut ceilings = if env.ceilings_path().exists() {
+        env.ceilings()?
+    } else {
+        ceiling::Ceilings::default()
+    };
     ceilings.merge(pass);
     let gate = ceilings.gate(ceiling::corpus_message_bytes(), &env.infra_digest());
     println!(
