@@ -170,10 +170,14 @@ results file."
 /// ran once instead of three times would produce a result whose repetition count
 /// nobody questioned.
 fn opts_from(args: &[String], root: &Path) -> Result<RunOptions, String> {
+    // Resolved AFTER the flags: `default_env` refuses to guess when several
+    // environments exist, and that refusal must not fire on an invocation that
+    // named one with `--env`.
+    let mut env_id: Option<String> = None;
     let mut o = RunOptions {
         reps: 3,
         mode: Mode::Drain,
-        env_id: default_env(root)?,
+        env_id: String::new(),
         trigger: Trigger::Manual,
         dry_run: false,
         fresh_infra: false,
@@ -203,7 +207,7 @@ fn opts_from(args: &[String], root: &Path) -> Result<RunOptions, String> {
         };
         match a.as_str() {
             "--reps" => o.reps = value()?.parse().map_err(|e| format!("--reps: {e}"))?,
-            "--env" => o.env_id = value()?,
+            "--env" => env_id = Some(value()?),
             "--topic" => o.topic = value()?,
             "--batches" => o.batches = value()?.parse().map_err(|e| format!("--batches: {e}"))?,
             "--trigger" => {
@@ -310,6 +314,11 @@ fn opts_from(args: &[String], root: &Path) -> Result<RunOptions, String> {
             format!("{:?}", o.trigger).to_lowercase(),
         ));
     }
+
+    o.env_id = match env_id {
+        Some(id) => id,
+        None => default_env(root)?,
+    };
     Ok(o)
 }
 
@@ -503,7 +512,16 @@ fn cmd_ceiling(root: &Path, args: &[String]) -> Result<(), String> {
         },
     )?;
 
-    let mut ceilings = env.ceilings()?;
+    // A first bootstrap has no committed ceilings file to merge into —
+    // creating it is the point of the pass. Only the missing-file case starts
+    // empty: a file that exists but does not parse is still an error, because
+    // masking corruption here would let the merge silently discard measured
+    // ceilings.
+    let mut ceilings = if env.ceilings_path().exists() {
+        env.ceilings()?
+    } else {
+        ceiling::Ceilings::default()
+    };
     ceilings.merge(pass);
     let gate = ceilings.gate(ceiling::corpus_message_bytes(), &env.infra_digest());
     println!(

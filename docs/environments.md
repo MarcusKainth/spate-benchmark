@@ -13,30 +13,48 @@ machines and tells a reader nothing they can reproduce against. Each record also
 carries a digest of the profile, so editing it later cannot retroactively
 re-describe runs that already happened.
 
-## `m5max-mbp-docker` — the reference environment
+## `c8g-8xl-ec2-docker` — the environment
 
-**Class: indicative.** Not authoritative, and the site renders that caveat from
-this field rather than from a string match on the operating system — so when a
-bare-metal environment is added, the banner disappears on its own rather than
-having to be remembered.
+**Class: authoritative.** A fresh machine per run, launched by
+[the pipeline in this repository](reproduce.md#reproducing-the-cloud-environment)
+and terminated when the run ends, so no state survives between measurements.
 
 | | |
 |---|---|
-| Host | Apple MacBook Pro, M5 Max |
-| CPU | 18 cores — 6 performance + 12 efficiency |
-| Memory | 128 GiB, with 72 GiB given to the Docker VM |
-| OS | macOS, Docker Desktop Linux VM, arm64 |
+| Host | AWS EC2 c8g.8xlarge, on-demand |
+| CPU | Graviton4 — 32 physical cores, homogeneous, no SMT |
+| Memory | 64 GiB |
+| Storage | EBS gp3 500 GiB, provisioned at 10,000 IOPS / 1,000 MiB/s |
+| OS | Ubuntu 24.04, Docker CE, arm64 |
 
-### Why it is labelled indicative
+### Why it earns the class
 
-Docker Desktop runs a Linux VM. A JVM inside it on arm64 is not a JVM on Linux
-bare metal, and no arm here should be read as one.
+Every vCPU is a dedicated physical core: Graviton has no simultaneous
+multithreading and the Nitro hypervisor does not oversubscribe, so a cgroup CPU
+cap means what it says. Docker here is Docker CE on Linux — containers are plain
+cgroups, the same mechanism the envelope enforcement and the sampler read, with
+no VM between the harness and the kernel. A JVM on this box **is** a JVM on
+Linux. The storage is deliberately over-provisioned so the disk is headroom
+rather than a variable, and its exact provisioning is part of the committed
+profile: changing it would change what is being measured.
 
-The cores are heterogeneous and the hypervisor maps VM vCPUs across performance
-and efficiency cores non-deterministically. `--cpuset-cpus` would pin to VM
-vCPUs, not physical cores, so it does not help. This is an irreducible variance
-source: run-to-run spread reached **14.5%** on throughput, which is why three
-repetitions is the floor rather than a nicety and why every chart shows spread.
+It is not bare metal — a `*.metal` instance would remove the hypervisor
+entirely — and it is rentable by anyone, which is the point: the environment is
+reproducible with an AWS account and this repository, not with access to our
+hardware.
+
+## `m5max-mbp-docker` — retired
+
+The original reference environment: an Apple M5 Max MacBook Pro running arms
+under Docker Desktop's Linux VM. Retired as a measurement environment when the
+cloud pipeline landed, for the reasons its profile always carried — a
+hypervisor mapping VM vCPUs across heterogeneous cores non-deterministically
+(run-to-run spread reached **14.5%**), and a JVM-under-VM that was not a JVM on
+Linux. Its records and profile remain in the repository, in their own
+comparability group as always; the site never drew, and never will draw, two
+environments on one axis. Removing its numbers entirely is
+[a planned follow-up](roadmap.md) gated on amending the append-only guarantee
+first.
 
 ## The envelope
 

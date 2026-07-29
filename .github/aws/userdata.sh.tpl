@@ -34,6 +34,10 @@ export MODE='${MODE}'
 export BUCKET='${BUCKET}'
 export TTL_HOURS='${TTL_HOURS}'
 export AWS_DEFAULT_REGION='${AWS_REGION}'
+# cloud-init runs user-data with HOME unset. rustup's env file, cargo and the
+# docker CLI all dereference it, and run-bench.sh runs under `set -u` — an
+# unset HOME aborts the payload one step after install-rust.
+export HOME=/root
 
 finish() {
   status=$?
