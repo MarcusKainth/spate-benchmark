@@ -219,8 +219,12 @@ impl Sampler {
     /// As [`start`](Self::start).
     #[must_use]
     pub fn start_named(target: &str, interval_s: f64, sampler_name: &str) -> Self {
+        // The sampler receives the container ID, not a cgroup path: where the
+        // cgroup lives depends on the daemon's cgroup driver (cgroupfs puts it
+        // at docker/<id>, systemd at system.slice/docker-<id>.scope), and only
+        // the sampler — inside a container, with the tree mounted at /cg — can
+        // probe which layout this host uses. See workload/sampler/sample.py.
         let id = container_id(target);
-        let cgroup = format!("/cg/docker/{id}");
         // An orphan from an interrupted run would hold the name.
         let _ = docker_try(&["rm", "-f", sampler_name]);
         let sampler_container = sampler_name.to_owned();
@@ -244,7 +248,7 @@ impl Sampler {
                 SAMPLER_IMAGE,
                 "python3",
                 "-",
-                &cgroup,
+                &id,
                 &interval,
             ])
             .stdin(Stdio::piped())
