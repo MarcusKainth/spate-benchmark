@@ -151,14 +151,20 @@ produces a diff confined to one file.
 
 ## Host caveat
 
-The reference numbers are produced on Docker Desktop for macOS on Apple Silicon: a
-Linux VM, arm64, with 6 performance and 12 efficiency cores that the hypervisor
-maps to VM vCPUs non-deterministically. A JVM here is not a JVM on Linux bare
-metal.
+Published measurements run on `c8g-8xl-ec2-docker`: a fresh, single-tenant EC2
+c8g.8xlarge per run — Linux, 32 homogeneous physical cores with no SMT, no VM
+between the harness and the kernel. Its environment profile declares
+`class = "authoritative"`, and the exact machine, storage provisioning and
+launch pipeline are committed in this repository, so the environment is
+reproducible with an AWS account rather than with access to anyone's hardware.
 
-Benchmarking guidance we consulted recommended dropping macOS results from scope
-entirely. That recommendation was considered and declined, so every environment
-declares a `class`, this one declares `indicative`, and the site renders the
-caveat from that field — prominently and in its own right rather than in a
-footnote. It shows run-to-run spread on every chart, and carries full environment
-provenance in every record, so a later bare-metal re-run is an added dataset rather
+The earlier records were produced on Docker Desktop for macOS on Apple Silicon:
+a Linux VM, arm64, with 6 performance and 12 efficiency cores that the
+hypervisor maps to VM vCPUs non-deterministically — a JVM there is not a JVM on
+Linux. Those records remain published under their own environment id with
+`class = "indicative"`, and the site renders that caveat from the field —
+prominently and in its own right rather than in a footnote. It shows run-to-run
+spread on every chart, and carries full environment provenance in every record,
+which is exactly what made the cloud environment an added dataset rather than a
+rewrite. Environments are never drawn on one axis; the retired environment's
+numbers are historical, not comparable to the authoritative ones.
