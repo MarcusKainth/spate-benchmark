@@ -71,28 +71,25 @@ CLICKHOUSE_URL = "{{clickhouse_internal}}"
 TOPIC          = "{{topic}}"
 GROUP_ID       = "{{group_id}}"
 OFFSET_RESET   = "{{offset_reset}}"
-TIER           = "{{tier}}"
 THREADS        = "{{knob:threads}}"
 SHARDS         = "{{knob:shards}}"
 INFLIGHT       = "{{knob:inflight}}"
 LINGER_MS      = "{{knob:linger_ms}}"
 MAX_ROWS       = "{{knob:max_rows}}"
 
-# Two orthogonal axes — wire format and decode path — times two tiers. Named
-# variants rather than one smashed-together string, because the axes are
-# independent and a compound name stops composing the moment they are.
+# One axis: the wire format. Both are published because they are not the same
+# amount of server-side work, and the difference belongs to the reader.
 #
 # Not declared here and not reachable by the driver: `IO_THREADS` (pinned at 2)
 # and `BUDGET_MIB` (always derived). Both are read by `main.rs` and appear in no
 # descriptor, so no record reports them.
 
 [[variants]]
-id       = "tier-a-native"
+id       = "native"
 label    = "Spate · Native"
-tier     = "a"
 approach = "realistic"
 default  = true
-env      = { FORMAT = "native", DESER = "value" }
+env      = { FORMAT = "native" }
 knobs    = { threads = 4, shards = 8, inflight = 4, linger_ms = 500, max_rows = 262144 }
 reports  = { wire_format = "native" }
 
@@ -101,40 +98,9 @@ reports  = { wire_format = "native" }
 # official Flink connector can only write RowBinaryWithNamesAndTypes because the
 # Java client has no Native writer (clickhouse-java#2509).
 [[variants]]
-id       = "tier-a-rowbinary"
+id       = "rowbinary"
 label    = "Spate · RowBinary"
-tier     = "a"
 approach = "realistic"
-env      = { FORMAT = "rowbinary", DESER = "value" }
-knobs    = { threads = 4, shards = 8, inflight = 4, linger_ms = 500, max_rows = 262144 }
-reports  = { wire_format = "rowbinary" }
-
-# `build_serde`, the ergonomic shipped deserializer. It decodes each record
-# twice; published because rule 1 requires the same treatment of our own shipped
-# APIs that we give everyone else's — we do not get to show only the fast one.
-[[variants]]
-id       = "tier-a-native-typed"
-label    = "Spate · Native · typed decode"
-tier     = "a"
-approach = "realistic"
-env      = { FORMAT = "native", DESER = "typed" }
-knobs    = { threads = 4, shards = 8, inflight = 4, linger_ms = 500, max_rows = 262144 }
-reports  = { wire_format = "native" }
-
-[[variants]]
-id       = "tier-b-native"
-label    = "Spate · Native · tier B"
-tier     = "b"
-approach = "realistic"
-env      = { FORMAT = "native", DESER = "value" }
-knobs    = { threads = 4, shards = 8, inflight = 4, linger_ms = 500, max_rows = 262144 }
-reports  = { wire_format = "native" }
-
-[[variants]]
-id       = "tier-b-rowbinary"
-label    = "Spate · RowBinary · tier B"
-tier     = "b"
-approach = "realistic"
-env      = { FORMAT = "rowbinary", DESER = "value" }
+env      = { FORMAT = "rowbinary" }
 knobs    = { threads = 4, shards = 8, inflight = 4, linger_ms = 500, max_rows = 262144 }
 reports  = { wire_format = "rowbinary" }

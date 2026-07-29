@@ -25,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       selector:
-        description: "bench selector ('*', 'spate', 'flink:tier-a', ...)"
+        description: "bench selector ('*', 'spate', 'spate:native', ...)"
         default: "*"
       env_id:
         description: Environment profile to preview against

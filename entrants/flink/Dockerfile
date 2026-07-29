@@ -133,10 +133,8 @@ USER flink
 # production-idiomatic, but methodology/ takes every published figure
 # from outside: ClickHouse for throughput and latency, cgroup v2 for CPU and
 # memory, /opt/flink/log/gc.log for GC.
-ENV TIER=a \
+ENV BOOTSTRAP=spate-bench-redpanda:29092 \
     EXPECT_PARALLELISM=4 \
-    DESER=shipped \
-    BOOTSTRAP=spate-bench-redpanda:29092 \
     TOPIC=comparison-sensor-batches \
     GROUP_ID=comparison-flink \
     STARTING_OFFSETS=earliest \

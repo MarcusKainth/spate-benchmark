@@ -1,4 +1,4 @@
-//! No arm may take its tier-B transform from the oracle that marks it.
+//! No arm may take its transform from the oracle that marks it.
 //!
 //! This suite is run by the author of one of the systems in it, and the
 //! correctness gate is what proves every arm did the same arithmetic. That proof
@@ -15,9 +15,14 @@
 //! both pass while writing different data. The guarantee was one-sided in the
 //! author's favour.
 //!
-//! `methodology/` settles whose job the transform is: pipeline logic — "the
-//! flatten, the tier-B filter and the derived columns are user code in every
-//! system, and every arm writes them". Every arm now writes them.
+//! `methodology/` settles whose job the transform is: pipeline logic — the
+//! flatten, the filters and the derived columns are user code in every
+//! system, and every arm writes them.
+//!
+//! What IS shared, deliberately, is the wire contract alone: the
+//! registry-served `sensor_batch.avsc` that every arm decodes. A schema is not
+//! the transform, and two hand-kept copies of it would be two things to keep in
+//! step for no gain in fairness.
 //!
 //! # Why this is checked as source text
 //!
@@ -122,20 +127,5 @@ fn every_arm_restates_the_quality_floor_the_workload_specifies() {
         flink.contains(&format!("QUALITY_FLOOR = {spec}d"))
             || flink.contains(&format!("QUALITY_FLOOR = {spec};")),
         "the Flink arm must restate QUALITY_FLOOR as {spec}"
-    );
-}
-
-#[test]
-fn the_arms_still_share_the_wire_contract_because_that_is_not_the_transform() {
-    // The other half of the rule, and the reason this is not simply "share
-    // nothing". Every arm decodes the same Confluent-framed Avro off the same
-    // registry; the Flink arm parses the same committed `.avsc`. A shared decoder
-    // for the schema shares nothing an arm is supposed to write, and removing it
-    // would mean two Avro readers to keep in step for no gain in fairness.
-    let production = production_source(&read("entrants/spate/src/rows.rs")).to_owned();
-    assert!(
-        production.contains("use spate_benchmark_harness::corpus::SensorBatch;"),
-        "the Avro wire contract is deliberately shared; if this import moved, say so \
-         here rather than letting the intent be inferred from its absence"
     );
 }

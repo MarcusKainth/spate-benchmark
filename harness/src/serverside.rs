@@ -39,10 +39,8 @@
 //! * `query_kind = 'Insert'` — removes the driver's `SELECT count()` polls and
 //!   the gate's scans outright, and also the `TRUNCATE` that precedes every
 //!   repetition, which the log records as kind `Drop`.
-//! * `hasAny(tables, [...])` — the tier's target table, **fully qualified**
+//! * `hasAny(tables, [...])` — the workload's target table, **fully qualified**
 //!   (`default.sensor_events`), because that is how `system.query_log` writes it.
-//!   A tier-A and a tier-B repetition of the same arm are otherwise
-//!   indistinguishable.
 //! * `query_start_time_microseconds` inside the measurement window — the
 //!   sampler's own window, not the driver's clock. See [`Window`].
 //! * `is_initial_query` — a distributed sub-query would otherwise be counted
@@ -84,7 +82,7 @@
 //!    Connect deviation in `methodology/` lands nested rows and flattens with
 //!    a view, which "moves CPU to the server and must be disclosed". Such an
 //!    insert names the view's target in `tables` as well as its own landing
-//!    table, so naming the tier's target table attributes it — believed, and
+//!    table, so naming the workload's target table attributes it — believed, and
 //!    **unverified until a Connect arm exists**. Pass the landing table too if
 //!    in doubt; the predicate is `hasAny`, not equality.
 //!
@@ -155,8 +153,8 @@
 //!   driver observed in the target table. This is the one that may be added to
 //!   the arm's own `cpu_us_per_row`, because it has the same denominator.
 //!
-//! They coincide for a tier-A arm that inserts each row exactly once. They
-//! diverge for an at-least-once arm that duplicated, and for a tier-B arm that
+//! They coincide for an arm that inserts each row exactly once. They
+//! diverge for an at-least-once arm that duplicated, and for an arm that
 //! lands raw rows and filters server-side — for which `written_rows` counts what
 //! was landed while the driver counts what survived. `inserted_rows`, from the
 //! `InsertedRows` counter, is carried beside `written_rows` for the same reason:
@@ -195,7 +193,7 @@ const COUNTERS: [&str; 9] = [
 /// Fully qualifies a table the way `system.query_log` writes it.
 ///
 /// The log's `tables` column holds `default.sensor_events`, never
-/// `sensor_events`, so a predicate built from `Tier::table()` alone matches
+/// `sensor_events`, so a predicate built from `corpus::TABLE` alone matches
 /// nothing at all — and matching nothing looks exactly like an arm that issued
 /// no inserts.
 #[must_use]
@@ -1261,7 +1259,7 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
         for c in COUNTERS {
             assert!(sql.contains(c), "{c} is missing from the projection");
         }
-        // Both tiers of a multi-table arm.
+        // Both tables of a multi-table arm.
         let two = attribution_sql(&["default.landing", "default.sensor_events"], window());
         assert!(
             two.contains("hasAny(tables, ['default.landing', 'default.sensor_events'])"),

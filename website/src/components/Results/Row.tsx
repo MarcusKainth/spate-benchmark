@@ -219,9 +219,8 @@ export default function Row({
               and giving it the same shape as a control is what made the control
               unreadable. */}
           {/* Two things are deliberately NOT here.
-              The variant id, because it is the tier — which the block header
-              already states — joined to the format and decode path, which the
-              label and the wire format already state. It is in the arm's
+              The variant id, because the label and the wire format beside it
+              already state everything the id says. It is in the arm's
               disclosure, and it is still searchable from the name filter.
               The repetition count, because every metric cell prints it in its
               own sub-line, and repeating it wrapped this line and left rows at

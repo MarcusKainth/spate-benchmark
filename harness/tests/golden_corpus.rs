@@ -22,9 +22,7 @@
 //! `dataset_version` must move with it, splitting the comparability group — or
 //! something changed that should not have. Both need a human.
 
-use spate_benchmark_harness::corpus::{
-    Tier, encode_batch, expected, frame_confluent, str_fingerprint,
-};
+use spate_benchmark_harness::corpus::{encode_batch, expected, frame_confluent, str_fingerprint};
 
 /// FNV-1a, inline. A dependency-free fingerprint: the point is stability across
 /// versions of this repository, and a hash crate that changed its output would
@@ -88,36 +86,18 @@ fn confluent_framing_is_byte_identical_to_the_original_harness() {
 fn closed_form_expectations_are_unchanged() {
     // These are what the correctness gates compare against, so a drift here
     // would not fail a run — it would silently redefine what "correct" means.
-    let a = expected(BATCHES, Tier::A);
-    assert_eq!(a.rows, 100_000);
-    assert_eq!(a.value_sum, 49_950_630_000_000);
-    assert_eq!(a.value_scaled_sum, 0, "tier A derives no scaled column");
-    assert_eq!(a.sensor_sum, 1_173_538_243_778_728_244_334_000);
-    assert_eq!(a.region_sum, 1_073_775_014_116_685_352_450_000);
-    assert_eq!(a.name_sum, 1_115_741_519_765_750_538_698_296);
-    assert_eq!(a.unit_sum, 756_001_010_861_599_587_500);
-    assert_eq!(a.tag_count_sum, 150_000);
-    assert_eq!(a.tag_sum, 660_617_217_952_123_568_699_526);
-    assert_eq!(a.batch_ts_sum, 177_200_000_049_950_000);
-    assert_eq!(a.null_quality_rows, 20_000);
-
-    let b = expected(BATCHES, Tier::B);
-    assert_eq!(b.rows, 73_500);
-    assert_eq!(b.value_sum, 36_712_213_045_500);
-    assert_eq!(b.value_scaled_sum, 1_903_970_758_089_327);
-    assert_eq!(b.sensor_sum, 862_547_254_290_276_801_415_122);
-    assert_eq!(b.region_sum, 789_224_923_606_139_885_762_498);
-    assert_eq!(b.name_sum, 650_904_861_039_966_432_802_372);
-    assert_eq!(b.unit_sum, 635_040_811_622_225_011_500);
-    assert_eq!(b.tag_count_sum, 105_000);
-    assert_eq!(b.tag_sum, 483_030_864_161_340_461_867_712);
-    assert_eq!(b.batch_ts_sum, 130_242_000_036_711_750);
-    assert_eq!(b.null_quality_rows, 17_500);
-
-    // Tier A carries `name`, tier B carries `name_upper`. If these ever agreed,
-    // the tier-B uppercase would have stopped happening and every sum above
-    // would still be self-consistent.
-    assert_ne!(a.name_sum, b.name_sum);
+    let e = expected(BATCHES);
+    assert_eq!(e.rows, 73_500);
+    assert_eq!(e.value_sum, 36_712_213_045_500);
+    assert_eq!(e.value_scaled_sum, 1_903_970_758_089_327);
+    assert_eq!(e.sensor_sum, 862_547_254_290_276_801_415_122);
+    assert_eq!(e.region_sum, 789_224_923_606_139_885_762_498);
+    assert_eq!(e.name_sum, 650_904_861_039_966_432_802_372);
+    assert_eq!(e.unit_sum, 635_040_811_622_225_011_500);
+    assert_eq!(e.tag_count_sum, 105_000);
+    assert_eq!(e.tag_sum, 483_030_864_161_340_461_867_712);
+    assert_eq!(e.batch_ts_sum, 130_242_000_036_711_750);
+    assert_eq!(e.null_quality_rows, 17_500);
 }
 
 /// The fingerprint is half of the same-work checksum, and the other half lives
@@ -133,7 +113,9 @@ fn the_string_fingerprint_is_unchanged() {
     assert_eq!(str_fingerprint(""), 0);
     // Shorter than the eight bytes `reinterpretAsUInt64` reads.
     assert_eq!(str_fingerprint("ms"), 57_568);
-    // Exactly eight bytes, and its lower-case twin: tier B's uppercase.
+    // Exactly eight bytes, and the lower-case form the `name_upper` derivation
+    // reads: the two must fingerprint differently or a skipped uppercase would
+    // pass.
     assert_eq!(str_fingerprint("METRIC_7"), 9_557_931_003_773_166_724);
     assert_eq!(str_fingerprint("metric_7"), 11_872_851_856_941_630_628);
     // Longer than eight bytes, so the reversed half is doing the work.
@@ -160,6 +142,6 @@ fn the_dataset_version_matches_the_committed_workload() {
     // not in the prose.
     assert_eq!(
         spate_benchmark_harness::report::DATASET_VERSION,
-        "d2-2985195b5999"
+        "d2-60d7e5bb2a82"
     );
 }

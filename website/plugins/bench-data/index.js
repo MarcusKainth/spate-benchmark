@@ -148,13 +148,13 @@ function loadRecords(root) {
  * them describe different experiments, and methodology/ makes three of them
  * hard splits.
  *
- * `tier` is here for a different reason and it is not optional. A tier-B arm
- * decodes the same messages but drops the `drop` unit and the low-quality rows,
- * emits 73.5% as many rows, computes two derived columns and writes to a
- * different table. Ranking rows/s across tiers is not a close call — it compares
- * two different amounts of work — and before this was a group component the page
- * drew all eight arms on one axis with one bar normaliser, so a tier-B arm's
- * smaller row count read as a slower system.
+ * `mode` is here for a different reason and it is not optional. `rows_per_s`
+ * means "how fast can this go" in drain and "the rate we asked for" in
+ * sustained, so two arms of wildly different capacity report the same number;
+ * the efficiency figures were taken with the broker serving writes and reads at
+ * once and a generator competing for cores, which is the whole argument drain
+ * exists for; and latency is single-mode by construction. A row is not an axis,
+ * and it is the axis that misleads.
  */
 function groupKey(rec) {
   return [
@@ -162,14 +162,6 @@ function groupKey(rec) {
     rec.run?.harness_version,
     rec.run?.dataset_version,
     rec.run?.infra?.digest,
-    `tier-${rec.variant?.tier ?? '?'}`,
-    // `mode` for the same reason as `tier`, and it is the sharper of the two.
-    // `rows_per_s` means "how fast can this go" in drain and "the rate we asked
-    // for" in sustained, so two arms of wildly different capacity report the
-    // same number; the efficiency figures were taken with the broker serving
-    // writes and reads at once and a generator competing for cores, which is
-    // the whole argument drain exists for; and latency is single-mode by
-    // construction. A row is not an axis, and it is the axis that misleads.
     `mode-${rec.variant?.mode ?? '?'}`,
   ].join('|');
 }
@@ -263,7 +255,6 @@ function summarise(records) {
         group: groupKey(rec),
         entrant: rec.sut?.entrant,
         variant_id: rec.sut?.variant_id,
-        tier: rec.variant?.tier ?? null,
         status: rec.status,
         note: rec.note ?? null,
         ts_ms: rec.run?.ts_ms ?? 0,
@@ -357,7 +348,6 @@ function summarise(records) {
       // arm may be ranked at all, and `wire_format` is required beside every
       // number by rule 5.
       status: worstStatus(counted),
-      tier: newest.variant?.tier ?? null,
       mode: newest.variant?.mode ?? null,
       // Fail closed. A record that does not say what it is cannot be
       // headline-eligible: defaulting to `realistic` meant a foreign or
@@ -407,12 +397,12 @@ module.exports = function benchData(context) {
             env_id: any.env_id,
             harness_version: any.harness_version,
             dataset_version: any.dataset_version,
-            tier: any.tier,
           };
         })
-        // Ordered by tier so the page reads A then B, rather than by whichever
-        // arm happened to be measured last.
-        .sort((a, b) => String(a.tier).localeCompare(String(b.tier)));
+        // Ordered by key so an unchanged tree builds to an identical list — the
+        // page re-sorts by richness before rendering, so this order only has to
+        // be deterministic, not meaningful.
+        .sort((a, b) => a.key.localeCompare(b.key));
 
       // Build determinism: derived from the newest record rather than the wall
       // clock, so rebuilding an unchanged tree produces an identical site and a

@@ -207,7 +207,7 @@ export default function SystemPage({profile}: Props): React.JSX.Element {
                 <strong>{armLabel(e, v, v.id)}</strong> <code>{v.id}</code>
                 <span className="bench-note">
                   {' '}
-                  · tier {String(v.tier ?? '?').toUpperCase()} · {v.approach ?? 'undeclared'}
+                  · {v.approach ?? 'undeclared'}
                   {v.reports?.wire_format && <> · {v.reports.wire_format}</>}
                   {v.default && <> · default</>}
                 </span>
@@ -234,12 +234,11 @@ export default function SystemPage({profile}: Props): React.JSX.Element {
         <h2>Where it has been measured</h2>
         {contexts.length ? (
           contexts.map((c) => {
-            const tier = String(c.group.tier ?? '?').toUpperCase();
             const mode = modeOf(c.group.key);
             return (
               <div key={c.group.key} className="bench-ctx">
                 <h3>
-                  {c.group.env_id} · tier {tier}
+                  {c.group.env_id}
                   {mode && <> · {mode}</>}
                 </h3>
                 <table className="bench-profile__t">

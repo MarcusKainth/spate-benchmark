@@ -10,8 +10,9 @@
 //   - `approach` never reached the row, so a `stripped` arm — one using code this
 //     project wrote rather than code the system ships — was ranked on the
 //     headline axis, above the honest arm of the same system.
-//   - `tier` was not in the group key, so arms doing measurably different amounts
-//     of work were ranked against each other on one bar scale.
+//   - `mode` splits the comparability group — drain and sustained throughput
+//     mean different things — and nothing pinned it in the group key, so a
+//     refactor could have put them back on one axis unnoticed.
 //   - A row took the newest repetition's status and flags rather than the worst
 //     and the union, which reintroduced the first two bugs one layer up.
 //
@@ -34,25 +35,22 @@ async function load() {
 const find = (rows, entrant, variant) =>
   rows.find((r) => r.entrant === entrant && r.variant_id === variant);
 
-test('tier splits the comparability group, so two tiers are never one axis', async () => {
-  const {groups, rows} = await load();
-  assert.ok(groups.length >= 2, 'the fixture must contain more than one group');
-  // The property, not a fixed list: no group may contain two tiers, whatever
-  // else the fixture grows. Asserting the exact set instead made this test fail
-  // the moment a record at a different harness version was added — which is the
-  // protocol-version split working, not a defect.
-  for (const g of groups) {
-    const tiers = new Set(rows.filter((r) => r.group === g.key).map((r) => r.tier));
-    assert.equal(tiers.size, 1, `group ${g.key} spans tiers ${[...tiers]}`);
-  }
-  assert.deepEqual([...new Set(rows.map((r) => r.tier))].sort(), ['a', 'b']);
+test("every row's variant id is one its descriptor declares", async () => {
+  const {rows, entrants} = await load();
+  assert.ok(rows.length > 0, 'the fixture must produce rows');
+  // The site joins records to descriptors solely through `variant_id`: the
+  // label, the approach and the wire format a reader sees all come from the
+  // declared variant. A record whose id no descriptor declares would render
+  // with none of them, and nothing downstream would notice.
+  const declared = new Map(
+    entrants.map((e) => [e.entrant.id, new Set((e.variants ?? []).map((v) => v.id))]),
+  );
   for (const r of rows) {
-    // A component, not a suffix: the key grows as new axes are added — `mode`
-    // was appended after this test was written — and asserting on position
-    // makes a correct addition look like a regression.
+    const ids = declared.get(r.entrant);
+    assert.ok(ids, `${r.entrant} has no descriptor`);
     assert.ok(
-      r.group.split('|').includes(`tier-${r.tier}`),
-      `${r.variant_id} in ${r.group}`,
+      ids.has(r.variant_id),
+      `${r.entrant} declares no variant "${r.variant_id}"`,
     );
   }
 });
@@ -77,16 +75,16 @@ test('mode is a comparability axis, so drain and sustained never share one', asy
 
 test('a different protocol version is a different group, whatever else matches', async () => {
   const {groups, rows} = await load();
-  // gamma runs harness 2 on the same environment, dataset and tier as arms at
+  // gamma runs harness 2 on the same environment, dataset and mode as arms at
   // harness 1. METHODOLOGY makes that a hard split: records measured under
   // different protocols are never drawn on one axis.
-  const gamma = rows.filter((r) => r.entrant === 'gamma');
-  assert.ok(gamma.length > 0);
-  const others = rows.filter((r) => r.tier === 'a' && r.entrant !== 'gamma');
-  assert.ok(others.length > 0, 'need a tier-a arm at the older protocol to compare against');
-  for (const g of gamma) {
-    for (const o of others) {
-      assert.notEqual(g.group, o.group, 'harness 1 and harness 2 must not share a group');
+  const newer = rows.filter((r) => r.harness_version === 2);
+  assert.ok(newer.length > 0, 'need arms at the newer protocol');
+  const older = rows.filter((r) => r.harness_version === 1);
+  assert.ok(older.length > 0, 'need arms at the older protocol to compare against');
+  for (const n of newer) {
+    for (const o of older) {
+      assert.notEqual(n.group, o.group, 'harness 1 and harness 2 must not share a group');
     }
   }
   assert.ok(
@@ -97,7 +95,7 @@ test('a different protocol version is a different group, whatever else matches',
 
 test('every repetition of an invocation is medianed into one row', async () => {
   const {rows} = await load();
-  const r = find(rows, 'alpha', 'tier-a');
+  const r = find(rows, 'alpha', 'native');
   // Three reps at 1000/1100/1200 — the mark is the interval, so the row has to
   // carry all three rather than the newest.
   assert.equal(r.reps_counted, 3);
@@ -110,13 +108,13 @@ test('one infra-bound repetition makes the whole row infra-bound', async () => {
   const {rows} = await load();
   // The offending rep is not the newest, which is exactly how taking
   // `newest.status` used to publish it as ok.
-  assert.equal(find(rows, 'alpha', 'tier-b').status, 'infra_bound');
+  assert.equal(find(rows, 'alpha', 'rowbinary').status, 'infra_bound');
 });
 
 test('flags are the union across repetitions, not the newest one\'s', async () => {
   const {rows} = await load();
-  // Only rep 2 of alpha:tier-a is throttled, and it is not the newest.
-  assert.deepEqual(find(rows, 'alpha', 'tier-a').flags, ['cpu_cap_throttled']);
+  // Only rep 2 of alpha:native is throttled, and it is not the newest.
+  assert.deepEqual(find(rows, 'alpha', 'native').flags, ['cpu_cap_throttled']);
 });
 
 test('a run that produced no publishable number is an explicit gap, not silence', async () => {
@@ -131,24 +129,24 @@ test('a run that produced no publishable number is an explicit gap, not silence'
 
 test('approach and wire format reach the row, which is what makes the contract renderable', async () => {
   const {rows} = await load();
-  assert.equal(find(rows, 'beta', 'tier-a-hand').approach, 'stripped');
-  assert.equal(find(rows, 'beta', 'tier-a').approach, 'realistic');
-  assert.equal(find(rows, 'alpha', 'tier-a').wire_format, 'native');
+  assert.equal(find(rows, 'beta', 'hand').approach, 'stripped');
+  assert.equal(find(rows, 'beta', 'rowbinary').approach, 'realistic');
+  assert.equal(find(rows, 'alpha', 'native').wire_format, 'native');
 });
 
 test('a stripped arm is present but never headline-eligible, even when it is fastest', async () => {
   const {rows} = await load();
-  const stripped = find(rows, 'beta', 'tier-a-hand');
-  const tierA = rows.filter((r) => r.tier === 'a');
-  const fastest = tierA.reduce((a, b) =>
+  const stripped = find(rows, 'beta', 'hand');
+  const inGroup = rows.filter((r) => r.group === stripped.group);
+  const fastest = inGroup.reduce((a, b) =>
     a.metrics.rows_per_s.value >= b.metrics.rows_per_s.value ? a : b,
   );
-  assert.equal(fastest.variant_id, 'tier-a-hand', 'fixture must keep this the fastest');
+  assert.equal(fastest.variant_id, 'hand', 'fixture must keep this the fastest');
   // Mirrors `unrankedBecause` in the component: the row carries everything
   // needed to bar it, so the decision cannot be lost between here and render.
   const eligible = (r) => r.status === 'ok' && r.approach === 'realistic';
   assert.equal(eligible(stripped), false);
-  assert.ok(tierA.some(eligible), 'something must still be rankable');
+  assert.ok(inGroup.some(eligible), 'something must still be rankable');
 });
 
 test('two sittings on one day are two rows, not one', async () => {

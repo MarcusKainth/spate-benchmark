@@ -9,20 +9,23 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The tier-A column contract, as the ClickHouse connector's own
- * {@code DataMapper} declares it.
+ * The column contract, as the ClickHouse connector's own {@code DataMapper}
+ * declares it.
  *
  * <p>{@link #bindings()} order is the write order within each row, and it mirrors
- * {@code sensor_events} in {@code common/clickhouse/ddl.sql} exactly. The
+ * {@code sensor_events} in {@code workload/clickhouse/ddl.sql} exactly. The
  * connector runs typed (POJO) mode, so the wire format is
  * {@code RowBinaryWithNamesAndTypes} and these type expressions are also what
  * goes into the format header — a mismatch with the table is rejected by the
  * server rather than silently coerced.
  *
+ * <p>Note the column is {@code name_upper}, not {@code name} — the workload
+ * replaces the raw metric name with its ASCII uppercase.
+ *
  * <p>{@code ingest_ts} is deliberately absent: it is {@code MATERIALIZED now64(6)}
  * and is the single server-side definition of "arrived" for every arm.
  */
-public final class TierAMapper extends DataMapper<SensorRow> {
+public final class SensorRowMapper extends DataMapper<SensorRow> {
 
     private static final long serialVersionUID = 1L;
 
@@ -36,9 +39,10 @@ public final class TierAMapper extends DataMapper<SensorRow> {
         m.put("event_seq", r.eventSeq);
         m.put("sensor", r.sensor);
         m.put("region", r.region);
-        m.put("name", r.name);
+        m.put("name_upper", r.nameUpper);
         m.put("unit", r.unit);
         m.put("value", r.value);
+        m.put("value_scaled", r.valueScaled);
         m.put("quality", r.quality);
         m.put("tags", r.tags);
         m.put("batch_ts", r.batchTs);
@@ -52,9 +56,10 @@ public final class TierAMapper extends DataMapper<SensorRow> {
                 ColumnBinding.scalar("event_seq", "event_seq", ClickHouseDataType.UInt16),
                 lowCardinality("sensor"),
                 lowCardinality("region"),
-                lowCardinality("name"),
+                lowCardinality("name_upper"),
                 lowCardinality("unit"),
                 ColumnBinding.scalar("value", "value", ClickHouseDataType.Int64),
+                ColumnBinding.scalar("value_scaled", "value_scaled", ClickHouseDataType.Int64),
                 ColumnBinding.scalar("quality", "quality", ClickHouseDataType.Float64, true, false),
                 ColumnBinding.array("tags", "tags",
                         ClickHouseColumn.of("tags", "LowCardinality(String)")),

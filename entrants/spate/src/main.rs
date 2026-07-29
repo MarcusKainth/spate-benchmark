@@ -16,16 +16,9 @@
 //! `methodology/` is normative.
 //!
 //! Env:
-//! - `TIER` (`a`) — `a` is decode/flatten/insert; `b` adds the specified filter
-//!   and derivations.
 //! - `FORMAT` (`native`) — `native` or `rowbinary`. Both are published: `native`
 //!   is what a real deployment runs, `rowbinary` is the control that separates
 //!   "the framework is faster" from "we chose a faster wire format".
-//! - `DESER` (`value`) — which **shipped** deserializer to use. `value`
-//!   (`build_value`) is the documented throughput path; `typed` (`build_serde`)
-//!   is the ergonomic one, which our own docs note decodes each record twice.
-//!   Both are published. Per rule 1 of the contract, each system uses the best
-//!   API it ships and we hand-write nobody's internals — including our own.
 //! - `BOOTSTRAP`, `REGISTRY_URL`, `CLICKHOUSE_URL`, `TOPIC`, `GROUP_ID`
 //! - `THREADS`, `IO_THREADS`, `SHARDS`, `INFLIGHT`, `LINGER_MS`, `MAX_ROWS`,
 //!   `BUDGET_MIB`
@@ -37,9 +30,9 @@ use std::time::Duration;
 use apache_avro::types::Value as AvroValue;
 use bytes::BytesMut;
 use serde::Serialize;
-use spate_arm::rows::{self, RowA, RowB};
+use spate_arm::rows::{self, Row};
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection};
-use spate_benchmark_harness::corpus::{self as data, Tier};
+use spate_benchmark_harness::corpus;
 use spate_benchmark_harness::{env_str, env_u64};
 use spate_clickhouse::{ClickHouseEncoder, Format, NativeEncoder};
 use spate_core::config::{ComponentConfig, PipelineConfig};
@@ -77,29 +70,15 @@ fn main() {
         return;
     }
 
-    let tier = match env_str("TIER", "a").as_str() {
-        "a" => Tier::A,
-        "b" => Tier::B,
-        other => panic!("unknown TIER {other} (a|b)"),
-    };
     let format = match env_str("FORMAT", "native").as_str() {
         "native" => Format::Native,
         "rowbinary" => Format::RowBinary,
         other => panic!("unknown FORMAT {other} (native|rowbinary)"),
     };
-    let deser = env_str("DESER", "value");
-    assert!(
-        matches!(deser.as_str(), "value" | "typed"),
-        "unknown DESER {deser} (value|typed)"
-    );
 
-    println!(
-        "{} tier={} format={format:?} deser={deser}",
-        version_line(),
-        tier.name()
-    );
+    println!("{} format={format:?}", version_line());
 
-    run(tier, format, &deser);
+    run(format);
 }
 
 /// Framework sections. The connector bodies are empty here and built separately
@@ -178,10 +157,9 @@ impl Egress {
 
 /// The sink section, built from the committed column list so the wire order
 /// cannot drift from the DDL.
-fn sink_section(tier: Tier, format: Format) -> ComponentConfig {
+fn sink_section(format: Format) -> ComponentConfig {
     let url = env_str("CLICKHOUSE_URL", "http://spate-bench-clickhouse:8123");
-    let columns = tier
-        .columns()
+    let columns = corpus::COLUMNS
         .iter()
         .map(|(name, _)| *name)
         .collect::<Vec<_>>()
@@ -214,14 +192,14 @@ fn sink_section(tier: Tier, format: Format) -> ComponentConfig {
          shards:\n{replicas}  \
          inflight: {{ max_per_shard: {inflight} }}\n  \
          batch: {{ linger: {linger_ms}ms, max_rows: {max_rows} }}\n",
-        tier.table(),
+        corpus::TABLE,
         env_str("CLICKHOUSE_USER", "default"),
         env_str("CLICKHOUSE_PASSWORD", "bench"),
     );
     serde_yaml::from_str(&yaml).expect("sink section")
 }
 
-fn run(tier: Tier, format: Format, deser: &str) {
+fn run(format: Format) {
     let threads = env_u64("THREADS", 2);
     let io_threads = env_u64("IO_THREADS", 2);
     // `BUDGET_MIB=0` (the default) derives the budget from the egress shape; an
@@ -250,8 +228,7 @@ fn run(tier: Tier, format: Format, deser: &str) {
     )
     .expect("avro builder");
 
-    let sink =
-        spate_clickhouse::from_component_config(&sink_section(tier, format)).expect("ch sink");
+    let sink = spate_clickhouse::from_component_config(&sink_section(format)).expect("ch sink");
     // `native` needs the server's real column types; `rowbinary` does not.
     let native_schema = match format {
         Format::Native => Some(
@@ -273,99 +250,28 @@ fn run(tier: Tier, format: Format, deser: &str) {
     //   cursor is per input record, not per fan-out element, so breaking out
     //   mid-batch would silently discard the remaining events of that message.
     //
-    // Four (tier x decode-path) combinations. Each is written out rather than
-    // abstracted because the chain's payload type differs in every one, and the
-    // encoder is generic over it.
-    let report = match (tier, deser) {
-        (Tier::A, "value") => {
-            let d = avro.build_value().expect("value deserializer");
-            let enc = encoder(format, native_schema.clone());
-            pipeline
-                .sink(sink)
-                .expect("sink")
-                .chains(move |ctx| {
-                    let (d, enc) = (d.clone(), enc.clone());
-                    let chunk = ctx.chunk();
-                    chain::<Owned<AvroValue>, _>(d)
-                        .with_metrics(ctx.pipeline, "main")
-                        .flat_map::<Owned<RowA>, _>(|v, out| {
-                            rows::flatten_value_a(&v, |row| {
-                                out.emit(row);
-                            });
-                        })
-                        .sink(enc, KeyHashRouter, chunk, ctx.queues, ctx.budget)
-                        .build()
+    // One chain: `build_value` is the documented throughput path of the shipped
+    // Avro deserializer, and the flatten applies the workload's filters and
+    // derivations before the format-generic encoder sees a row.
+    let d = avro.build_value().expect("value deserializer");
+    let enc = encoder(format, native_schema);
+    let report = pipeline
+        .sink(sink)
+        .expect("sink")
+        .chains(move |ctx| {
+            let (d, enc) = (d.clone(), enc.clone());
+            let chunk = ctx.chunk();
+            chain::<Owned<AvroValue>, _>(d)
+                .with_metrics(ctx.pipeline, "main")
+                .flat_map::<Owned<Row>, _>(|v, out| {
+                    rows::flatten_value(&v, |row| {
+                        out.emit(row);
+                    });
                 })
-                .run(kafka_source())
-        }
-        (Tier::A, _) => {
-            let d = avro
-                .build_serde::<data::SensorBatch>()
-                .expect("typed deserializer");
-            let enc = encoder(format, native_schema.clone());
-            pipeline
-                .sink(sink)
-                .expect("sink")
-                .chains(move |ctx| {
-                    let (d, enc) = (d.clone(), enc.clone());
-                    let chunk = ctx.chunk();
-                    chain::<Owned<data::SensorBatch>, _>(d)
-                        .with_metrics(ctx.pipeline, "main")
-                        .flat_map::<Owned<RowA>, _>(|b, out| {
-                            rows::flatten_typed_a(&b, |row| {
-                                out.emit(row);
-                            });
-                        })
-                        .sink(enc, KeyHashRouter, chunk, ctx.queues, ctx.budget)
-                        .build()
-                })
-                .run(kafka_source())
-        }
-        (Tier::B, "value") => {
-            let d = avro.build_value().expect("value deserializer");
-            let enc = encoder(format, native_schema.clone());
-            pipeline
-                .sink(sink)
-                .expect("sink")
-                .chains(move |ctx| {
-                    let (d, enc) = (d.clone(), enc.clone());
-                    let chunk = ctx.chunk();
-                    chain::<Owned<AvroValue>, _>(d)
-                        .with_metrics(ctx.pipeline, "main")
-                        .flat_map::<Owned<RowB>, _>(|v, out| {
-                            rows::flatten_value_b(&v, |row| {
-                                out.emit(row);
-                            });
-                        })
-                        .sink(enc, KeyHashRouter, chunk, ctx.queues, ctx.budget)
-                        .build()
-                })
-                .run(kafka_source())
-        }
-        (Tier::B, _) => {
-            let d = avro
-                .build_serde::<data::SensorBatch>()
-                .expect("typed deserializer");
-            let enc = encoder(format, native_schema.clone());
-            pipeline
-                .sink(sink)
-                .expect("sink")
-                .chains(move |ctx| {
-                    let (d, enc) = (d.clone(), enc.clone());
-                    let chunk = ctx.chunk();
-                    chain::<Owned<data::SensorBatch>, _>(d)
-                        .with_metrics(ctx.pipeline, "main")
-                        .flat_map::<Owned<RowB>, _>(|b, out| {
-                            rows::flatten_typed_b(&b, |row| {
-                                out.emit(row);
-                            });
-                        })
-                        .sink(enc, KeyHashRouter, chunk, ctx.queues, ctx.budget)
-                        .build()
-                })
-                .run(kafka_source())
-        }
-    };
+                .sink(enc, KeyHashRouter, chunk, ctx.queues, ctx.budget)
+                .build()
+        })
+        .run(kafka_source());
 
     let report = report.expect("pipeline run");
     report.log();
@@ -388,8 +294,7 @@ fn encoder<F: RecFamily>(
 /// The terminal sink stage takes a single concrete encoder type, so the `FORMAT`
 /// choice has to collapse into one type rather than branching the whole chain.
 /// The per-record cost is a single perfectly-predicted branch; the alternative
-/// was eight near-identical chain blocks (two tiers x two decode paths x two
-/// formats).
+/// was two near-identical chain blocks, one per wire format.
 enum EitherEncoder<F: RecFamily> {
     Native(NativeEncoder<F>),
     RowBinary(ClickHouseEncoder<F>),

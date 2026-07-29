@@ -36,10 +36,9 @@ instead of hiding in a swapfile.
 
 ## Why memory is generous, and what that does to the memory number
 
-CPU is the scarce resource here and memory is not. The reference host has 128 GiB
-with 72 GiB given to the Docker VM, one arm runs at a time, and no arm in this
-workload needs more than a couple of gigabytes to do its job. So every arm gets
-16 GiB — several times what any of them will touch.
+CPU is the scarce resource here and memory is not: one arm runs at a time, and
+no arm in this workload needs more than a couple of gigabytes to do its job. So
+every arm gets 16 GiB — several times what any of them will touch.
 
 That is a fairness decision rather than a convenience. A garbage-collected
 runtime held to a tight heap collects more often, and the resulting pauses would
@@ -67,13 +66,14 @@ and is marked as such in the table below.
 
 Infrastructure sits **outside** that budget and is identical for every arm, and is
 declared per environment rather than passed on the command line: Redpanda
-(4 CPUs, 8 GiB) and ClickHouse (9 CPUs, 12 GiB) on the reference environment.
+(4 CPUs, 8 GiB) and ClickHouse (9 CPUs, 12 GiB) in the committed environment
+profile.
 
 Those two numbers are the output of a measured search rather than a guess: the
 broker's cap was swept against its own cgroup counters until it was no longer the
 constraint, and ClickHouse was given the cores that freed. The host bounds the
-total — `broker + clickhouse <= 13`, because the arm takes 4 of 18 vCPU and the
-driver and sampler need one.
+total: the arm's 4 CPUs, the driver and the sampler must still fit beside the
+infrastructure.
 
 The Schema Registry is **Redpanda's built-in, Confluent-compatible one** on port
 8081 rather than a separate Confluent container. That removes a second JVM from

@@ -10,11 +10,11 @@ authors.workspace = true
 repository.workspace = true
 
 # This crate is a plain consumer of the framework's public API — the same shapes
-# a user writes — plus the row types and flatten functions for this workload.
+# a user writes — plus the row type and flatten for this workload.
 #
-# Those row types live HERE rather than in the harness on purpose. The harness
+# That row type lives HERE rather than in the harness on purpose. The harness
 # computes expectations and encodes Avro; it never serialises a row. Keeping
-# `RowA`/`RowB` in the arm is what removes the harness's last dependency on the
+# `Row` in the arm is what removes the harness's last dependency on the
 # framework, and it makes this arm structurally symmetric with the Flink arm,
 # which owns its own `SensorRow.java`.
 [dependencies]

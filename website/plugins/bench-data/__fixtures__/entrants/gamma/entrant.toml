@@ -25,8 +25,8 @@ durability  = "offset-commit"
 interval_ms = 5000
 
 [[variants]]
-id       = "tier-a"
-label    = "tier-a"
-tier     = "a"
+id       = "native"
+label    = "native"
+default  = true
 approach = "realistic"
 reports  = { wire_format = "native" }

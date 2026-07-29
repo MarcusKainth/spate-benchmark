@@ -368,7 +368,7 @@ mod tests {
     fn sut() -> Sut {
         Sut {
             entrant: "spate".to_owned(),
-            variant_id: "tier-a-native".to_owned(),
+            variant_id: "native".to_owned(),
             version: Some("0.1.0-dev".to_owned()),
             commit: Some("6f28a8b8912e".to_owned()),
             image_digest: format!("sha256:{}", "a".repeat(64)),
@@ -404,7 +404,7 @@ mod tests {
             Kind::Measurement,
             Status::Ok,
             sut(),
-            RunMeta::new("mac-m5max", "deadbeef", Trigger::Manual, infra()),
+            RunMeta::new("test-env", "deadbeef", Trigger::Manual, infra()),
         )
         .metric("rows_per_s", Metric::maximize(4_383_663.0, "records/s"))
     }
@@ -424,7 +424,7 @@ mod tests {
     /// weeks later.
     fn validate_lines(tag: &str, lines: &[String]) -> Result<Summary, Vec<String>> {
         let root = temp_root(tag);
-        let dir = root.join("mac-m5max").join("spate");
+        let dir = root.join("test-env").join("spate");
         std::fs::create_dir_all(&dir).expect("create results tree");
         let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
         std::fs::write(dir.join("2026-07.jsonl"), body).expect("seed the archive");

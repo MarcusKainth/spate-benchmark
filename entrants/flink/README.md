@@ -112,7 +112,6 @@ docker volume create spate-bench-flink-cp
 docker run -d --name spate-bench-flink-jm --network spate-bench-net \
   --cpus 1 --memory 2g --memory-swap 2g \
   -e JOB_MANAGER_RPC_ADDRESS=spate-bench-flink-jm \
-  -e TIER=a \
   -v spate-bench-flink-cp:/opt/flink/checkpoints \
   -p 18085:8081 \
   spate-bench-flink standalone-job
@@ -133,11 +132,8 @@ the driver removes the containers.
 variables the knob table names above, and those are what a published record's
 knobs mean.
 
-`TIER=b` targets `sensor_events_t`; `CLICKHOUSE_TABLE` overrides it.
-`DESER=reusing` selects the secondary `stripped` arm. A session cluster works too
-(`jobmanager` instead of `standalone-job`, then
-`flink run /opt/flink/usrlib/comparison-flink.jar`), which is useful for
-submitting the same jar twice with different `TIER`.
+A session cluster works too (`jobmanager` instead of `standalone-job`, then
+`flink run /opt/flink/usrlib/comparison-flink.jar`).
 
 ## Versions
 

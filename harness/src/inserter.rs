@@ -9,10 +9,10 @@
 //!
 //! Four independent readings said so, all taken on this host:
 //!
-//! * Every format and tier plateaued at 246–264 MB/s **on the wire** regardless
+//! * Every format plateaued at 246–264 MB/s **on the wire** regardless
 //!   of how wide its rows were — a byte wall, not a row wall.
-//! * ClickHouse's own `system.query_log` attributed 84.9% (tier A) and 85.5%
-//!   (tier B) of total insert duration to `NetworkReceiveElapsed`: the server
+//! * ClickHouse's own `system.query_log` attributed 84.9–85.5%
+//!   of total insert duration to `NetworkReceiveElapsed`: the server
 //!   was blocked reading the request body. Per insert that was 697ms of duration
 //!   against 5.7ms of user and 17.3ms of system CPU.
 //! * The ClickHouse container sat at 270–315% of its 500% CPU cap at the

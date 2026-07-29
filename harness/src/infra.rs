@@ -228,7 +228,7 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
         ceiling_bytes_per_s,
         // Left at zero here, and that is the honest value at this point rather
         // than a placeholder: the ClickHouse ceiling is measured per insert
-        // format and per tier, and no arm has been chosen yet. `driver::measure`
+        // format, and no arm has been chosen yet. `driver::measure`
         // fills it in on each record, where the arm's declared `wire_format` is
         // known. See `report::Infra::ceiling_rows_per_s`.
         ceiling_rows_per_s: 0,

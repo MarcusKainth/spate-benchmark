@@ -20,8 +20,8 @@ import java.util.Map;
 
 /**
  * The Flink arm of the cross-framework comparison: consume the Confluent-framed
- * Avro topic, flatten each message's {@code events} array, insert one row per event
- * into ClickHouse.
+ * Avro topic, flatten each message's {@code events} array through the workload's
+ * filters and derivations, insert one row per surviving event into ClickHouse.
  *
  * <p>{@code methodology/} is normative and this job conforms to
  * it. Three consequences worth stating where they are easy to check:
@@ -38,24 +38,17 @@ import java.util.Map;
  *       Flink's own {@link ConfluentRegistryAvroDeserializationSchema} and the sink
  *       through ClickHouse's own connector. Tuning lives in {@code config.yaml} and
  *       in the env-driven sink batch settings below, because configuration is not
- *       code we wrote. The one exception is opt-in, labelled and never the headline:
- *       {@code DESER=reusing} selects {@link ReusingAvroDeserializationSchema}.</li>
+ *       code we wrote.</li>
  * </ul>
  *
  * <p>Environment:
  * <ul>
- *   <li>{@code TIER} ({@code a}) — {@code a} is decode/flatten/insert into
- *       {@code sensor_events}; {@code b} adds the specified filters and derivations
- *       and targets {@code sensor_events_t}.</li>
- *   <li>{@code DESER} ({@code shipped}) — {@code shipped} is the published number;
- *       {@code reusing} is the secondary arm that quantifies the per-message record
- *       allocation in Flink's shipped schema.</li>
  *   <li>{@code BOOTSTRAP}, {@code TOPIC}, {@code GROUP_ID}, {@code STARTING_OFFSETS}
  *       ({@code earliest}|{@code committed}).</li>
  *   <li>{@code REGISTRY_URL}.</li>
  *   <li>{@code CLICKHOUSE_URL}, {@code CLICKHOUSE_USER}, {@code CLICKHOUSE_PASSWORD},
- *       {@code CLICKHOUSE_DATABASE}, {@code CLICKHOUSE_TABLE} (defaults derive from
- *       the tier).</li>
+ *       {@code CLICKHOUSE_DATABASE}, {@code CLICKHOUSE_TABLE} (default
+ *       {@code sensor_events}).</li>
  *   <li>{@code SINK_MAX_BATCH_ROWS}, {@code SINK_MAX_BUFFERED_ROWS},
  *       {@code SINK_MAX_BATCH_BYTES}, {@code SINK_LINGER_MS},
  *       {@code SINK_MAX_IN_FLIGHT}, {@code SINK_MAX_ROW_BYTES} — the sink's batch
@@ -78,8 +71,6 @@ public final class ComparisonJob {
     private ComparisonJob() {}
 
     public static void main(String[] args) throws Exception {
-        final String tier = Cfg.oneOf("TIER", "a", "a", "b");
-        final String deser = Cfg.oneOf("DESER", "shipped", "shipped", "reusing");
         final String startingOffsets =
                 Cfg.oneOf("STARTING_OFFSETS", "earliest", "earliest", "committed");
 
@@ -89,23 +80,19 @@ public final class ComparisonJob {
         // positional constants, rather than at the first record on a task manager.
         SensorBatchSchema.assertFieldOrder(schema);
 
-        final String defaultTable = "a".equals(tier) ? "sensor_events" : "sensor_events_t";
-        final String table = Cfg.str("CLICKHOUSE_TABLE", defaultTable);
+        final String table = Cfg.str("CLICKHOUSE_TABLE", "sensor_events");
 
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         assertParallelism(env);
 
         System.out.printf(
-                "flink arm: tier=%s deser=%s table=%s startingOffsets=%s format=%s parallelism=%d%n",
-                tier,
-                deser,
+                "flink arm: table=%s startingOffsets=%s format=%s parallelism=%d%n",
                 table,
                 startingOffsets,
                 ClickHouseFormat.RowBinaryWithNamesAndTypes,
                 env.getParallelism());
 
-        final KafkaSource<GenericRecord> source =
-                kafkaSource(schema, schemaJson, deser, startingOffsets);
+        final KafkaSource<GenericRecord> source = kafkaSource(schema, startingOffsets);
 
         // No per-operator setParallelism anywhere in this job: every operator runs
         // at the cluster's resolved parallelism.default — config.yaml's value, or
@@ -117,23 +104,14 @@ public final class ComparisonJob {
                 env.fromSource(source, WatermarkStrategy.noWatermarks(), "kafka-sensor-batches");
         batches.uid("kafka-sensor-batches");
 
-        if ("a".equals(tier)) {
-            batches.flatMap(new FlattenTierA(schemaJson))
-                    .name("flatten-tier-a")
-                    .uid("flatten-tier-a")
-                    .sinkTo(sink(SensorRow.class, new TierAMapper(), table))
-                    .name("clickhouse-" + table)
-                    .uid("clickhouse-sink-a");
-        } else {
-            batches.flatMap(new FlattenTierB(schemaJson))
-                    .name("flatten-tier-b")
-                    .uid("flatten-tier-b")
-                    .sinkTo(sink(SensorRowT.class, new TierBMapper(), table))
-                    .name("clickhouse-" + table)
-                    .uid("clickhouse-sink-b");
-        }
+        batches.flatMap(new FlattenEvents(schemaJson))
+                .name("flatten-events")
+                .uid("flatten-events")
+                .sinkTo(sink(SensorRow.class, new SensorRowMapper(), table))
+                .name("clickhouse-" + table)
+                .uid("clickhouse-sink");
 
-        env.execute("comparison-flink-tier-" + tier + "-" + deser);
+        env.execute("comparison-flink");
     }
 
     /**
@@ -192,8 +170,7 @@ public final class ComparisonJob {
     // public API. Suppressed rather than avoided so the STARTING_OFFSETS=committed
     // path keeps Spate's exact semantics available.
     @SuppressWarnings("deprecation")
-    private static KafkaSource<GenericRecord> kafkaSource(
-            Schema schema, String schemaJson, String deser, String startingOffsets) {
+    private static KafkaSource<GenericRecord> kafkaSource(Schema schema, String startingOffsets) {
 
         final String registryUrl = Cfg.str("REGISTRY_URL", "http://spate-bench-redpanda:8081");
 
@@ -201,13 +178,12 @@ public final class ComparisonJob {
         // from the Kafka record envelope, and the value-only path skips wrapping each
         // record in a ConsumerRecord view.
         //
-        // The produced type is GenericRecordAvroTypeInfo (both schemas report it), so
-        // a chain break here would cost Avro serialization rather than Kryo — but it
-        // would still serialize the schema-resolved record on every hop, which is why
-        // the job is one chain.
-        final DeserializationSchema<GenericRecord> valueSchema = "reusing".equals(deser)
-                ? new ReusingAvroDeserializationSchema(schemaJson, registryUrl)
-                : ConfluentRegistryAvroDeserializationSchema.forGeneric(schema, registryUrl);
+        // The produced type is GenericRecordAvroTypeInfo, so a chain break here
+        // would cost Avro serialization rather than Kryo — but it would still
+        // serialize the schema-resolved record on every hop, which is why the job
+        // is one chain.
+        final DeserializationSchema<GenericRecord> valueSchema =
+                ConfluentRegistryAvroDeserializationSchema.forGeneric(schema, registryUrl);
 
         final OffsetsInitializer offsets = "committed".equals(startingOffsets)
                 // Same semantics as the Spate arm's auto.offset.reset=earliest with a

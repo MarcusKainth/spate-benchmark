@@ -36,7 +36,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::ceiling::{self, Ceiling};
-use crate::corpus::{self, Tier};
+use crate::corpus;
 use crate::entrant::{Container, Role, Variant};
 use crate::environment::{Environment, HEADROOM_LIMIT};
 use crate::infra::{self, Endpoints};
@@ -74,15 +74,12 @@ use crate::serverside;
 /// conventional.
 ///
 /// `variant.mode` is therefore recorded on every record, and it has to be a
-/// component of whatever key decides what shares an axis. The site's `groupKey`
-/// in `website/plugins/bench-data/index.js` already includes `tier` for a weaker
-/// version of exactly this reason — before it did, the page drew all eight arms
-/// on one axis with one bar normaliser and a tier-B arm's smaller row count read
-/// as a slower system. That file is not owned by this change; what it needs is
-/// one more component, `` `mode-${rec.variant?.mode ?? '?'}` ``, alongside the
-/// tier one. `variantKey` already separates the two into different *rows*
-/// because `mode` is in the variant map, but a row is not an axis, and it is the
-/// axis that misleads.
+/// component of whatever key decides what shares an axis: the site's `groupKey`
+/// in `website/plugins/bench-data/index.js` carries a
+/// `` `mode-${rec.variant?.mode ?? '?'}` `` component for exactly this reason.
+/// `variantKey` already separates the two modes into different *rows* because
+/// `mode` is in the variant map, but a row is not an axis, and it is the axis
+/// that misleads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Replay a prefilled topic to exhaustion and time the whole drain.
@@ -127,8 +124,9 @@ pub enum Mode {
     /// harness. See [`OFFERED_RATE_MIN_SHARE`].
     Sustained {
         /// Messages per second the producer is scheduled to offer. Messages, not
-        /// rows: the corpus's fan-out is a tier property, so a message rate is
-        /// the one figure that means the same thing for tier A and tier B.
+        /// rows: the workload filters, so a message's row yield is a property of
+        /// the transform and a message rate is the figure that does not depend
+        /// on it.
         offered_msgs_per_s: u64,
         /// Seconds the measurement window is held open once the arm has proved
         /// it is consuming.
@@ -497,14 +495,12 @@ pub fn prefill(root: &Path, opts: &RunOptions) -> Result<(), String> {
     let verified = corpus::verify_corpus(&ep.bootstrap, &opts.topic, schema_id, 64);
     eprintln!("verified {verified} messages against the contract");
 
-    for tier in [Tier::A, Tier::B] {
-        // The integer-only count. The full `expected` formats a string
-        // fingerprint per row, which is right for a once-per-arm gate over a
-        // bounded window and is ~15s of pure waste when all that is wanted is
-        // how many rows a complete drain must produce.
-        let rows = corpus::expected_rows(opts.batches, tier);
-        eprintln!("expected tier {}: {rows} rows", tier.name());
-    }
+    // The integer-only count. The full `expected` formats a string
+    // fingerprint per row, which is right for a once-per-arm gate over a
+    // bounded window and is ~15s of pure waste when all that is wanted is
+    // how many rows a complete drain must produce.
+    let rows = corpus::expected_rows(opts.batches);
+    eprintln!("expected: {rows} rows");
     Ok(())
 }
 
@@ -598,10 +594,9 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
             .map(|(k, v)| format!("{k}={}", knob_text(v)))
             .collect();
         eprintln!(
-            "  {}:{}  tier {}  {}{}",
+            "  {}:{}  {}{}",
             a.entrant.id(),
             a.variant.id,
-            a.variant.tier,
             a.variant
                 .reports
                 .get("wire_format")
@@ -702,10 +697,9 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
         }
     }
 
-    // Integer-only: see the note in `prefill`. These are the drain targets,
+    // Integer-only: see the note in `prefill`. This is the drain target,
     // not the gate, so the closed-form fingerprints are not wanted here.
-    let corpus_rows_a = corpus::expected_rows(opts.batches, Tier::A);
-    let corpus_rows_b = corpus::expected_rows(opts.batches, Tier::B);
+    let corpus_rows = corpus::expected_rows(opts.batches);
 
     let mut refusals = Vec::new();
     let mut emitted = 0usize;
@@ -716,10 +710,7 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     // and batching aliases that drift onto whichever arm went last.
     for rep in 1..=opts.reps {
         for arm in arms {
-            let expected_rows = match arm.variant.tier.as_str() {
-                "b" => corpus_rows_b,
-                _ => corpus_rows_a,
-            };
+            let expected_rows = corpus_rows;
             eprintln!(
                 "\n=== rep {rep}/{} — {}:{} ===",
                 opts.reps,
@@ -878,14 +869,14 @@ enum Load {
 /// What a sustained window measured that a drain window cannot.
 struct Sustained {
     /// Offered rows per second: the producer's scheduled **message** rate at the
-    /// tier's own row yield.
+    /// workload's own row yield.
     ///
-    /// Converted at the tier's yield rather than at `EVENTS_PER_BATCH`, and that
-    /// is the same defect the headroom gate already had once: tier B drops about
-    /// a quarter of every message's events, so comparing its consumed row rate
-    /// against tier A's yield would understate its share by 1.36x and report a
-    /// saturating arm as keeping up. `rows_per_message` is the one conversion,
-    /// used by both.
+    /// Converted at the measured yield rather than at `EVENTS_PER_BATCH`,
+    /// because the filters drop about a quarter of every message's events:
+    /// comparing the consumed row rate against the raw event count would
+    /// understate an arm's share by 1.36x and report a saturating arm as
+    /// keeping up. `rows_per_message` is the one conversion, used by both this
+    /// and the headroom gate.
     offered_rows_per_s: f64,
     /// Consumed rows per second over offered rows per second.
     kept_up_share: f64,
@@ -1061,10 +1052,6 @@ fn measure(
     schema_id: u32,
     base_flags: &[Flag],
 ) -> Result<Measured, String> {
-    let tier = match arm.variant.tier.as_str() {
-        "b" => Tier::B,
-        _ => Tier::A,
-    };
     let image = arm
         .image
         .clone()
@@ -1094,7 +1081,6 @@ fn measure(
             ceiling,
             arm,
             opts,
-            tier,
             &image,
             expected_rows,
             schema_id,
@@ -1143,7 +1129,7 @@ fn measure(
 
     // This record's own copy of the infrastructure. Every other field of it is
     // shared by the whole sweep, but the ClickHouse ceiling is measured per
-    // insert format and per tier, so `infra::bring_up` — which runs before any
+    // insert format, so `infra::bring_up` — which runs before any
     // arm is chosen — leaves it zero and it is filled in here, where the arm is
     // known. See `report::Infra::ceiling_rows_per_s`.
     let mut infra_for_record = infra.clone();
@@ -1159,7 +1145,6 @@ fn measure(
         RunMeta::new(&env.spec.id, &env.digest, opts.trigger, infra_for_record),
     )
     .rep(rep, opts.reps)
-    .variant("tier", arm.variant.tier.clone())
     .variant(
         "approach",
         format!("{:?}", arm.variant.approach).to_lowercase(),
@@ -1206,7 +1191,7 @@ fn measure(
     }
 
     // The variant map is written for a refused arm too. A gap that cannot say
-    // which tier and which configuration it is a gap in is not much better than
+    // which arm and which configuration it is a gap in is not much better than
     // no gap at all.
     if let Ok(d) = &outcome
         && status.carries_metrics()
@@ -1322,7 +1307,6 @@ fn run_arm(
     ceiling: &Ceiling,
     arm: &Arm<'_>,
     opts: &RunOptions,
-    tier: Tier,
     image: &str,
     expected_rows: u64,
     schema_id: u32,
@@ -1334,7 +1318,7 @@ fn run_arm(
         ep.ch_port,
         &ep.ch_user,
         &ep.ch_password,
-        &format!("TRUNCATE TABLE {}", tier.table()),
+        &format!("TRUNCATE TABLE {}", corpus::TABLE),
     )
     .map_err(|e| format!("truncate failed: {e}"))?;
 
@@ -1365,7 +1349,7 @@ fn run_arm(
             ep.ch_port,
             &ep.ch_user,
             &ep.ch_password,
-            &format!("SELECT count() FROM {}", tier.table()),
+            &format!("SELECT count() FROM {}", corpus::TABLE),
         )
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -1555,10 +1539,9 @@ fn run_arm(
                     &logs,
                 ));
             };
-            let rows =
-                rows_in_window(ep, tier, from_ms, to_ms).map_err(|e| with_logs(&e, &logs))?;
+            let rows = rows_in_window(ep, from_ms, to_ms).map_err(|e| with_logs(&e, &logs))?;
             let latency =
-                latency_in_window(ep, tier, from_ms, to_ms).map_err(|e| with_logs(&e, &logs))?;
+                latency_in_window(ep, from_ms, to_ms).map_err(|e| with_logs(&e, &logs))?;
 
             #[expect(
                 clippy::cast_precision_loss,
@@ -1645,7 +1628,7 @@ fn run_arm(
     // body of `Ceiling::headroom` and leaves this call site alone. The
     // rows-to-messages conversion stays here and only here, because only the
     // driver knows the row yield it actually measured — see `rows_per_message`
-    // for the tier-B defect that reasoning exists to prevent.
+    // for the yield defect that reasoning exists to prevent.
     let wire_format = arm
         .variant
         .reports
@@ -1661,7 +1644,6 @@ fn run_arm(
         },
         rows_per_s,
         wire_format,
-        tier,
     });
     eprintln!("  headroom: {}", headroom.summary());
     note.push_str(&format!("; headroom {}", headroom.summary()));
@@ -1701,7 +1683,7 @@ fn run_arm(
     // gate, whose `uniqExact` scans charge CPU-seconds apiece to the same log —
     // they are excluded by `query_kind = 'Insert'`, but running the read first
     // keeps the figure independent of how strict the gate happens to be.
-    let server = measure_server_side(ep, tier, &costs, &mut note);
+    let server = measure_server_side(ep, &costs, &mut note);
 
     // Correctness gates. An arm that loses rows is faster for the wrong reason,
     // and one that computes different values did different work.
@@ -1710,7 +1692,6 @@ fn run_arm(
         ep.ch_port,
         &ep.ch_user,
         &ep.ch_password,
-        tier,
         GATE_MAX_BATCHES,
     )
     .map_err(|e| with_logs(&e, &logs))?;
@@ -2057,9 +2038,9 @@ fn dead_container(
     ))
 }
 
-/// Rows one message yields for the tier under measurement.
+/// Rows one message yields under the workload.
 ///
-/// Tier A lands every event; tier B filters, so the same message lands about
+/// The filters drop events, so a message lands about
 /// 73.5 of its 100. Derived from the corpus expectation the run already computed
 /// rather than from `EVENTS_PER_BATCH`, so the two cannot drift.
 #[expect(
@@ -2103,9 +2084,9 @@ fn arm_peak_anon(costs: &[(String, sampler::Samples)], summed: f64) -> f64 {
 
 /// The database this harness writes into, as `system.query_log` spells it.
 ///
-/// `corpus::ddl_statements` creates the target tables unqualified, so they land
+/// `corpus::ddl_statements` creates the target table unqualified, so it lands
 /// in ClickHouse's default database; the log always writes the qualified name,
-/// and a predicate built from `Tier::table()` alone would match nothing at all —
+/// and a predicate built from `corpus::TABLE` alone would match nothing at all —
 /// which looks exactly like an arm that issued no inserts.
 const TARGET_DATABASE: &str = "default";
 
@@ -2127,12 +2108,11 @@ const TARGET_DATABASE: &str = "default";
 /// as "this arm cost the server nothing".
 fn measure_server_side(
     ep: &Endpoints,
-    tier: Tier,
     costs: &[(String, sampler::Samples)],
     note: &mut String,
 ) -> Option<serverside::ServerSideCost> {
     let series: Vec<&sampler::Samples> = costs.iter().map(|(_, s)| s).collect();
-    let table = serverside::qualify(TARGET_DATABASE, tier.table());
+    let table = serverside::qualify(TARGET_DATABASE, corpus::TABLE);
     let measured = serverside::Window::spanning(&series).and_then(|w| {
         serverside::measure(
             &ep.ch_host,
@@ -2167,9 +2147,8 @@ fn measure_server_side(
 /// the rows the driver counted in the target table, so it is the one that may be
 /// added to the arm's own `cpu_us_per_row`; `ch_cpu_us_per_written_row` divides
 /// by what the server says it wrote, so it is the one that describes the insert
-/// format. They coincide for a tier-A arm that inserts each row exactly once,
-/// and diverge for one that duplicated or that lands rows a tier-B filter then
-/// drops.
+/// format. They coincide for an arm that inserts each row exactly once,
+/// and diverge for one that duplicated.
 ///
 /// Every counter the server did not report is omitted rather than defaulted.
 /// `ProfileEvents` omits any counter whose value is zero, so `crate::serverside`
@@ -2527,11 +2506,11 @@ fn sampler_window_ms(costs: &[(String, crate::sampler::Samples)]) -> Option<(u64
 /// to discover — after an arm has finished running. `ingest_ts` is not in the
 /// table's `ORDER BY`, so the predicate costs a full scan either way and the
 /// integer form gives up nothing.
-fn rows_in_window(ep: &Endpoints, tier: Tier, from_ms: u64, to_ms: u64) -> Result<u64, String> {
+fn rows_in_window(ep: &Endpoints, from_ms: u64, to_ms: u64) -> Result<u64, String> {
     let sql = format!(
         "SELECT count() FROM {} WHERE toUnixTimestamp64Milli(ingest_ts) >= {from_ms} \
          AND toUnixTimestamp64Milli(ingest_ts) < {to_ms}",
-        tier.table()
+        corpus::TABLE
     );
     let out =
         crate::docker::clickhouse_sql(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password, &sql)
@@ -2569,12 +2548,7 @@ fn rows_in_window(ep: &Endpoints, tier: Tier, from_ms: u64, to_ms: u64) -> Resul
 /// `quantiles` renders as `[a,b,c]` in the tab-separated response this module
 /// already splits on tabs and newlines, and a second grammar to parse is a
 /// second thing that can be wrong about a number after the arm has gone.
-fn latency_in_window(
-    ep: &Endpoints,
-    tier: Tier,
-    from_ms: u64,
-    to_ms: u64,
-) -> Result<Latency, String> {
+fn latency_in_window(ep: &Endpoints, from_ms: u64, to_ms: u64) -> Result<Latency, String> {
     let sql = format!(
         "SELECT quantile(0.5)(lat), quantile(0.99)(lat), quantile(0.999)(lat), max(lat), \
                 count() \
@@ -2583,7 +2557,7 @@ fn latency_in_window(
                FROM {} \
                WHERE toUnixTimestamp64Milli(ingest_ts) >= {from_ms} \
                  AND toUnixTimestamp64Milli(ingest_ts) < {to_ms})",
-        tier.table()
+        corpus::TABLE
     );
     let out =
         crate::docker::clickhouse_sql(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password, &sql)
@@ -3021,7 +2995,6 @@ fn substitute(
             },
         ),
         ("{{group_id}}", group_id.to_owned()),
-        ("{{tier}}", variant.tier.clone()),
         // Drain replays a prefilled corpus from the beginning; sustained starts
         // at the tail. `Mode::offset_reset` carries the argument, and it is not
         // a preference — the wrong value here fails silently and publishes a
@@ -3121,9 +3094,8 @@ mod tests {
     /// A variant carrying the Flink arm's sink knobs, for the tuning tests.
     fn tunable_variant() -> Variant {
         Variant {
-            id: "tier-a".to_owned(),
-            label: "tier-a".to_owned(),
-            tier: "a".to_owned(),
+            id: "rowbinary-nt".to_owned(),
+            label: "rowbinary-nt".to_owned(),
             approach: crate::entrant::Approach::Realistic,
             unshipped: Vec::new(),
             default: true,
@@ -3144,7 +3116,7 @@ mod tests {
         RunOptions {
             reps: 1,
             mode: Mode::Drain,
-            env_id: "mac-m5max".to_owned(),
+            env_id: "test-env".to_owned(),
             trigger: Trigger::Tuning,
             dry_run: true,
             fresh_infra: false,
@@ -3188,19 +3160,23 @@ mod tests {
         // AsyncSinkWriter would refuse to construct, minutes in, with a message
         // naming neither knob.
         let problems = unrunnable_knobs(
-            "flink:tier-a",
+            "flink:rowbinary-nt",
             &tunable_variant(),
             &[buffered_exceeds_batch()],
             &tuning_opts(&[("max_rows", 262_144)]),
         );
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].contains("flink:tier-a"), "{}", problems[0]);
+        assert!(
+            problems[0].contains("flink:rowbinary-nt"),
+            "{}",
+            problems[0]
+        );
         assert!(problems[0].contains("buffered_rows"), "{}", problems[0]);
 
         // Raising both together is the runnable cell, and nothing objects to it.
         assert!(
             unrunnable_knobs(
-                "flink:tier-a",
+                "flink:rowbinary-nt",
                 &tunable_variant(),
                 &[buffered_exceeds_batch()],
                 &tuning_opts(&[("max_rows", 262_144), ("buffered_rows", 1_048_576)]),
@@ -3215,7 +3191,7 @@ mod tests {
         // knob at 8, and write the misspelling into the record's variant map —
         // a cell reporting a configuration it never ran.
         let problems = unrunnable_knobs(
-            "flink:tier-a",
+            "flink:rowbinary-nt",
             &tunable_variant(),
             &[],
             &tuning_opts(&[("paralellism", 4)]),
@@ -3325,10 +3301,9 @@ mod tests {
         .gate(TEST_MESSAGE_BYTES, TEST_DIGEST)
     }
 
-    fn ingest(format: &str, tier: Tier, rows_per_s: u64) -> ceiling::IngestCeiling {
+    fn ingest(format: &str, rows_per_s: u64) -> ceiling::IngestCeiling {
         ceiling::IngestCeiling {
             format: format.to_owned(),
-            tier: tier.name().to_owned(),
             rows_per_s,
             mb_per_s: 1.0,
             row_bytes: 91,
@@ -3350,35 +3325,33 @@ mod tests {
     /// so an arm has to be converted into messages before the two are compared —
     /// and that conversion is the driver's risk, because only the driver knows
     /// the row yield it actually measured. Multiplying by `EVENTS_PER_BATCH`
-    /// instead is only right for tier A, and it made the gate 1.36x too lenient
-    /// for tier B: the arm below sits at 95% of the ceiling and used to gate at
+    /// instead ignores the filters and makes the gate 1.36x too lenient:
+    /// the arm below sits at 95% of the ceiling and would gate at
     /// 70%, i.e. published as `ok` while the number described the broker.
     #[test]
-    fn a_tier_b_arm_is_gated_against_the_message_ceiling_and_not_a_row_ceiling() {
+    fn an_arm_is_gated_against_the_message_ceiling_at_the_workloads_own_yield() {
         let batches = 10_000u64;
         let msgs_per_s = 300_000u64;
-        let per_message_a = rows_per_message(corpus::expected_rows(batches, Tier::A), batches);
-        let per_message_b = rows_per_message(corpus::expected_rows(batches, Tier::B), batches);
+        let per_event = f64::from(corpus::EVENTS_PER_BATCH);
+        let per_message = rows_per_message(corpus::expected_rows(batches), batches);
 
-        // Tier A lands every event; tier B lands about three quarters of them.
-        assert!((per_message_a - f64::from(corpus::EVENTS_PER_BATCH)).abs() < 1e-9);
+        // The filters drop about a quarter of every message's events.
         assert!(
-            (70.0..80.0).contains(&per_message_b),
-            "tier B yields {per_message_b} rows per message"
+            (70.0..80.0).contains(&per_message),
+            "the workload yields {per_message} rows per message"
         );
 
         let gate = gate(Some(msgs_per_s), Vec::new());
         // An arm at 95% of the proven consume ceiling, in rows.
         #[expect(clippy::cast_precision_loss, reason = "small integers")]
-        let rows_per_s = 0.95 * msgs_per_s as f64 * per_message_b;
+        let rows_per_s = 0.95 * msgs_per_s as f64 * per_message;
 
         // The conversion the driver performs: rows back into messages at the
-        // tier's own yield.
+        // workload's own yield.
         let honest = gate.headroom(ceiling::Achieved {
-            msgs_per_s: rows_per_s / per_message_b,
+            msgs_per_s: rows_per_s / per_message,
             rows_per_s,
             wire_format: "rowbinary",
-            tier: Tier::B,
         });
         let share = honest.binding().expect("the consume ceiling applied").share;
         assert!((share - 0.95).abs() < 1e-9, "share was {share}");
@@ -3387,14 +3360,13 @@ mod tests {
             "an arm at 95% of the ceiling must be infra-bound"
         );
 
-        // The defect, reproduced: converting at tier A's yield understates the
-        // share by exactly the ratio of the two yields, which is enough to pass
-        // an arm that should have been refused.
+        // The defect, reproduced: converting at the raw event count understates
+        // the share by exactly the ratio of the two yields, which is enough to
+        // pass an arm that should have been refused.
         let understated = gate.headroom(ceiling::Achieved {
-            msgs_per_s: rows_per_s / per_message_a,
+            msgs_per_s: rows_per_s / per_event,
             rows_per_s,
             wire_format: "rowbinary",
-            tier: Tier::B,
         });
         let wrong = understated
             .binding()
@@ -3402,9 +3374,10 @@ mod tests {
             .share;
         assert!(
             !understated.infra_bound(),
-            "the old gate should have let this through, or the test proves nothing"
+            "a gate converting at the raw event count would let this through, or the test \
+             proves nothing"
         );
-        assert!((share / wrong - per_message_a / per_message_b).abs() < 1e-9);
+        assert!((share / wrong - per_event / per_message).abs() < 1e-9);
     }
 
     /// `methodology/` says an arm above 70% of **either** ceiling is
@@ -3417,17 +3390,13 @@ mod tests {
     /// when the number describes the target.
     #[test]
     fn an_arm_bound_by_clickhouse_is_infra_bound_even_with_broker_headroom() {
-        let gate = gate(
-            Some(1_000_000),
-            vec![ingest("rowbinary", Tier::A, 4_000_000)],
-        );
+        let gate = gate(Some(1_000_000), vec![ingest("rowbinary", 4_000_000)]);
         let arm = ceiling::Achieved {
             // A tenth of the consume ceiling: nothing to see on the broker.
             msgs_per_s: 100_000.0,
-            // Nine tenths of what ClickHouse took for this format and tier.
+            // Nine tenths of what ClickHouse took for this format.
             rows_per_s: 3_600_000.0,
             wire_format: "rowbinary",
-            tier: Tier::A,
         };
         let headroom = gate.headroom(arm);
 
@@ -3463,7 +3432,6 @@ mod tests {
             msgs_per_s: 100_000.0,
             rows_per_s: 10_000_000.0,
             wire_format: "rowbinary",
-            tier: Tier::A,
         });
         assert!(nothing.shares().is_empty());
         assert!(!nothing.is_proven());
@@ -3473,16 +3441,13 @@ mod tests {
         assert!(nothing.summary().contains("no ceiling applied"));
 
         // The broker was measured; this arm's insert format was not.
-        let partial = gate(
-            Some(1_000_000),
-            vec![ingest("rowbinary", Tier::A, 4_000_000)],
-        )
-        .headroom(ceiling::Achieved {
-            msgs_per_s: 100_000.0,
-            rows_per_s: 10_000_000.0,
-            wire_format: "native",
-            tier: Tier::A,
-        });
+        let partial = gate(Some(1_000_000), vec![ingest("rowbinary", 4_000_000)]).headroom(
+            ceiling::Achieved {
+                msgs_per_s: 100_000.0,
+                rows_per_s: 10_000_000.0,
+                wire_format: "native",
+            },
+        );
         assert_eq!(partial.shares().len(), 1);
         assert!(!partial.infra_bound());
         assert!(
@@ -3509,8 +3474,8 @@ mod tests {
         let committed = ceiling::Ceilings {
             consume: None,
             clickhouse: vec![
-                ingest("rowbinary", Tier::A, 4_000_000),
-                ingest("rowbinary_nt", Tier::A, 3_100_000),
+                ingest("rowbinary", 4_000_000),
+                ingest("rowbinary_nt", 3_100_000),
             ],
         };
         let gate = committed.gate(TEST_MESSAGE_BYTES, TEST_DIGEST);
@@ -3519,7 +3484,6 @@ mod tests {
                 msgs_per_s: 10_000.0,
                 rows_per_s: 1_000_000.0,
                 wire_format,
-                tier: Tier::A,
             }
         }
 
@@ -3545,19 +3509,6 @@ mod tests {
                 .unwrap_or(0),
             0
         );
-        // Same format, wrong tier: tier is half the key, because tier B carries
-        // an extra column and drops about a quarter of the rows.
-        let tier_b = ceiling::Achieved {
-            tier: Tier::B,
-            ..achieved("rowbinary")
-        };
-        assert_eq!(
-            gate.headroom(tier_b)
-                .applied_ingest_rows_per_s()
-                .unwrap_or(0),
-            0
-        );
-
         // And a ceiling the gate refused is not the ceiling the arm cleared. The
         // file still holds it; the gate dropped it for a different envelope.
         let stale = committed.gate(TEST_MESSAGE_BYTES, "0123456789ab");
@@ -3722,28 +3673,28 @@ mod tests {
     }
 
     /// The offered rate is a **message** rate and the consumed rate is a row
-    /// rate, so the conversion has to happen at the tier's own yield. This is
-    /// the same defect the headroom gate carried: tier B lands about 73.5 rows
-    /// per message, so converting at tier A's 100 would make a saturating tier-B
-    /// arm look as though it kept up.
+    /// rate, so the conversion has to happen at the workload's own yield. This
+    /// is the same defect the headroom gate guards against: the filters land
+    /// about 73.5 rows per message, so converting at the raw 100 would make a
+    /// saturating arm look as though it kept up.
     #[test]
-    fn the_offered_row_rate_is_the_message_rate_at_the_tiers_own_yield() {
+    fn the_offered_row_rate_is_the_message_rate_at_the_workloads_own_yield() {
         let batches = 10_000u64;
         let offered_msgs_per_s = 40_000.0;
-        let per_message_a = rows_per_message(corpus::expected_rows(batches, Tier::A), batches);
-        let per_message_b = rows_per_message(corpus::expected_rows(batches, Tier::B), batches);
+        let per_event = f64::from(corpus::EVENTS_PER_BATCH);
+        let per_message = rows_per_message(corpus::expected_rows(batches), batches);
 
-        // A tier-B arm consuming exactly what is offered.
-        let consumed = offered_msgs_per_s * per_message_b;
-        let honest = consumed / (offered_msgs_per_s * per_message_b);
+        // An arm consuming exactly what is offered.
+        let consumed = offered_msgs_per_s * per_message;
+        let honest = consumed / (offered_msgs_per_s * per_message);
         assert!((honest - 1.0).abs() < 1e-9);
 
-        // The defect, reproduced: dividing by tier A's yield overstates the
+        // The defect, reproduced: dividing by the raw event count overstates the
         // denominator by the ratio of the yields, so an arm that kept up
         // perfectly is recorded as having managed only three quarters of the
         // offered rate — and flagged SATURATED for it.
-        let understated = consumed / (offered_msgs_per_s * per_message_a);
-        assert!((honest / understated - per_message_a / per_message_b).abs() < 1e-9);
+        let understated = consumed / (offered_msgs_per_s * per_event);
+        assert!((honest / understated - per_event / per_message).abs() < 1e-9);
         assert!(
             understated < KEPT_UP_MIN,
             "the wrong yield should have flagged this arm, or the test proves nothing"

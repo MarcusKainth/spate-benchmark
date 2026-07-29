@@ -102,7 +102,7 @@ execution:
 
 pipeline:
   # Chained operators hand the same reference downstream instead of copying.
-  # FlattenTierA/FlattenTierB are written for it.
+  # FlattenEvents is written for it.
   object-reuse: true
   operator-chaining:
     # Load-bearing: source, flatMap and sink writer are one chain, so no

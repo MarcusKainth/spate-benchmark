@@ -25,15 +25,15 @@ durability  = "offset-commit"
 interval_ms = 5000
 
 [[variants]]
-id       = "tier-a"
-label    = "tier-a"
-tier     = "a"
+id       = "rowbinary"
+label    = "rowbinary"
+default  = true
 approach = "realistic"
 reports  = { wire_format = "rowbinary" }
 
 [[variants]]
-id       = "tier-a-hand"
-label    = "tier-a-hand"
-tier     = "a"
-approach = "stripped"
-reports  = { wire_format = "rowbinary" }
+id        = "hand"
+label     = "hand"
+approach  = "stripped"
+unshipped = ["hand-rolled decode"]
+reports   = { wire_format = "rowbinary" }

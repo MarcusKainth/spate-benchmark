@@ -15,8 +15,8 @@ Each entry below comes from `[planned].blockers` in that system's
 
 | System | Runtime | Arms |
 |---|---|---|
-| **Spate** | native (Rust) | Native and RowBinary wire formats, both decode paths, tiers A and B |
-| **Apache Flink 2.2.1** | JVM | Tiers A and B, plus a clearly-labelled secondary arm quantifying what Flink's shipped Avro deserializer costs |
+| **Spate** | native (Rust) | Native and RowBinary wire formats |
+| **Apache Flink 2.2.1** | JVM | RowBinaryWithNamesAndTypes, via the official ClickHouse connector |
 
 ## Not yet measured
 
@@ -78,16 +78,11 @@ Community Licence over parts of the connector set.
   Cheapest of the outstanding work and likely the most interesting result.
 - **A latency curve.** Percentiles against offered load, which needs a sweep mode
   the harness does not have yet.
-- **The Linux cloud environment** is built: an approval-gated pipeline launches
-  a disposable EC2 c8g.8xlarge, runs the suite, and returns results as a
-  validated pull request. What remains before its numbers publish: measure its
-  ceilings (`bench ceiling --measure --write` via the pipeline's bootstrap mode)
-  and land the first sweep. From then on it is the gold-standard environment,
-  and the macOS numbers are historical.
-- **Removing the retired macOS environment's numbers** once the cloud
-  environment has published records — deliberately a follow-up, because the
-  methodology's "results are never overwritten" guarantee has to be amended in
-  `methodology/comparability.md` before any record is deleted, not after.
+- **The first published sweep.** The cloud pipeline is built: an approval-gated
+  pipeline launches a disposable EC2 c8g.8xlarge, runs the suite, and returns
+  results as a validated pull request. What remains before numbers publish:
+  measure the environment's ceilings (`bench ceiling --measure --write` via the
+  pipeline's bootstrap mode) and land the first sweep.
 - **Sending competitor configurations upstream** and asking whether we
   handicapped anyone, then linking whatever comes back — including "they told us
   to change X and we did".

@@ -279,8 +279,6 @@ pub struct Variant {
     pub id: String,
     /// Human label.
     pub label: String,
-    /// `a` or `b`.
-    pub tier: String,
     /// The anti-gaming valve.
     pub approach: Approach,
     /// Components this variant selects that the entrant's project does not ship:
@@ -766,12 +764,6 @@ fn validate_variants(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) ->
                 v.id
             )));
         }
-        if !matches!(v.tier.as_str(), "a" | "b") {
-            errs.push(at(format!(
-                "variant {:?} has tier {:?}, expected a|b",
-                v.id, v.tier
-            )));
-        }
         // Rule 5: the insert format is not the same server-side work across
         // systems, so a results table that omits it is indefensible.
         if !v.reports.contains_key("wire_format") {
@@ -894,7 +886,6 @@ mod tests {
         Variant {
             id: id.to_owned(),
             label: id.to_owned(),
-            tier: "a".to_owned(),
             approach,
             default: false,
             env: BTreeMap::new(),

@@ -38,21 +38,19 @@ those rows into ClickHouse.
   this is a generator constant and not a schema change. It was raised from 20 to
   buy consume-path headroom.
 - Target: [`workload/clickhouse/ddl.sql`](workload/clickhouse/ddl.sql) —
-  `sensor_events` for tier A, `sensor_events_t` for tier B. Column order is the
-  wire contract.
+  the `sensor_events` table. Column order is the wire contract.
 - Wire format: Confluent framing (`0x00` + big-endian u32 schema id + datum),
   subject `sensor-batches-value`, against a live Schema Registry.
 
-**Tier A (transport):** decode → flatten → insert. Column mapping only, including
-coalescing a null `region` to `''` (forced by the target column type).
-
-**Tier B (transform):** tier A plus, in this order — drop rows where
-`unit = 'drop'`; drop rows where `quality` is non-null and `< 0.2`; coalesce null
-`region` to `''`; compute `value_scaled = value * 1000 / (event_seq + 1)` as
-integer division truncating toward zero; compute `name_upper` as the **ASCII-only**
-uppercase of `name`. ASCII-only is specified because Java's `String.toUpperCase()`
-is locale-dependent, so "uppercase" alone would not be the same operation in every
-language.
+**The transform**, applied to every decoded row, in this order — drop rows where
+`unit = 'drop'` (the sentinel); drop rows where `quality` is non-null and
+`< 0.2`; coalesce null `region` to `''` (forced by the target column type);
+compute `value_scaled = value * 1000 / (event_seq + 1)` as integer division
+truncating toward zero; compute `name_upper` as the **ASCII-only** uppercase of
+`name`. ASCII-only is specified because Java's `String.toUpperCase()` is
+locale-dependent, so "uppercase" alone would not be the same operation in every
+language. About 73.5% of decoded rows survive the two filters and land in
+`sensor_events`.
 
 ## Delivery semantics: at-least-once, matched
 
@@ -78,14 +76,15 @@ site renders them beside the numbers.
    (`pipeline.object-reuse`, buffer timeouts, memory sizing, parallelism), because
    configuration is not code we wrote.
 
-   The reason is symmetry. On the Spate side we choose between two shipped
-   deserializers (`build_value` and `build_serde`) and publish both numbers. If we
-   hand-optimised a competitor's decoder we would no longer be measuring that
-   system, we would be measuring our own Java or Go — and the mirror-image
-   accusation, that we tuned a competitor until it lost, would be just as fair.
+   The reason is symmetry. On the Spate side we take the framework's shipped
+   Avro deserializer exactly as any user would, and the same standard applies to
+   every arm. If we hand-optimised a competitor's decoder we would no longer be
+   measuring that system, we would be measuring our own Java or Go — and the
+   mirror-image accusation, that we tuned a competitor until it lost, would be
+   just as fair.
 
    Pipeline *logic* is different and is yours to write well: the flatten, the
-   tier-B filter and the derived columns are user code in every system, and every
+   filters and the derived columns are user code in every system, and every
    arm writes them.
 
 2. **Optimise hard within rule 1.** Tune as an expert who wants to win would:
@@ -113,9 +112,9 @@ site renders them beside the numbers.
    | `tuned` | Rule-1 compliant, but a configuration a typical user would not deploy. Shown, filterable, never the headline. |
    | `stripped` | Uses code the project does not ship, or drops a guarantee. Never the headline; exists to quantify a specific effect. |
 
-   The valve is not hypothetical: the Flink arm's `ReusingAvroDeserializationSchema`
-   is code *we* wrote, so rule 1 bars it from the headline even though it makes
-   Flink look better.
+   The valve is not decorative: a hand-written replacement for a decoder a
+   system ships is code *we* wrote, so rule 1 bars it from the headline even
+   when it makes that system look better.
 
 4. **Record every deviation.** If the system cannot express part of the spec, put
    it in `[[deviations]]` in the descriptor — machine-readable, so the site renders

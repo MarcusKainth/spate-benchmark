@@ -31,7 +31,7 @@ export type MetricSpec = {
  * may only ever hide what the server already sent — it is also 31 columns of
  * markup shipped to every reader for every arm of every comparability group.
  *
- * So placement is declared, in three tiers:
+ * So placement is declared, in three placements:
  *
  *   `default`    on when the page loads.
  *   `available`  prerendered as a column, off until a reader asks for it.
