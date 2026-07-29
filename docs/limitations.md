@@ -44,18 +44,20 @@ nothing forces it to economise, not what it requires. See
 [the resource envelope](./contract/envelope.md) for the full argument. If you want "how small
 can this run?", that is a different sweep and it has not been done.
 
-## The host is a Mac, and that is a real weakness
+## The host is rented, and older numbers came from a Mac
 
-Docker Desktop runs a Linux VM; a JVM inside it on arm64 is not a JVM on Linux
-bare metal. The cores are heterogeneous and the hypervisor maps vCPUs across
-performance and efficiency cores non-deterministically, which is an irreducible
-variance source — run-to-run spread reached 14.5% on throughput.
+Current measurements run on a fresh EC2 c8g.8xlarge per run — Linux,
+homogeneous physical cores, no VM layer — which retires what used to be this
+section's headline weakness. What remains true: it is a virtualised
+single-tenant instance rather than bare metal, storage is EBS rather than local
+NVMe (deliberately over-provisioned and recorded in the profile), and AWS is a
+shared platform whose behaviour we do not control, only pin and disclose.
 
-Benchmarking guidance we consulted recommended dropping macOS results from scope
-entirely. That was considered and declined, so the numbers are labelled
-indicative and every record carries full environment provenance, which makes a
-later bare-metal re-run an added dataset rather than a rewrite. It remains the
-single most reasonable thing to attack about this suite.
+Records from the retired macOS environment are still published in their own
+comparability group, labelled indicative, with the caveats they always carried
+— a hypervisor mapping vCPUs across heterogeneous cores produced run-to-run
+spread of 14.5%. They are historical: read the cloud environment's numbers
+instead, and see [the roadmap](./roadmap.md) for their planned removal.
 
 ## Tier B is measured, but it is a very small transform
 
