@@ -38,8 +38,20 @@ import os
 import sys
 import time
 
-CG = sys.argv[1]
+CID = sys.argv[1]
 INTERVAL = float(sys.argv[2]) if len(sys.argv) > 2 else 0.1
+
+# The container's cgroup directory depends on the daemon's cgroup driver, so it
+# is resolved HERE, where the tree is visible, rather than assumed by the
+# driver on the host (which, on Docker Desktop, cannot see the tree at all).
+# The `cgroupfs` driver (Docker Desktop's VM) puts containers at docker/<id>;
+# the `systemd` driver (the default beside systemd, e.g. Ubuntu's Docker CE)
+# puts them at system.slice/docker-<id>.scope. Probe both, in that order.
+_CANDIDATES = (
+    f"/cg/docker/{CID}",
+    f"/cg/system.slice/docker-{CID}.scope",
+)
+CG = next((p for p in _CANDIDATES if os.path.isdir(p)), None)
 
 CPU_KEYS = ("usage_usec", "user_usec", "system_usec", "nr_throttled", "throttled_usec")
 MEM_KEYS = ("anon", "file", "slab", "kernel_stack", "sock")
@@ -68,8 +80,9 @@ def scalar(path):
 
 
 def main():
-    if not os.path.isdir(CG):
-        print(f"sampler: no such cgroup {CG}", file=sys.stderr)
+    if CG is None:
+        print(f"sampler: no cgroup for container {CID}; probed "
+              + ", ".join(_CANDIDATES), file=sys.stderr)
         return 2
 
     # Held open for the process lifetime; see the module docstring.
