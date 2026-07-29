@@ -15,6 +15,9 @@ set -euo pipefail
 
 : "${RUN_ID:?}" "${SHA:?}" "${ENV_ID:?}" "${SELECTOR:?}" "${REPS:?}"
 : "${TRIGGER:?}" "${MODE:?}" "${BUCKET:?}" "${TTL_HOURS:?}"
+# The user-data stub exports HOME=/root (cloud-init leaves it unset); fail
+# here in a second, not a minute into the payload where rustup's env needs it.
+: "${HOME:?}"
 
 export PATH="$PATH:/snap/bin"
 
