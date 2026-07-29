@@ -47,7 +47,7 @@ sha2 = "0.11"
 # synchronous — it starts containers and polls a row count — so this is a
 # current-thread runtime built for one call, not an architecture.
 tokio = { version = "1.52", default-features = false, features = ["rt", "time"] }
-toml = "0.9"
+toml = "1.1"
 uuid = { version = "1.18.1", default-features = false, features = ["v7", "std"] }
 
 [workspace.lints.rust]
