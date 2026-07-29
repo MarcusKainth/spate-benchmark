@@ -32,8 +32,10 @@ bench run spate --mode sustained --rate 40000    # latency; has to be asked for
 ```
 
 `--dry-run` is worth using before any full sweep. It prints the exact execution
-list with resolved image digests, which is how you check that "only Spate" really
-means only Spate before spending hours finding out.
+list — one line per arm, with its entrant, variant, tier, wire format and knobs
+— which is how you check that "only Spate" really means only Spate before
+spending hours finding out. (Image digests are resolved and recorded per arm
+when a run actually executes, not in the dry-run.)
 
 ## Two properties worth knowing
 
@@ -61,9 +63,27 @@ That is useful and I would like to know. The most likely causes, in order:
 3. **A real defect in the harness.** Open an issue. A benchmark that cannot be
    reproduced is a claim, not evidence.
 
-## Current gap
+## No credentials required
 
-The Spate arm's image needs credentials for the framework's repository, which is
-private until it publishes. Every other arm builds from a clean clone. This
-weakens reproducibility on precisely the arm that is ours, and it resolves when
-the framework goes public.
+Every arm, including Spate's, builds from a clean clone of this repository. The
+framework is consumed from crates.io and pinned in `Cargo.lock`, so the arm that
+is ours is exactly as reproducible as every arm that is not.
+
+## Reproducing the cloud environment
+
+Published runs execute on a disposable EC2 box — one on-demand `c8g.8xlarge`
+(Graviton4: 32 vCPUs that are 32 physical cores, no SMT), Ubuntu 24.04 arm64,
+a 500 GiB gp3 volume provisioned at 10,000 IOPS and 1,000 MiB/s so storage is
+never the bottleneck being measured. What the box actually executes is public
+and versioned at the SHA it ran: `.github/aws/userdata.sh.tpl` boots it and
+`.github/aws/run-bench.sh` builds the harness from the clone at that SHA and
+runs the suite. The instance type, volume, AMI and those scripts are the whole
+of what makes a number reproducible, and they are all here.
+
+The cloud plumbing that spends the money — the launcher, the collector, and the
+AWS Terraform — runs from a **private operations repository**, because the
+benchmark shares an AWS account and its account shape is not something to
+publish. It changes nothing you can reproduce: a run executes this repo at an
+approved commit and its results come back as an ordinary, validated pull
+request. A full sweep costs roughly the instance-hours it takes at ~$1.3/hour,
+bounded by a 36-hour TTL.

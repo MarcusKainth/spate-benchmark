@@ -782,77 +782,28 @@ fn cmd_build(root: &Path, args: &[String]) -> Result<(), String> {
             "-t".into(),
             build.image.clone(),
         ];
-        let mut secret_env: Vec<(String, String)> = Vec::new();
-        for s in &build.secrets {
-            // The private framework dependency. A BuildKit secret rather than a
-            // build ARG: an ARG is baked into image history, and this
-            // repository's images must never carry a credential.
-            let (arg, env) = build_secret(s)?;
-            argv.push("--secret".into());
-            argv.push(arg);
-            if let Some(kv) = env {
-                secret_env.push(kv);
-            }
+        // No build secrets are defined: every entrant, including Spate, builds
+        // from public sources. The schema keeps the field so a descriptor that
+        // declares one fails here with a real explanation rather than a parse
+        // error.
+        if let Some(s) = build.secrets.first() {
+            return Err(format!(
+                "{}: declares build secret {s:?}, but no build secrets are \
+                 defined — every entrant builds from public sources",
+                e.id()
+            ));
         }
         argv.push(".".into());
 
         println!("building {} -> {}", e.id(), build.image);
         let mut cmd = std::process::Command::new("docker");
         cmd.args(&argv).current_dir(&context);
-        for (k, v) in &secret_env {
-            cmd.env(k, v);
-        }
         let status = cmd.status().map_err(|err| format!("docker: {err}"))?;
         if !status.success() {
             return Err(format!("{}: docker build failed", e.id()));
         }
     }
     Ok(())
-}
-
-/// Resolves a named build secret into a `--secret` argument, and the process
-/// environment it needs.
-///
-/// Prefers `env=` over `src=`, so a token can be handed to BuildKit without ever
-/// being written to disk. The `gh` path exists because that is how this machine
-/// actually authenticates — `gh` installs a credential *helper*, not a
-/// `.git-credentials` store, so the obvious file is absent on a machine that can
-/// nonetheless clone the repository perfectly well.
-///
-/// All of this disappears when the framework publishes to crates.io: there is no
-/// private fetch left to authenticate.
-fn build_secret(id: &str) -> Result<(String, Option<(String, String)>), String> {
-    match id {
-        "gitcred" => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let path = format!("{home}/.git-credentials");
-            if Path::new(&path).is_file() {
-                return Ok((format!("id={id},src={path}"), None));
-            }
-            let token = std::process::Command::new("gh")
-                .args(["auth", "token"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-                .filter(|t| !t.is_empty())
-                .ok_or_else(|| {
-                    "the Spate arm needs a credential for the private framework \
-                     repository. Either authenticate the GitHub CLI (`gh auth login`) \
-                     or create ~/.git-credentials. This requirement disappears when \
-                     the framework publishes to crates.io."
-                        .to_owned()
-                })?;
-            Ok((
-                format!("id={id},env=SPATE_GITCRED"),
-                Some((
-                    "SPATE_GITCRED".to_owned(),
-                    format!("https://x-access-token:{token}@github.com\n"),
-                )),
-            ))
-        }
-        other => Err(format!("unknown build secret {other:?}")),
-    }
 }
 
 fn cmd_stale(root: &Path) -> Result<(), String> {

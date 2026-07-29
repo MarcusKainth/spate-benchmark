@@ -76,6 +76,11 @@ jobs:
       - name: bench run --dry-run
         run: cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- run '*' --dry-run
 
+  # The AWS footprint is not here: the launcher, collector and Terraform live in
+  # the private ops repo (it deploys to a shared account), and that repo runs its
+  # own terraform fmt/validate/tflint/trivy gates. This repo keeps only what is
+  # public and reproducible — the harness, the box payload, and the site.
+
   site:
     name: Site
     runs-on: ubuntu-latest
