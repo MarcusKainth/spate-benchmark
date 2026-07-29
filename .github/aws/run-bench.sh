@@ -76,7 +76,18 @@ payload() {
   read -ra sel <<< "$SELECTOR"
 
   run_step build-entrants "$bench" build "${sel[@]}"
-  run_step prefill "$bench" prefill --env "$ENV_ID"
+  # The run-mode corpus depth (the 1.5M default) is part of what an arm
+  # measures — arms replay the topic to exhaustion — so it is not touched
+  # here. The ceiling pass is different: its corpus is fuel for a measurement
+  # window, and the consume pass REFUSES (DRAINED) when the backlog cannot
+  # outlast the window it sized (seen on the first c8g bootstrap: 1.5M
+  # messages was ~6s of backlog at the calibrated rate). Prefill deep enough
+  # to feed an 8s window at rates well above the calibrated one.
+  if [ "$MODE" = ceiling-bootstrap ]; then
+    run_step prefill "$bench" prefill --env "$ENV_ID" --batches 12000000
+  else
+    run_step prefill "$bench" prefill --env "$ENV_ID"
+  fi
 
   if [ "$MODE" = ceiling-bootstrap ]; then
     run_step ceiling-measure "$bench" ceiling --measure --write --env "$ENV_ID"
