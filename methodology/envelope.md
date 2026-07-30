@@ -4,12 +4,12 @@ Part of [the fairness contract](README.md). What each system is given, what
 the infrastructure around it is given, and the headroom rule that decides
 whether a number describes the system or the rig.
 
-**4 CPUs and 16 GiB of _data plane_ per system.** A system's control plane — a
+**6 CPUs and 24 GiB of _data plane_ per system.** A system's control plane — a
 Flink JobManager, a Connect worker's coordinator — is allocated **on top** of that
 budget, and its **measured** consumption is published alongside the arm's total
 rather than pre-charged against it.
 
-This is a deviation from the more obvious rule ("4 CPU / 16 GiB total, control
+This is a deviation from the more obvious rule ("6 CPU / 24 GiB total, control
 plane included"), it is deliberate, and it is disclosed here and on the site
 because it favours the multi-process arms:
 
@@ -38,7 +38,7 @@ instead of hiding in a swapfile.
 
 CPU is the scarce resource here and memory is not: one arm runs at a time, and
 no arm in this workload needs more than a couple of gigabytes to do its job. So
-every arm gets 16 GiB — several times what any of them will touch.
+every arm gets 24 GiB — several times what any of them will touch.
 
 That is a fairness decision rather than a convenience. A garbage-collected
 runtime held to a tight heap collects more often, and the resulting pauses would
@@ -66,14 +66,24 @@ and is marked as such in the table below.
 
 Infrastructure sits **outside** that budget and is identical for every arm, and is
 declared per environment rather than passed on the command line: Redpanda
-(4 CPUs, 8 GiB) and ClickHouse (9 CPUs, 12 GiB) in the committed environment
+(3 CPUs, 8 GiB) and ClickHouse (16 CPUs, 16 GiB) in the committed environment
 profile.
 
 Those two numbers are the output of a measured search rather than a guess: the
-broker's cap was swept against its own cgroup counters until it was no longer the
-constraint, and ClickHouse was given the cores that freed. The host bounds the
-total: the arm's 4 CPUs, the driver and the sampler must still fit beside the
-infrastructure.
+broker's cap was swept against the measured consume ceiling until it was the
+smallest allocation that does not constrain it (one core fewer costs 24% of the
+ceiling — the broker runs a reactor shard per core — while the cap above it
+measures identically), and ClickHouse was given the cores that freed, since its
+ingest ceiling scales near-linearly with every core it is offered. The host
+bounds the total: the arm's 6 CPUs, the driver and the sampler must still fit
+beside the infrastructure.
+
+One consequence of an 8-partition topic worth stating normatively: a consumer
+thread count below the partition count leaves the slowest consumer owning two
+partitions, and the drain runs at that consumer's pace — a 6-thread arm on 8
+partitions measures the same as a 4-thread one. Per-entrant parallelism knobs
+are therefore sized to the **partition count**, oversubscribed on the envelope's
+CPUs, not to the CPU count.
 
 The Schema Registry is **Redpanda's built-in, Confluent-compatible one** on port
 8081 rather than a separate Confluent container. That removes a second JVM from

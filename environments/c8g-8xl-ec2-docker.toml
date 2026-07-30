@@ -43,28 +43,37 @@ entirely; nothing measured so far suggests it would move these numbers.
 """
 
 # Shared infrastructure. OUTSIDE every arm's envelope and identical for all of
-# them — and identical to the retired reference environment's split on purpose:
-# same envelope, different substrate, so the two environments differ in exactly
-# one thing. The 32-vCPU host leaves ~15 vCPUs of headroom over
-# broker + clickhouse + arm + driver; if this environment's ceiling pass shows
-# an arm gated by ClickHouse where the reference's did not, raising the
-# ClickHouse cap is the knob — and requires re-measuring ceilings under the new
-# caps before anything publishes, because `Ceilings::gate` drops any ceiling
-# whose recorded envelope is not this one.
+# them. This split is the output of a measured search on this instance type
+# (2026-07-30, tuning session on a live c8g.8xlarge):
+#
+#   - The broker cap was swept against the consume ceiling: 3 cpus is the
+#     smallest allocation that does not constrain it (2 cpus costs 24% of the
+#     ceiling — Redpanda runs one reactor shard per core, and 2 shards cannot
+#     serve 8 partitions at full rate even with the cgroup far under its cap;
+#     4 cpus measures identically to 3).
+#   - ClickHouse ingest scales near-linearly with cores through every count
+#     probed (9 -> 18), pegged at 101% of its cap and CFS-throttled at every
+#     winning rung — so its allocation is bounded by the host budget, not by
+#     diminishing returns: 16 cpus is what remains beside the 6-cpu arm
+#     envelope, the broker, and the driver/sampler on a 32-core host.
+#
+# Any change to these caps moves `infra_digest` and requires re-measuring
+# ceilings before anything publishes, because `Ceilings::gate` drops any
+# ceiling whose recorded envelope is not this one.
 [infra]
 partitions = 8
 
 [infra.broker]
 kind     = "redpanda"
 image    = "redpandadata/redpanda:v26.1.13"
-cpus     = "4"
+cpus     = "3"
 memory   = "8g"
 registry = "redpanda-builtin"
 
 [infra.clickhouse]
 image  = "clickhouse/clickhouse-server:26.3"
-cpus   = "9"
-memory = "12g"
+cpus   = "16"
+memory = "16g"
 
 # Measured on this environment by the pipeline's ceiling-bootstrap mode
 # (`bench ceiling --measure --write --env c8g-8xl-ec2-docker` on the box);

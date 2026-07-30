@@ -42,13 +42,13 @@ context    = "../.."
 dockerfile = "Dockerfile"
 image      = "spate-bench-flink"
 
-# Flink splits across two containers. The data plane gets the full 4 CPU / 16 GiB
+# Flink splits across two containers. The data plane gets the full 6 CPU / 24 GiB
 # envelope — the same budget every other arm gets — and the JobManager is
-# allocated on top as control plane. Its measured consumption (0.07–0.11 cores)
+# allocated on top as control plane. Its measured consumption (0.07–0.21 cores)
 # is published beside the arm's total rather than pre-charged against it.
 [envelope]
-cpus   = "4"
-memory = "16g"
+cpus   = "6"
+memory = "24g"
 
 [[envelope.container]]
 role   = "control-plane"
@@ -60,8 +60,8 @@ args   = ["standalone-job"]
 [[envelope.container]]
 role   = "data-plane"
 name   = "tm"
-cpus   = "4"
-memory = "16g"
+cpus   = "6"
+memory = "24g"
 args   = ["taskmanager"]
 
 [guarantees]
@@ -97,6 +97,12 @@ SINK_MAX_IN_FLIGHT      = "{{knob:inflight}}"
 # keys because they are one decision: with a single TaskManager, a subtask needs
 # a slot, so parallelism above the slot count does not schedule and slots above
 # the parallelism are reserved and idle.
+#
+# The value is one subtask per PARTITION (8), not one per CPU: the drain is
+# paced by the busiest source subtask, and 6-way parallelism over an
+# 8-partition topic leaves two subtasks reading two partitions each — measured
+# at 4-way pace. 8-way oversubscribed on the 6-CPU envelope recovers the
+# scaling (1.6M -> 2.1M rows/s, 2026-07-30 on c8g).
 FLINK_PROPERTIES                  = "parallelism.default: {{knob:parallelism}}"
 TASK_MANAGER_NUMBER_OF_TASK_SLOTS = "{{knob:parallelism}}"
 
@@ -130,5 +136,5 @@ id       = "rowbinary-nt"
 label    = "Flink 2.2.1 · RowBinary"
 approach = "realistic"
 default  = true
-knobs    = { parallelism = 4, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
+knobs    = { parallelism = 8, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
 reports  = { wire_format = "rowbinary_nt" }
