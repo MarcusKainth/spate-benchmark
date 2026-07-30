@@ -86,7 +86,7 @@ struct Arm {
 /// Every arm's transform artifacts. A new arm adds its row(s) here in the PR
 /// that activates it; [`every_active_arm_has_a_row_in_this_table`] is what makes
 /// omitting them a failure rather than a gap.
-const ARMS: [Arm; 5] = [
+const ARMS: [Arm; 6] = [
     Arm {
         entrant: "spate",
         file: "entrants/spate/src/rows.rs",
@@ -145,6 +145,16 @@ const ARMS: [Arm; 5] = [
         quality_floor: |spec| vec![format!(">= {spec}")],
         rust_oracle_check: false,
     },
+    Arm {
+        // A config-only arm: the transform is a materialized view's SQL, and
+        // the constants appear as ClickHouse literals — the filter predicates
+        // in the MV's WHERE clause.
+        entrant: "clickhouse-kafka-engine",
+        file: "entrants/clickhouse-kafka-engine/initdb/10_ddl.sql",
+        drop_unit: |spec| vec![format!("e.unit != '{spec}'")],
+        quality_floor: |spec| vec![format!("e.quality < {spec}")],
+        rust_oracle_check: false,
+    },
 ];
 
 fn repo_root() -> PathBuf {
@@ -164,6 +174,22 @@ fn read(rel: &str) -> String {
 /// this test.
 fn production_source(src: &str) -> &str {
     src.split_once("#[cfg(test)]").map_or(src, |(head, _)| head)
+}
+
+/// The text a restatement may live in. For SQL artifacts the `--` comments are
+/// stripped first: the ClickHouse arm's DDL narrates its own predicates, and a
+/// `contains` over the raw file was satisfied by that narration — the MV's
+/// actual WHERE clause could change or vanish and the test stayed green. No
+/// string literal in the checked DDL contains `--`, which is what makes the
+/// line-wise strip safe.
+fn restatement_text(rel: &str, src: &str) -> String {
+    if !rel.ends_with(".sql") {
+        return src.to_owned();
+    }
+    src.lines()
+        .map(|l| l.split_once("--").map_or(l, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -203,12 +229,12 @@ fn every_arm_restates_the_drop_unit_the_workload_specifies() {
         if wanted.is_empty() {
             continue;
         }
-        let src = read(arm.file);
+        let src = restatement_text(arm.file, &read(arm.file));
         assert!(
             wanted.iter().any(|w| src.contains(w)),
-            "the {} arm must restate the drop unit in {} as one of {wanted:?}; the \
-             workload specifies it and `build.rs` derives the constant this test \
-             compares against",
+            "the {} arm must restate the drop unit in {} as one of {wanted:?} \
+             (in code, not in a comment); the workload specifies it and \
+             `build.rs` derives the constant this test compares against",
             arm.entrant,
             arm.file
         );
@@ -223,10 +249,11 @@ fn every_arm_restates_the_quality_floor_the_workload_specifies() {
         if wanted.is_empty() {
             continue;
         }
-        let src = read(arm.file);
+        let src = restatement_text(arm.file, &read(arm.file));
         assert!(
             wanted.iter().any(|w| src.contains(w)),
-            "the {} arm must restate the quality floor in {} as one of {wanted:?}",
+            "the {} arm must restate the quality floor in {} as one of {wanted:?} \
+             (in code, not in a comment)",
             arm.entrant,
             arm.file
         );

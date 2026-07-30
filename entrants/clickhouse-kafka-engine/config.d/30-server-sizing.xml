@@ -1,0 +1,103 @@
+<!-- Sizing a ClickHouse that stores nothing.
+
+     This node is an ingest tier: it consumes, decodes, transforms and
+     forwards, and every MergeTree part it would otherwise merge lives on the
+     shared server instead. The shipped defaults size caches and background
+     pools for a storage node, which on a 6 CPU / 24 GiB envelope would spend
+     the arm's budget on machinery this arm never exercises. Everything set
+     here is either shrunk for that reason or is a shipped default recorded
+     because the arm depends on it. -->
+<clickhouse>
+    <!-- Caches for reading LOCAL MergeTree parts, of which this node has
+         none: the only local tables are a Kafka engine table and a Distributed
+         shim, and the system tables that remain below. Shrunk from multi-GiB
+         defaults to a floor that still serves those system tables; the freed
+         memory belongs to decode buffers and in-flight blocks, which is what
+         this arm actually allocates. -->
+    <mark_cache_size>268435456</mark_cache_size>
+    <index_mark_cache_size>67108864</index_mark_cache_size>
+    <primary_index_cache_size>268435456</primary_index_cache_size>
+
+    <!-- Merge/mutation threads, for the local parts that do not exist. Not 0
+         (the server refuses it); 2 is the floor that leaves the pool able to
+         service the system-log tables kept below. -->
+    <background_pool_size>2</background_pool_size>
+
+    <!-- Required by the shrink above. The server's start-up sanity check
+         demands each of these "free entries" reserves be no larger than
+         background_pool_size * background_merges_mutations_concurrency_ratio
+         (2 * 2 = 4); their defaults (20 / 8 / 25) are sized for a 16-thread
+         pool and refuse the server outright with ours (verified on
+         26.3.17.4). Zero, not 4: the reserves exist to keep big merges and
+         mutations from starving the pool, and this node has neither. -->
+    <merge_tree>
+        <number_of_free_entries_in_pool_to_execute_mutation>0</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>0</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>0</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+    </merge_tree>
+
+    <!-- The pool the Kafka engine's streaming jobs run in. SHIPPED default
+         (16), recorded rather than tuned: with kafka_thread_per_consumer = 1
+         the arm needs >= 8 of these threads for 8 consumers, so the value is
+         load-bearing and a future default change must not move it silently. -->
+    <background_message_broker_schedule_pool_size>16</background_message_broker_schedule_pool_size>
+
+    <!-- Distributed sends. With distributed_foreground_insert = 1 the forward
+         happens on the MV's own insert thread, so this pool only carries
+         connection upkeep; shrunk from 16. -->
+    <background_distributed_schedule_pool_size>4</background_distributed_schedule_pool_size>
+
+    <!-- SHIPPED default, recorded because the envelope depends on it: the
+         server reads the cgroup limit (24 GiB), not host RAM, so the memory
+         ceiling is 0.9 * 24 GiB and the container cannot be OOM-killed by its
+         own accounting gap. -->
+    <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
+
+    <!-- System logs a storageless node pays for and nobody reads. Each is a
+         local MergeTree with inserts, merges and flush threads of its own —
+         real CPU inside the envelope; query_views_log and query_thread_log
+         are even driven by the hot path (a row per MV execution / per thread
+         per forwarded insert). The list below is every <*_log> the shipped
+         26.3 config enables, removed, EXCEPT two:
+
+         * query_log — the reviewer's window into the forwarded inserts
+           (~3 rows/s: a QueryStart and a QueryFinish per insert, 8 consumers
+           on a 5 s flush). This benchmark's credibility rests on a reviewer
+           being able to look.
+         * crash_log — written only on a fatal signal, so it costs nothing in
+           a healthy run and is the artifact everyone wants when a run dies. -->
+    <aggregated_zookeeper_log remove="remove"/>
+    <asynchronous_insert_log remove="remove"/>
+    <asynchronous_metric_log remove="remove"/>
+    <background_schedule_pool_log remove="remove"/>
+    <backup_log remove="remove"/>
+    <blob_storage_log remove="remove"/>
+    <delta_lake_metadata_log remove="remove"/>
+    <error_log remove="remove"/>
+    <iceberg_metadata_log remove="remove"/>
+    <instrumentation_trace_log remove="remove"/>
+    <metric_log remove="remove"/>
+    <opentelemetry_span_log remove="remove"/>
+    <part_log remove="remove"/>
+    <processors_profile_log remove="remove"/>
+    <query_metric_log remove="remove"/>
+    <query_thread_log remove="remove"/>
+    <query_views_log remove="remove"/>
+    <text_log remove="remove"/>
+    <trace_log remove="remove"/>
+    <zookeeper_connection_log remove="remove"/>
+    <zookeeper_log remove="remove"/>
+
+    <!-- Console only, at warning: the driver reads container stdout, and a
+         server logging to files inside the measured cgroup is I/O and cycles
+         spent narrating. The remove elements are what make "console only"
+         true — level/console alone leave the base config's file paths in
+         force (verified: without them the server writes
+         /var/log/clickhouse-server/*.log). -->
+    <logger>
+        <level>warning</level>
+        <console>1</console>
+        <log remove="remove"/>
+        <errorlog remove="remove"/>
+    </logger>
+</clickhouse>

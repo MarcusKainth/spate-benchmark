@@ -31,3 +31,6 @@ results/**/*.jsonl merge=union
 *.avsc  text eol=lf
 *.sql   text eol=lf
 *.toml  text eol=lf
+# Shell scripts are COPY'd into images and executed there; a core.autocrlf
+# clone would bake a CRLF shebang into the container and refuse every start.
+*.sh    text eol=lf

@@ -21,10 +21,11 @@ Find out, honestly, how much throughput each system delivers per unit of CPU and
 memory on the same pipeline, the same bytes, and the same hardware — and publish
 it whether or not Spate wins.
 
-We expect to lose some arms. The ClickHouse Kafka engine has no network hop.
-Vector is Rust with the same no-GC story. Those results get published with equal
-prominence, because a comparison page containing only wins is read as marketing
-and convinces nobody.
+We expect to lose some arms. The ClickHouse Kafka engine does its decode and
+transform inside the database's own C++, with no framework between consumer and
+insert. Vector is Rust with the same no-GC story. Those results get published
+with equal prominence, because a comparison page containing only wins is read
+as marketing and convinces nobody.
 
 ## The pipeline
 

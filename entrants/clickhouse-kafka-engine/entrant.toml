@@ -5,40 +5,224 @@ id       = "clickhouse-kafka-engine"
 name     = "ClickHouse Kafka table engine"
 homepage = "https://clickhouse.com/docs/engines/table-engines/integrations/kafka"
 repo     = "https://github.com/ClickHouse/ClickHouse"
+docs     = "https://clickhouse.com/docs/integrations/kafka/kafka-table-engine"
 licence  = "Apache-2.0"
 vendor   = "clickhouse"
 kind     = "database-native"
 language = ["cpp"]
 runtime  = "native"
-status   = "planned"
+status   = "active"
 
 [maintainer]
 who = "spate-benchmark"
 reviewed_upstream = false
+review_url        = ""
 
 [display]
 order = 50
 hue   = 55
 short = "CH Kafka"
 
-[planned]
-blockers = """
-The zero-framework baseline: ClickHouse consuming the topic itself, with no
-network hop between consumer and storage. It may well win outright, and it is
-published if it does.
+[version]
+# Resolved by running the built image: `clickhouse local` prints the server
+# version without needing a server, a config, or a network. `pinned` is
+# asserted against what the image reports, so a base-image bump refuses the
+# run rather than publishing a number labelled with a version that never ran.
+strategy = "command"
+command  = ["clickhouse", "local", "--query", "SELECT version()"]
+pinned   = "26.3.17.4"
 
-It does not fit the envelope the other arms are held to, and that has to be
-resolved honestly rather than fudged: the consumption happens *inside* the
-ClickHouse container, so its CPU is not separable from the server's by the cgroup
-sampler, and the shared infrastructure sits outside every arm's budget. Either
-this arm runs against a dedicated ClickHouse whose whole container is the
-envelope, or the comparison is reported on a different basis and labelled so.
+[build]
+context    = "../.."
+dockerfile = "Dockerfile"
+image      = "spate-bench-ch-kafka"
 
-Configuration trap already identified: `kafka_num_consumers > 1` *requires*
-`kafka_thread_per_consumer = 1`, because one thread cannot consume from several
-partitions. Leaving the default silently cripples the arm, which would be a bug
-in our benchmark rather than a result.
+# One container, the whole envelope: a database server acting as its own ETL
+# tier. It consumes, decodes, transforms and forwards — the same work every
+# arm's client does — and its storage-side merges land on the shared infra
+# ClickHouse outside the envelope, exactly as every other arm's do. What is
+# inside the budget that no other arm carries is the server's own overhead
+# (system logs, scheduler, an idle SQL endpoint); that is declared below as a
+# deviation rather than smoothed away.
+[envelope]
+cpus   = "6"
+memory = "24g"
 
-Not deprecated: ClickHouse still recommends the engine for self-hosted ingestion.
-ClickPipes is Cloud-only and so is not a valid comparator here.
+[[envelope.container]]
+role   = "data-plane"
+name   = "sut"
+cpus   = "6"
+memory = "24g"
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "offset-commit"
+# The engine commits offsets once per flushed block, and the flush timer is
+# the `flush_ms` knob — so commit cadence = flush cadence = 5000 ms, matched
+# to every other arm's 5 s durability interval. Blocks that seal on
+# `block_msgs` before the timer commit MORE often: stricter, never looser.
+interval_ms = 5000
+
+# This arm's inserts reach the shared server through a Distributed table, so
+# every one of them arrives with `is_initial_query = 0` — the exact predicate
+# the attribution query uses to EXCLUDE distributed sub-queries for every
+# other arm. Declaring the fact here makes the driver INVERT that predicate to
+# `NOT is_initial_query` for only this arm — never merely drop it: one
+# polarity is always present, so if this arm's Distributed table ever lived on
+# the shared server itself, the initial query and the forwarded execution it
+# spawns could not both match and be double-counted.
+#
+# No arm_sql: this arm's objects live in its own container's initdb, not on
+# the shared server. The shared `sensor_events` is untouched and identical
+# for every arm.
+[clickhouse]
+forwarded_inserts = true
+
+# The engine's own vocabulary, carried into a `kafka_src` named collection and
+# the librdkafka `<kafka>` section via `from_env` in config.d — no custom code
+# and no template rewriting: what the server read is what `system.named_collections`
+# reports, and initdb/20_assert.sh reads it back or refuses to start.
+[env]
+BOOTSTRAP             = "{{broker_internal}}"
+REGISTRY_URL          = "{{registry_internal}}"
+TOPIC                 = "{{topic}}"
+GROUP_ID              = "{{group_id}}"
+OFFSET_RESET          = "{{offset_reset}}"
+KAFKA_NUM_CONSUMERS   = "{{knob:num_consumers}}"
+KAFKA_MAX_BLOCK_MSGS  = "{{knob:block_msgs}}"
+KAFKA_FLUSH_MS        = "{{knob:flush_ms}}"
+KAFKA_POLL_TIMEOUT_MS = "{{knob:poll_timeout_ms}}"
+
+[[constraints]]
+knob    = "flush_ms"
+exceeds = "poll_timeout_ms"
+why     = """
+The Kafka engine's stream thread evaluates the flush deadline between polls of
+up to poll_timeout_ms, so flush_ms <= poll_timeout_ms yields flushes paced by
+poll returns rather than by the configured cadence, and the [guarantees]
+interval the record declares would not be the one in force.
 """
+
+# Native columnar blocks — but via the Distributed engine's interserver
+# transfer, not a client insert API. The deviation below says so; read this
+# format against Spate's `native`, not Flink's `rowbinary_nt`.
+[[variants]]
+id       = "distributed"
+label    = "ClickHouse Kafka engine · Distributed forward"
+approach = "realistic"
+default  = true
+knobs    = { num_consumers = 8, block_msgs = 16384, flush_ms = 5000, poll_timeout_ms = 500 }
+reports  = { wire_format = "native" }
+
+[[deviations]]
+what = """
+The data plane is a database server acting as a dedicated ingest tier — the
+container consumes, decodes, transforms and forwards like every arm's client,
+but carries a server's own overhead (system logs, scheduler, an idle SQL
+endpoint) inside the envelope; it does no MergeTree storage, which lands on
+the shared infra ClickHouse outside every arm's budget equally.
+"""
+why = """
+The honest resolution of an engine that runs inside a database — published as
+"ClickHouse as its own ETL tier", one network hop to storage like every arm,
+not a zero-hop baseline.
+"""
+affects = ["envelope"]
+
+[[deviations]]
+what = """
+Wire format is native, but via the Distributed engine's interserver transfer
+(lz4-compressed columnar blocks), not a client insert API any external program
+could call. The headroom gate divides this arm's rate by the measured native
+ceiling, which was measured with a CLIENT posting FORMAT Native over HTTP —
+a transport this arm never uses; probably conservative for interserver
+blocks, but unmeasured.
+"""
+why = """
+Least server-side work of any arm's format; read against spate native, not
+flink rowbinary_nt, and read the headroom share with the ceiling's transport
+caveat in mind.
+"""
+affects = ["wire-format"]
+
+[[deviations]]
+what = """
+Durability cadence is "at most 5 s" — offsets commit per flushed block, and
+blocks sealing on block_msgs commit sooner.
+"""
+why = "Stricter than the convention, never looser; disclosed rather than averaged away."
+affects = ["durability"]
+
+[[deviations]]
+what = """
+The latency floor is the flush cadence — rows wait up to flush_ms = 5000 in
+the engine's block buffer, and ingest_ts is stamped by the shared server when
+the forwarded insert lands. That is the same linger-for-throughput trade as
+Spate's linger_ms = 500, at 10x the floor — and here the same knob is also
+the offset-commit cadence, so tightening it buys latency by committing more
+often rather than being an independent choice.
+"""
+why = """
+The honest cost of a server-batched design; the 10x factor is stated so the
+sustained-mode latency panel is read as a knob consequence, not a mystery.
+"""
+affects = ["latency"]
+
+[[deviations]]
+what = """
+No insert_deduplication_token is sent (like every arm except Spate). A replay
+after a crash mid-block is suppressed by the shared table's
+non_replicated_deduplication_window=1000 when the re-consumed block is
+byte-identical, and surfaces as the duplicate metric when re-framing produced
+a different block.
+"""
+why = """
+The same content-hash dedup every non-token arm gets; duplicates that do land
+are reported, never hidden — but "reported" must not be read as "replays
+cannot be absorbed", because absorbing identical replays is what the window
+is for.
+"""
+affects = ["dedup"]
+
+[[deviations]]
+what = """
+At block_msgs = 16384 (~1.2M rows) this arm sends the largest insert blocks
+of any arm — 4.6x Spate's 262144-row batches, 24x Flink's 50000 — so it
+holds the smallest share of the background-merge cost that the server-side
+figure excludes by construction (merges appear in part_log, not query_log).
+"""
+why = """
+methodology/measurement.md requires records to say so: the merge cost an
+insert makes inevitable lands nowhere in the per-row server-side number, and
+the asymmetry scales inversely with block size.
+"""
+affects = ["server-side"]
+
+[[deviations]]
+what = """
+Server-side attribution for this arm runs under the INVERTED predicate NOT
+is_initial_query (declared by [clickhouse].forwarded_inserts): its inserts
+reach the shared server as Distributed forwards, whose initial query ran on
+the arm's own node. Every other arm is measured under is_initial_query.
+"""
+why = """
+The strict predicate would attribute nothing to this arm; the inversion is
+declared here so a reader of the record knows this arm's server-side figure
+came from the complementary predicate, not the one the methodology describes
+for client arms.
+"""
+affects = ["server-side"]
+
+[[deviations]]
+what = """
+Drain-mode windows for this arm include the official image's two-phase boot —
+an init server that runs the DDL and the assert script, then the real server —
+before the first block can flush; a start-up cost with no analogue in the
+other arms' single-process clients.
+"""
+why = """
+Drain charges start-up for every arm by design; declared because the magnitude
+here is structurally arm-specific (two server boots plus ~10 assert queries),
+not because the rule differs.
+"""
+affects = ["measurement"]
