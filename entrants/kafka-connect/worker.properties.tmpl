@@ -27,12 +27,17 @@ offset.flush.interval.ms=5000
 # prefilled corpus, `latest` for sustained mode.
 consumer.auto.offset.reset=@OFFSET_RESET@
 
-# One poll fills one buffered insert. The shipped 500 puts four polls under
-# every bufferCount=2000 insert, paying the poll path four times per flush.
-consumer.max.poll.records=2000
+# One poll fills one buffered insert, at every value of the knob: templated
+# from the same variable as bufferCount so a sweep over buffer_count cannot
+# silently reintroduce the multi-poll flush this override exists to remove.
+# (The shipped 500 put four polls under every bufferCount=2000 insert. A
+# buffer_count=0 cell — buffering disabled — would render an invalid 0 here
+# and the worker refuses to start, loudly.)
+consumer.max.poll.records=@BUFFER_COUNT@
 
-# 8 MiB per partition per fetch. The shipped 1 MiB is ~200 messages per
-# partition per fetch at ~5 KiB messages, which starves a 2000-record buffer.
+# 8 MiB per partition per fetch, sized for the default buffer_count=2000. The
+# shipped 1 MiB is ~258 messages per partition per fetch at this corpus's
+# ~4.0 KiB (4065 B) mean framed message, which starves a 2000-record buffer.
 # fetch.max.bytes stays at the shipped 50 MiB, comfortably above
 # 8 partitions x 8 MiB in the worst case that never happens (a task owns at
 # most a few partitions at tasks.max=8 over 8 partitions).

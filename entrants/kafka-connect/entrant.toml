@@ -93,26 +93,44 @@ arm_teardown_sql = "clickhouse/arm_teardown.sql"
 attribution_tables = ["sensor_batches_landing"]
 
 # GROUP_ID is used as the CONNECTOR NAME, not as a consumer group.id: Connect
-# derives a sink's consumer group as `connect-<name>` and refuses group.id
-# overrides for sink connectors, so the fresh consumer group each repetition
-# needs comes from naming the connector with the driver's fresh id.
+# derives a sink's consumer group as `connect-<name>`, so the fresh consumer
+# group each repetition needs comes from naming the connector with the driver's
+# fresh id. (`consumer.override.group.id` would also work — standalone applies
+# connector-level overrides under the default policy — but the name keeps the
+# connector and its group one identity, with nothing to keep in step.)
+#
+# CLICKHOUSE_PASSWORD comes from the driver ({{clickhouse_password}} is the
+# value infra actually started the server with), so this arm cannot drift if
+# that value ever changes; the image keeps a matching ENV default so the
+# README's by-hand recipe works without the driver.
 [env]
-BOOTSTRAP       = "{{broker_internal}}"
-REGISTRY_URL    = "{{registry_internal}}"
-CLICKHOUSE_URL  = "{{clickhouse_internal}}"
-TOPIC           = "{{topic}}"
-GROUP_ID        = "{{group_id}}"
-OFFSET_RESET    = "{{offset_reset}}"
-TASKS_MAX       = "{{knob:tasks}}"
-BUFFER_COUNT    = "{{knob:buffer_count}}"
-BUFFER_FLUSH_MS = "{{knob:buffer_flush_ms}}"
+BOOTSTRAP           = "{{broker_internal}}"
+REGISTRY_URL        = "{{registry_internal}}"
+CLICKHOUSE_URL      = "{{clickhouse_internal}}"
+CLICKHOUSE_PASSWORD = "{{clickhouse_password}}"
+TOPIC               = "{{topic}}"
+GROUP_ID            = "{{group_id}}"
+OFFSET_RESET        = "{{offset_reset}}"
+TASKS_MAX           = "{{knob:tasks}}"
+BUFFER_COUNT        = "{{knob:buffer_count}}"
+BUFFER_FLUSH_MS     = "{{knob:buffer_flush_ms}}"
 
 # bufferFlushTime must be > 0 whenever bufferCount > 0: the connector's
 # at-least-once buffer flushes on size OR time, and a zero flush time strands
-# any sub-buffer_count tail forever — the drain never completes. That is not
-# expressible as [[constraints]] (which only states knob-exceeds-knob), so it is
-# enforced here by comment and by the README's smoke recipe rather than by the
-# driver.
+# any sub-buffer_count tail forever — the drain never completes. The
+# [[constraints]] floor below enforces the operative half (every committed
+# variant and every sweep cell pins buffer_count > 0, so flush time may never
+# be zero); only the conditional only-when-buffering form is inexpressible.
+[[constraints]]
+knob     = "buffer_flush_ms"
+at_least = 1
+why      = """
+bufferFlushTime=0 disables the connector's time-based flush, so any tail
+smaller than bufferCount is never inserted and a drain runs to its deadline
+instead of completing — minutes per cell, reported as a timeout for an arm
+that is working.
+"""
+
 [[variants]]
 id       = "rowbinary-mv"
 label    = "Kafka Connect · clickhouse-kafka-connect · RowBinary + MV"
@@ -136,7 +154,11 @@ why = """
 This arm's efficiency comparison leans on ClickHouse's own ProfileEvents
 (system.query_log), whose MV cost rides on the parent insert and excludes
 background merges; the arm's client-side CPU and the other arms' are not the
-same work, and the page must say so.
+same work, and the page must say so. For the same reason the harness refuses
+to gate this arm's headroom against the direct-insert ingest ceiling — the
+ceiling was measured without the MV's per-row work — so its records carry
+headroom-unproven on the ClickHouse axis rather than a share against a figure
+that does not describe them.
 """
 affects = ["cpu", "server-side-cpu"]
 
@@ -148,10 +170,12 @@ closure, distributed from Confluent's Maven repository rather than Maven
 Central.
 """
 why = """
-Apache-2.0 at the artifact level (POM-verified); Apicurio's Apache-2.0 converter
-was evaluated and rejected because its Confluent compatibility is server-side
-only — its deserializer cannot resolve schemas from Redpanda's
-Confluent-API registry.
+Apache-2.0 at the artifact level (POM-verified). Apicurio's Apache-2.0
+converter was evaluated and rejected: its documented Confluent compatibility
+is server-side (adr/0001 scopes it to Apicurio *serving* the Confluent API),
+and its own serdes are documented only against Apicurio's registry API — no
+supported client-side path to Redpanda's Confluent-API registry, and no other
+Apache-2.0 converter on Maven Central speaks that API at all.
 """
 affects = ["decode-path", "licensing"]
 

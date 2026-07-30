@@ -11,18 +11,25 @@
 -- lean on system.query_log's ProfileEvents.
 --
 -- ENGINE = Null: a batch is consumed by the MV at insert time and never stored.
--- Storing the nested form as well would add ~7.5 GiB of writes plus the merges
--- they trigger — server-side work that belongs to no other arm and that
--- query_log's insert rows would not even carry (merges live in part_log).
+-- Storing the nested form as well would add roughly 6 GiB of writes (1.5M
+-- messages at a ~4 KiB mean framed message) plus the merges they trigger —
+-- server-side work that belongs to no other arm and that query_log's insert
+-- rows would not even carry (merges live in part_log).
 --
 -- Column types are the Avro schema's, verbatim: long -> Int64, int -> Int32,
 -- ["null","double"] -> Nullable(Float64). Every conversion to the target's
 -- types happens in the MV, so the landing insert is a plain decode-and-write —
 -- the same division of labour every other arm has between its decoder and its
 -- transform. `Nested(...)` is NOT usable here: the connector serializes against
--- DESCRIBE of the target (describe_include_subcolumns=1) and explicitly rejects
--- Nested columns, so the array-of-record maps to Array(Tuple(...)).
-CREATE TABLE IF NOT EXISTS sensor_batches_landing
+-- DESCRIBE of the target (describe_include_subcolumns=1) and skips Nested
+-- columns with a warning rather than mapping them (Column.java at v1.4.0), so
+-- the array-of-record maps to Array(Tuple(...)).
+--
+-- Plain CREATE, not IF NOT EXISTS: the harness tears these objects down before
+-- every repetition's create, so an object that already exists here means the
+-- teardown file drifted — and that should fail this arm loudly, not persist a
+-- stale definition across repetitions.
+CREATE TABLE sensor_batches_landing
 (
     batch_id    Int64,
     sensor      String,
@@ -46,9 +53,9 @@ ENGINE = Null;
 --   1. drop rows where unit = 'drop'        \  WHERE runs before SELECT, so the
 --   2. drop rows where quality < 0.2 (non-null) /  filters precede the derives
 --   3. coalesce null region to ''              (ifNull)
---   4. value_scaled = value * 1000 / (seq + 1) (intDiv truncates toward zero;
---      both operands are non-negative by corpus construction, so truncation
---      toward zero and floor division agree here anyway)
+--   4. value_scaled = value * 1000 / (seq + 1) (the spec asks truncation
+--      toward zero; ClickHouse's intDiv is floor division per its docs — both
+--      operands are non-negative by corpus construction, so the two agree)
 --   5. name_upper = ASCII-only uppercase       (ClickHouse's upper() is
 --      documented ASCII-only — the locale trap the contract names is Java's)
 --
@@ -62,7 +69,7 @@ ENGINE = Null;
 --
 -- (If `e.seq` dot-access ever fails on a future ClickHouse in the MV context,
 -- `tupleElement(e, 'seq')` is the equivalent spelling.)
-CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_batches_mv TO sensor_events AS
+CREATE MATERIALIZED VIEW sensor_batches_mv TO sensor_events AS
 SELECT
     toUInt64(batch_id)                    AS batch_id,
     toUInt16(e.seq)                       AS event_seq,

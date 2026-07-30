@@ -12,10 +12,26 @@ set -eu
 # The driver hands one CLICKHOUSE_URL (the same value every arm receives); the
 # connector wants hostname/port/ssl split. Parsed here rather than declared as
 # three variables so the descriptor's [env] stays in the driver's vocabulary.
+#
+# http:// only, loudly: the rendered config says ssl=false and the no-port
+# default is 8123, so accepting https:// here would silently speak plaintext
+# to a TLS endpoint and surface as a drain timeout minutes later. Bracketed
+# IPv6 literals would mis-split on ':' — refused rather than mangled.
+case "$CLICKHOUSE_URL" in
+  http://*) ;;
+  *)
+    echo "FATAL: CLICKHOUSE_URL must be http:// — this arm renders ssl=false" \
+         "and a plaintext port default. Got scheme: ${CLICKHOUSE_URL%%://*}" >&2
+    exit 1
+    ;;
+esac
 hostport="${CLICKHOUSE_URL#http://}"
-hostport="${hostport#https://}"
 hostport="${hostport%%/*}"
 case "$hostport" in
+  \[*)
+    echo "FATAL: bracketed IPv6 literals are not supported by this host/port split." >&2
+    exit 1
+    ;;
   *:*)
     CLICKHOUSE_HOST="${hostport%%:*}"
     CLICKHOUSE_PORT="${hostport##*:}"
@@ -25,6 +41,27 @@ case "$hostport" in
     CLICKHOUSE_PORT=8123
     ;;
 esac
+
+# The render step is sed, and sed's replacement text gives '|' (the delimiter),
+# '&' (the whole match), '\' and newlines meanings a config value must not
+# have. Every value the driver supplies today is inert (hostnames, integers, a
+# hex group id); this guard is what turns the first one that is not into a
+# named refusal instead of a silently corrupted config. The variable NAME is
+# printed, never the value — one of these is a password.
+nl='
+'
+for name in BOOTSTRAP REGISTRY_URL TOPIC GROUP_ID OFFSET_RESET TASKS_MAX \
+            BUFFER_COUNT BUFFER_FLUSH_MS CLICKHOUSE_HOST CLICKHOUSE_PORT \
+            CLICKHOUSE_PASSWORD; do
+  eval "v=\${${name}}"
+  case "$v" in
+    *\|* | *\&* | *\\* | *"$nl"*)
+      echo "FATAL: ${name} contains a character the render step cannot" \
+           "substitute safely (one of: | & \\ newline)." >&2
+      exit 1
+      ;;
+  esac
+done
 
 # Rendered into connect-data/, the one directory the image keeps
 # appuser-writable, so a reviewer can read the exact configuration in force out
@@ -51,7 +88,9 @@ render /opt/connect/clickhouse-sink.properties.tmpl /opt/kafka/connect-data/clic
 # A marker that survived rendering is a template/entrypoint drift; refuse to
 # start rather than run Connect on a config with a literal @VAR@ in it.
 # Non-comment lines only: the templates' own comments name the mechanism.
-if grep -n '^[^#]*@[A-Z_]*@' /opt/kafka/connect-data/worker.properties \
+# The marker shape requires a leading letter ([A-Z_][A-Z0-9_]*): '@@' in a
+# value is not a marker, and a future digit-bearing marker still matches.
+if grep -n '^[^#]*@[A-Z_][A-Z0-9_]*@' /opt/kafka/connect-data/worker.properties \
                         /opt/kafka/connect-data/clickhouse-sink.properties; then
   echo "FATAL: unrendered @VAR@ marker(s) above; template and entrypoint have drifted." >&2
   exit 1

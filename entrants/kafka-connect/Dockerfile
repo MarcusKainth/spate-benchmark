@@ -28,9 +28,13 @@ FROM maven:3.9-eclipse-temurin-21 AS deps
 WORKDIR /build
 COPY entrants/kafka-connect/converter-pom.xml ./pom.xml
 
-# includeScope=runtime: provided-scope artifacts (connect-api, kafka-clients)
-# stay out, because the Connect runtime supplies them and duplicate classes
-# across the plugin classloader boundary are how converters break.
+# includeScope=runtime: provided-scope artifacts (connect-api) stay out,
+# because the Connect runtime supplies them. kafka-clients does NOT stay out —
+# it enters the converter's closure at compile scope (as 8.3.0-ccs, Confluent's
+# Apache-2.0 build of the Apache client) and lands in the plugin directory.
+# That is harmless by design: Connect's plugin isolation loads
+# org.apache.kafka.* parent-first, so the runtime's own client classes win —
+# and it is recorded in dependencies.txt like the rest of the closure.
 #
 # dependency:tree is recorded into the image: Maven has no lockfile, so the
 # exact resolved graph is the only provenance a later re-run can be compared
@@ -108,9 +112,11 @@ RUN chmod +x /opt/connect/entrypoint.sh
 # Drift guard for the jars [version].command parses: if a base-image bump or a
 # release re-package changes either filename pattern, the build fails here
 # rather than the version command silently printing an empty half and the
-# driver refusing every run.
-RUN test -n "$(ls /opt/kafka/libs | sed -n 's/^connect-runtime-\(.*\)\.jar$/\1/p')" \
-    && test -n "$(ls /opt/kafka/plugins/clickhouse-kafka-connect | sed -n 's/^clickhouse-kafka-connect-\(v[0-9.]*\)-confluent\.jar$/\1/p')" \
+# driver refusing every run. EXACTLY one match each, not merely one: a second
+# matching jar would embed a newline mid-token, and some shapes of that output
+# round-trip parse_version as a plausible-but-wrong version instead of failing.
+RUN test "$(ls /opt/kafka/libs | sed -n 's/^connect-runtime-\(.*\)\.jar$/\1/p' | wc -l)" -eq 1 \
+    && test "$(ls /opt/kafka/plugins/clickhouse-kafka-connect | sed -n 's/^clickhouse-kafka-connect-\(v[0-9.]*\)-confluent\.jar$/\1/p' | wc -l)" -eq 1 \
     && test -n "$(ls /opt/kafka/plugins/avro-converter/kafka-connect-avro-converter-*.jar)"
 
 USER appuser
@@ -121,8 +127,9 @@ USER appuser
 # numbers describe. The driver overrides what it varies.
 #
 # GROUP_ID is the CONNECTOR NAME (Connect derives the sink's consumer group as
-# connect-<name> and refuses group.id overrides for sinks); the driver sends a
-# fresh id per repetition so a drain replays from offset zero.
+# connect-<name>); the driver sends a fresh id per repetition so a drain
+# replays from offset zero. Rerunning BY HAND needs the same freshness — see
+# the README's run recipe.
 ENV BOOTSTRAP=spate-bench-redpanda:29092 \
     REGISTRY_URL=http://spate-bench-redpanda:8081 \
     CLICKHOUSE_URL=http://spate-bench-clickhouse:8123 \
@@ -144,10 +151,11 @@ ENV BOOTSTRAP=spate-bench-redpanda:29092 \
 ENV KAFKA_HEAP_OPTS="-Xms20480m -Xmx20480m -XX:MaxDirectMemorySize=768m -XX:MaxMetaspaceSize=256m"
 
 # The GC log the descriptor's gc_log names. KAFKA_OPTS, not KAFKA_GC_LOG_OPTS:
-# kafka-run-class.sh only assembles its own GC logging in -daemon mode, and
-# connect-standalone.sh runs foreground here — KAFKA_OPTS is on the exec line
-# unconditionally. Decorations (uptime,level,tags) are what harness/src/jvm.rs
-# parses; filecount=0 keeps one unrotated file for the driver to copy out.
+# kafka-run-class.sh assembles its own GC logging only behind the -loggc flag,
+# which connect-standalone.sh never passes in any mode — KAFKA_OPTS is on the
+# exec line unconditionally. Decorations (uptime,level,tags) are what
+# harness/src/jvm.rs parses; filecount=0 keeps one unrotated file for the
+# driver to copy out.
 ENV KAFKA_OPTS="-Xlog:gc*:file=/opt/kafka/logs/gc.log:uptime,level,tags:filecount=0"
 
 # Kafka 4.x configures log4j2 in YAML; ours is the shipped connect-log4j2.yaml

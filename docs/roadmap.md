@@ -1,7 +1,7 @@
 ---
 id: roadmap
 title: Roadmap
-description: Which systems are measured, which are not yet, and exactly what each unmeasured one is waiting on.
+description: Which systems are implemented, which are not yet, and exactly what each unimplemented one is waiting on.
 ---
 
 A partial comparison invites one accusation above all others: *you only measured
@@ -26,7 +26,8 @@ The Kafka Connect arm's former licence gate is **closed**: it runs on the ASF's
 own `apache/kafka` image with an Apache-2.0 connector and a POM-verified
 Apache-2.0 Avro converter — no Confluent-distributed image, and no
 Community-Licence artefact, is present. The converter's non-Central origin is
-declared as a deviation on the entrant.
+declared as a deviation on the entrant. Implemented and CI-gated; its first
+published run is still pending, so no record for it exists in `results/` yet.
 
 ## Not yet measured
 

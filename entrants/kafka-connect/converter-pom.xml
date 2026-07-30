@@ -15,10 +15,12 @@
   *images*; neither is present in this arm. The non-Central origin is declared
   in [[deviations]] in entrant.toml.
 
-  Apicurio's Apache-2.0 converter was evaluated and rejected: its Confluent
-  compatibility is server-side only (adr/0001 in the apicurio-registry repo),
-  so its deserializer cannot resolve schemas from Redpanda's Confluent-API
-  registry — which is what the corpus is framed against.
+  Apicurio's Apache-2.0 converter was evaluated and rejected: its documented
+  Confluent compatibility is server-side (adr/0001 in the apicurio-registry
+  repo scopes it to Apicurio SERVING the Confluent API), and its own serdes
+  are documented only against Apicurio's registry API — no supported
+  client-side path to Redpanda's Confluent-API registry, which is what the
+  corpus is framed against.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -48,8 +50,10 @@
          closure (kafka-avro-serializer, kafka-schema-registry-client, avro,
          and their dependencies) is what copy-dependencies collects; provided-
          scope artifacts such as connect-api stay out, because the Connect
-         runtime supplies them and duplicate classes across the plugin
-         classloader boundary are how converters break. -->
+         runtime supplies them. kafka-clients (8.3.0-ccs, Apache-2.0) arrives
+         at compile scope and is collected — harmless, since Connect loads
+         org.apache.kafka.* parent-first — and appears in dependencies.txt
+         with the rest of the closure. -->
     <dependency>
       <groupId>io.confluent</groupId>
       <artifactId>kafka-connect-avro-converter</artifactId>

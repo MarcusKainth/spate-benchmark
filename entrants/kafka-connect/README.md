@@ -37,8 +37,8 @@ materialized view's SQL, which is exactly what makes it worth measuring.
 | Knob | Value | Reaches Connect as | What it controls |
 |---|---|---|---|
 | `tasks` | **8** | `tasks.max` | One task per **partition** (8). A ninth task would own no partitions; fewer leaves a task owning two partitions and pacing the drain, the same arithmetic as Flink's parallelism. |
-| `buffer_count` | **2000** | `bufferCount` | Records (messages) per buffered insert. At 100 events/message that is ~200,000 landed events and ~147,000 surviving rows per insert after the MV's filters — the same order as the other arms' batch sizes, inside ClickHouse's recommended 10k–100k+ band. The connector's own default is 10000 messages, which at this corpus's fan-out is a 1M-event insert. |
-| `buffer_flush_ms` | **1000** | `bufferFlushTime` | Bounds sustained-mode latency, matching Flink's 1000 ms linger. **Must be > 0 whenever `bufferCount` > 0**: the buffer flushes on size *or* time, so a zero flush time strands a sub-`bufferCount` tail and a drain never completes. Not expressible as a `[[constraints]]` knob-exceeds-knob relation; enforced by comment and by the smoke recipe below. |
+| `buffer_count` | **2000** | `bufferCount` | Records (messages) per buffered insert. At 100 events/message that is ~200,000 landed events and ~147,000 surviving rows per insert after the MV's filters — the same order as the other arms' batch sizes, inside ClickHouse's recommended 10k–100k+ band. The connector's own default is `bufferCount=0` — buffering disabled entirely, an insert per poll — so setting it at all is the difference between batched and per-poll inserts. `consumer.max.poll.records` is rendered from the same variable, so a sweep over this knob moves both together. |
+| `buffer_flush_ms` | **1000** | `bufferFlushTime` | Bounds sustained-mode latency, matching Flink's 1000 ms linger. **Must be > 0 whenever `bufferCount` > 0**: the buffer flushes on size *or* time, so a zero flush time strands a sub-`bufferCount` tail and a drain never completes. Enforced by the descriptor's `[[constraints]]` floor (`at_least = 1`) — the driver refuses such a cell before a container starts; only the conditional only-when-buffering form is inexpressible, and every committed variant pins `buffer_count` > 0. |
 
 These are **per task**, so cross-arm quantities are products: up to
 `tasks × buffer_count` = 16,000 messages (~1.6M events) buffered across the arm.
@@ -50,17 +50,20 @@ These are **per task**, so cross-arm quantities are products: up to
 | `exactlyOnce` | `false` | At-least-once, matched guarantee-for-guarantee. `true` adds state-store round-trips no other arm pays for a guarantee no other arm offers. |
 | `errors.tolerance` | `none` (default kept) | A poison record fails the task loudly. `all` drops silently, and a silent drop voids the loss gate — faster for the wrong reason. |
 | `offset.flush.interval.ms` | `5000` | The matched durability cadence (shipped: 60000). |
-| `consumer.max.poll.records` | `2000` | One poll fills one buffered insert. Shipped 500 puts four polls under every flush. |
-| `consumer.max.partition.fetch.bytes` | `8388608` | Shipped 1 MiB is ~200 messages/partition/fetch at ~5 KiB messages, starving a 2000-record buffer. `fetch.max.bytes` stays at the shipped 50 MiB. |
+| `consumer.max.poll.records` | `= buffer_count` | One poll fills one buffered insert at every value of the knob (rendered from the same variable). Shipped 500 puts four polls under every 2000-record flush. |
+| `consumer.max.partition.fetch.bytes` | `8388608` | Shipped 1 MiB is ~258 messages/partition/fetch at this corpus's ~4.0 KiB (4065 B) mean framed message, starving a 2000-record buffer. `fetch.max.bytes` stays at the shipped 50 MiB. |
 | `ignorePartitionsWhenBatching` | `false` (default kept) | Per-partition batching is what keeps the connector's derived dedup token coherent. |
 | `client_version` | unset (effective `V1`) | RowBinary either way; the shipped default is measured. |
-| `clickhouseSettings` | unset | The connector already pins `async_insert=0, wait_end_of_query=1` on every insert (`ClickHouseSinkConfig.java:232-236`), which is exactly what server-side attribution requires. |
+| `clickhouseSettings` | unset | The connector sets `async_insert=0, wait_end_of_query=1` as non-overriding defaults on every insert (`ClickHouseSinkConfig.java:233-234`; a user-supplied value would win, and this arm supplies none) — exactly what server-side attribution requires. |
 | JVM sizing | `-Xms20480m -Xmx20480m -XX:MaxDirectMemorySize=768m -XX:MaxMetaspaceSize=256m` | 21504m in the 24 GiB container — the same figure and limit/8 slack rule as the Flink TaskManager, enforced by `entrants_are_valid`. GC is the launcher's shipped G1 (rule 1). |
 
 `GROUP_ID` is the **connector name**, not a consumer `group.id`: Connect derives
-a sink's consumer group as `connect-<name>` and refuses `group.id` overrides for
-sinks, so the fresh consumer group each repetition needs (a drain replays from
-offset zero) arrives by naming the connector with the driver's fresh id.
+a sink's consumer group as `connect-<name>`, so the fresh consumer group each
+repetition needs (a drain replays from offset zero) arrives by naming the
+connector with the driver's fresh id. (`consumer.override.group.id` would also
+work — standalone applies connector-level overrides under the default policy —
+but the name keeps the connector and its group one identity, with nothing to
+keep in step.)
 
 [`log4j2.yaml`](log4j2.yaml) is root `WARN`, console only — Kafka 4.x
 configures log4j2 in YAML, and the shipped Connect config is root `INFO` with a
@@ -69,8 +72,9 @@ cgroup, for output nothing reads.
 
 GC is G1 (the launcher's shipped `KAFKA_JVM_PERFORMANCE_OPTS`). `-Xlog:gc*`
 writes `/opt/kafka/logs/gc.log` for the driver to read — set via `KAFKA_OPTS`,
-not `KAFKA_GC_LOG_OPTS`, because `kafka-run-class.sh` only assembles its own GC
-logging in `-daemon` mode and this container runs foreground.
+not `KAFKA_GC_LOG_OPTS`, because `kafka-run-class.sh` assembles its own GC
+logging only behind the `-loggc` flag, which `connect-standalone.sh` never
+passes in any mode; `KAFKA_OPTS` is on the exec line unconditionally.
 
 ## Build
 
@@ -112,6 +116,12 @@ in a swapfile. The worker never terminates itself; the driver removes the
 container. **That recipe runs the image's defaults**, which are kept equal to
 the published knobs; the driver additionally sets the variables `[env]` names.
 
+**Rerunning by hand needs a fresh `GROUP_ID`** (e.g. add
+`-e GROUP_ID=comparison-kafka-connect-$(date +%s)`): the image's default is
+stable, so a second run under it resumes the consumer group `connect-…` at the
+tail of the topic and consumes nothing — the same trap the driver avoids by
+sending a fresh id every repetition.
+
 The rendered configuration in force is readable out of the running container:
 
 ```sh
@@ -150,14 +160,21 @@ Everything in the container is Apache-2.0, which is what closed the
 - `clickhouse-kafka-connect` is Apache-2.0 (LICENSE in the release zip).
 - `kafka-connect-avro-converter` 8.3.0 and its runtime closure are Apache-2.0
   **at the artifact level**, verified against the POMs on
-  `packages.confluent.io/maven/`. The CCL covers the Schema Registry *server*,
-  which is not present (the registry here is Redpanda's Confluent-API
-  implementation). [Aiven's licence analysis](https://aiven.io/blog/aiven-statement-on-kafka-license)
+  `packages.confluent.io/maven/`. The closure includes
+  `kafka-clients-8.3.0-ccs` — Confluent's Apache-2.0 build of the Apache Kafka
+  client, which arrives at compile scope and lands in the plugin directory
+  (harmless: Connect loads `org.apache.kafka.*` parent-first, and it is
+  recorded in `dependencies.txt`). The CCL covers the Schema Registry
+  *server*, which is not present (the registry here is Redpanda's
+  Confluent-API implementation). [Aiven's licence analysis](https://aiven.io/blog/aiven-statement-on-kafka-license)
   reaches the same reading.
 - Apicurio's Apache-2.0 converter was evaluated and rejected on function, not
-  licence: its Confluent compatibility is server-side only
-  ([adr/0001](https://github.com/Apicurio/apicurio-registry/blob/main/adr/0001-confluent-schema-registry-compatibility.md)),
-  so its deserializer cannot resolve schemas from a Confluent-API registry.
+  licence: its documented Confluent compatibility is server-side —
+  [adr/0001](https://github.com/Apicurio/apicurio-registry/blob/main/adr/0001-confluent-schema-registry-compatibility.md)
+  scopes it to Apicurio *serving* the Confluent API to Confluent clients — and
+  its own serdes are documented only against Apicurio's registry API, leaving
+  no supported client-side path to a third-party Confluent-API registry. No
+  other Apache-2.0 converter on Maven Central speaks that API at all.
 
 The converter's non-Central origin is declared in `[[deviations]]`.
 
@@ -169,6 +186,13 @@ The converter's non-Central origin is declared in `[[deviations]]`.
   with the server-side CPU column, which is where its flatten/filter/derive
   cost lands, and which excludes background merges — though the `Null`-engine
   landing table produces no parts and therefore no merges of its own.
+- **This arm is not gated against the ClickHouse ingest ceiling.** The
+  `rowbinary` ceiling was measured as direct inserts into the bare target; this
+  arm's every insert also runs the MV, so the harness refuses that gate rather
+  than proving headroom against work the ceiling never measured. Its records
+  carry headroom-unproven on the ClickHouse axis (the broker-consume gate still
+  applies), and the server-side CPU column is the honest measure of its target
+  load.
 - **The upstream integration test for array-of-Struct → `Array(Tuple)` is
   `@Disabled`** (for an unrelated flag) at v1.4.0, so the nested write path
   this arm depends on is not exercised by the connector's own CI. First local

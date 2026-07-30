@@ -362,23 +362,33 @@ pub enum Approach {
 /// [`Spec`] exists so that nobody has to do. The entrant states its own rule and
 /// the driver applies it without knowing what it means.
 ///
-/// # Only one relation, deliberately
+/// # Two relations, deliberately — and no third without a case
 ///
-/// `knob` must be strictly greater than `exceeds`, and there is no second form.
-/// A general expression language here would be a configuration DSL: unreviewable,
+/// A constraint states exactly one of: `knob` strictly greater than another
+/// knob (`exceeds`), or `knob` at or above a literal floor (`at_least`). A
+/// general expression language here would be a configuration DSL: unreviewable,
 /// and a place for a rule to be written that nobody can evaluate by reading it.
-/// One relation covers the case that exists, and a second real case is a second
-/// field with its own name and its own doc comment, added by someone who has one.
+/// Each relation was added by an arm that needed it — `exceeds` by Flink's
+/// sink (`buffered_rows` strictly above `max_rows`, or the job refuses to
+/// start), `at_least` by Kafka Connect's sink (`buffer_flush_ms` at least 1,
+/// or a zero flush time strands a sub-`bufferCount` tail and a drain never
+/// completes). A third real case is a third field with its own name and its
+/// own doc comment, added by someone who has one.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Constraint {
-    /// The knob that must be the larger.
+    /// The knob the relation binds.
     pub knob: String,
-    /// The knob it must strictly exceed.
-    pub exceeds: String,
-    /// What breaks when it does not. Quoted verbatim in the refusal, so the
-    /// operator of a sweep is told why the cell is impossible rather than merely
-    /// that it is.
+    /// The knob it must strictly exceed. Exactly one of this and `at_least`.
+    #[serde(default)]
+    pub exceeds: Option<String>,
+    /// The literal it must be at least equal to. Exactly one of this and
+    /// `exceeds`.
+    #[serde(default)]
+    pub at_least: Option<i64>,
+    /// What breaks when the relation does not hold. Quoted verbatim in the
+    /// refusal, so the operator of a sweep is told why the cell is impossible
+    /// rather than merely that it is.
     pub why: String,
 }
 
@@ -401,34 +411,63 @@ pub fn knob_violations(
     let mut out = Vec::new();
     for c in constraints {
         let value = |name: &str| knobs.get(name).and_then(toml::Value::as_integer);
-        match (value(&c.knob), value(&c.exceeds)) {
-            (Some(a), Some(b)) if a > b => {}
-            (Some(a), Some(b)) => out.push(format!(
-                "{} = {a} must strictly exceed {} = {b}. {}",
-                c.knob,
-                c.exceeds,
-                // Reflowed onto one line. `why` is a TOML multi-line string, so
-                // it arrives hard-wrapped at the width of the descriptor, and a
-                // refusal printed with those breaks in the middle of an indented
-                // list reads as two problems rather than one.
-                c.why.split_whitespace().collect::<Vec<_>>().join(" ")
-            )),
+        // Reflowed onto one line. `why` is a TOML multi-line string, so it
+        // arrives hard-wrapped at the width of the descriptor, and a refusal
+        // printed with those breaks in the middle of an indented list reads as
+        // two problems rather than one.
+        let why = || c.why.split_whitespace().collect::<Vec<_>>().join(" ");
+        let stated = || {
+            if knobs.is_empty() {
+                "none".to_owned()
+            } else {
+                knobs
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+        match (&c.exceeds, c.at_least) {
+            (Some(exceeds), None) => match (value(&c.knob), value(exceeds)) {
+                (Some(a), Some(b)) if a > b => {}
+                (Some(a), Some(b)) => out.push(format!(
+                    "{} = {a} must strictly exceed {exceeds} = {b}. {}",
+                    c.knob,
+                    why()
+                )),
+                _ => out.push(format!(
+                    "the constraint \"{} must exceed {exceeds}\" cannot be checked: one \
+                     of them is unset or is not an integer here (knobs: {}). An unset \
+                     knob leaves the image's own default in force, which is a value \
+                     this descriptor never states and no record reports.",
+                    c.knob,
+                    stated()
+                )),
+            },
+            (None, Some(floor)) => match value(&c.knob) {
+                Some(a) if a >= floor => {}
+                Some(a) => out.push(format!(
+                    "{} = {a} must be at least {floor}. {}",
+                    c.knob,
+                    why()
+                )),
+                None => out.push(format!(
+                    "the constraint \"{} must be at least {floor}\" cannot be checked: \
+                     it is unset or is not an integer here (knobs: {}). An unset knob \
+                     leaves the image's own default in force, which is a value this \
+                     descriptor never states and no record reports.",
+                    c.knob,
+                    stated()
+                )),
+            },
+            // Malformed relations are refused by `validate_constraints` before
+            // any run; this arm of the match exists so a caller that skipped
+            // validation still gets a refusal rather than a silently-ignored
+            // rule.
             _ => out.push(format!(
-                "the constraint \"{} must exceed {}\" cannot be checked: one of them \
-                 is unset or is not an integer here (knobs: {}). An unset knob leaves \
-                 the image's own default in force, which is a value this descriptor \
-                 never states and no record reports.",
-                c.knob,
-                c.exceeds,
-                if knobs.is_empty() {
-                    "none".to_owned()
-                } else {
-                    knobs
-                        .keys()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
+                "the constraint on {:?} states both `exceeds` and `at_least`, or \
+                 neither; exactly one relation must be stated",
+                c.knob
             )),
         }
     }
@@ -459,6 +498,11 @@ pub enum Placeholder<'a> {
     GroupId,
     /// `earliest` or `latest`, decided by the run mode, not by the descriptor.
     OffsetReset,
+    /// The ClickHouse password the infrastructure actually started the server
+    /// with. An arm that takes it from here cannot drift when the infra's value
+    /// changes; before it existed, every arm baked the same literal into its
+    /// image and the harness repeated it in two places of its own.
+    ClickhousePassword,
     /// The named knob's effective value for the variant being started.
     Knob(&'a str),
     /// The named `[[envelope.container]]`'s DNS name on the bench network.
@@ -469,8 +513,8 @@ impl<'a> Placeholder<'a> {
     /// Every supported spelling, quoted into refusals so the fix is in the
     /// message rather than in this file's source.
     pub const GRAMMAR: &'static str = "{{broker_internal}}, {{registry_internal}}, \
-         {{clickhouse_internal}}, {{topic}}, {{group_id}}, {{offset_reset}}, \
-         {{knob:NAME}}, {{container:NAME}}";
+         {{clickhouse_internal}}, {{clickhouse_password}}, {{topic}}, {{group_id}}, \
+         {{offset_reset}}, {{knob:NAME}}, {{container:NAME}}";
 
     /// Parses the text between `{{` and `}}`. `None` is a spelling the driver
     /// resolves no value for.
@@ -480,6 +524,7 @@ impl<'a> Placeholder<'a> {
             "broker_internal" => Some(Self::BrokerInternal),
             "registry_internal" => Some(Self::RegistryInternal),
             "clickhouse_internal" => Some(Self::ClickhouseInternal),
+            "clickhouse_password" => Some(Self::ClickhousePassword),
             "topic" => Some(Self::Topic),
             "group_id" => Some(Self::GroupId),
             "offset_reset" => Some(Self::OffsetReset),
@@ -998,16 +1043,23 @@ fn validate_env(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) -> Stri
 /// discovered by whoever next ran the arm rather than by whoever wrote it.
 fn validate_constraints(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) -> String) {
     for c in &e.spec.constraints {
-        for name in [&c.knob, &c.exceeds] {
-            if name.trim().is_empty() {
-                errs.push(at(
-                    "a [[constraints]] entry names an empty knob; a constraint over \
-                     nothing is a rule that can never fire"
-                        .to_owned(),
-                ));
-            }
+        if c.knob.trim().is_empty() || c.exceeds.as_deref().is_some_and(|n| n.trim().is_empty()) {
+            errs.push(at(
+                "a [[constraints]] entry names an empty knob; a constraint over \
+                 nothing is a rule that can never fire"
+                    .to_owned(),
+            ));
         }
-        if c.knob == c.exceeds {
+        match (&c.exceeds, c.at_least) {
+            (Some(_), None) | (None, Some(_)) => {}
+            _ => errs.push(at(format!(
+                "constraint on {:?} must state exactly one relation: `exceeds` (a \
+                 knob it strictly exceeds) or `at_least` (a literal it must meet). \
+                 Both, or neither, is a rule nobody can evaluate.",
+                c.knob
+            ))),
+        }
+        if c.exceeds.as_deref() == Some(c.knob.as_str()) {
             errs.push(at(format!(
                 "constraint {:?} must exceed itself, which nothing can satisfy",
                 c.knob
@@ -1015,11 +1067,11 @@ fn validate_constraints(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String)
         }
         if c.why.trim().is_empty() {
             errs.push(at(format!(
-                "constraint \"{} must exceed {}\" does not say what breaks when it \
-                 does not. The text is quoted verbatim into the refusal a sweep sees, \
+                "the constraint on {:?} does not say what breaks when it does not \
+                 hold. The text is quoted verbatim into the refusal a sweep sees, \
                  and a refusal that only says `no` costs whoever hits it the \
                  investigation this field exists to have already done.",
-                c.knob, c.exceeds
+                c.knob
             )));
         }
     }
@@ -1381,7 +1433,8 @@ mod tests {
     fn buffered_exceeds_batch() -> Constraint {
         Constraint {
             knob: "buffered_rows".to_owned(),
-            exceeds: "max_rows".to_owned(),
+            exceeds: Some("max_rows".to_owned()),
+            at_least: None,
             why: "AsyncSinkWriter refuses to construct otherwise.".to_owned(),
         }
     }
@@ -1542,7 +1595,8 @@ mod tests {
         let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
         e.spec.constraints = vec![Constraint {
             knob: "buffered_rows".to_owned(),
-            exceeds: "buffered_rows".to_owned(),
+            exceeds: Some("buffered_rows".to_owned()),
+            at_least: None,
             why: "  ".to_owned(),
         }];
         e.spec.variants[0].knobs = knobs(&[("buffered_rows", 1)]);
@@ -1556,6 +1610,37 @@ mod tests {
         );
         assert!(
             errs.iter().any(|x| x.contains("does not say what breaks")),
+            "{errs:?}"
+        );
+    }
+
+    /// The `at_least` relation: the floor itself is admitted, the value below
+    /// it is refused, and a constraint stating both relations (or neither) is
+    /// a descriptor error rather than a rule that silently half-applies.
+    #[test]
+    fn an_at_least_floor_admits_the_floor_and_refuses_below_it() {
+        let floor = Constraint {
+            knob: "buffer_flush_ms".to_owned(),
+            exceeds: None,
+            at_least: Some(1),
+            why: "a zero flush time strands a sub-buffer tail forever.".to_owned(),
+        };
+        let floor_only = std::slice::from_ref(&floor);
+        assert!(knob_violations(floor_only, &knobs(&[("buffer_flush_ms", 1)])).is_empty());
+        let refused = knob_violations(floor_only, &knobs(&[("buffer_flush_ms", 0)]));
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("must be at least 1"), "{}", refused[0]);
+
+        let mut both = floor;
+        both.exceeds = Some("other".to_owned());
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.constraints = vec![both];
+        e.spec.variants[0].knobs = knobs(&[("buffer_flush_ms", 1), ("other", 0)]);
+        let mut errs = Vec::new();
+        let at = |m: String| m;
+        validate_constraints(&e, &mut errs, &at);
+        assert!(
+            errs.iter().any(|x| x.contains("exactly one relation")),
             "{errs:?}"
         );
     }

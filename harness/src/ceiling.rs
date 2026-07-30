@@ -1004,6 +1004,13 @@ pub struct Achieved<'a> {
     pub rows_per_s: f64,
     /// The arm's declared `reports.wire_format`.
     pub wire_format: &'a str,
+    /// Whether the arm installs its own ClickHouse objects (a `[clickhouse]`
+    /// arm DDL hook) between its inserts and the target — a landing table, a
+    /// materialized view. The ingest ceilings were measured as direct inserts
+    /// into the bare target with no arm objects installed, so an insert that
+    /// also pays a view's flatten, filters and derived columns is doing
+    /// server-side work no measured ceiling describes.
+    pub server_side_transform: bool,
 }
 
 /// Which ceiling a [`Share`] was taken against.
@@ -1071,22 +1078,34 @@ impl Ceiling {
             });
         }
 
-        match self.ingest.iter().find(|c| c.format == arm.wire_format) {
-            Some(c) if c.rows_per_s > 0 => shares.push(Share {
-                kind: Against::ClickHouseIngest,
-                against: format!("clickhouse ingest ({})", c.format),
-                share: arm.rows_per_s / c.rows_per_s as f64,
-                ceiling: c.rows_per_s,
-            }),
-            _ => unproven.push(format!(
-                "no ClickHouse ingest ceiling has been measured for wire format {:?}, so this \
+        if arm.server_side_transform {
+            unproven.push(format!(
+                "this arm installs its own ClickHouse objects (arm DDL), so every insert \
+                 also pays server-side work — a materialized view's flatten, filters and \
+                 derived columns — that the {:?} ingest ceiling, measured as direct \
+                 inserts into the bare target, does not describe. It is deliberately NOT \
+                 gated against that ceiling: same format over a different shape is the \
+                 same unmeasured substitution this gate already refuses across formats.",
+                arm.wire_format
+            ));
+        } else {
+            match self.ingest.iter().find(|c| c.format == arm.wire_format) {
+                Some(c) if c.rows_per_s > 0 => shares.push(Share {
+                    kind: Against::ClickHouseIngest,
+                    against: format!("clickhouse ingest ({})", c.format),
+                    share: arm.rows_per_s / c.rows_per_s as f64,
+                    ceiling: c.rows_per_s,
+                }),
+                _ => unproven.push(format!(
+                    "no ClickHouse ingest ceiling has been measured for wire format {:?}, so this \
                  arm is not gated against the target. It is deliberately NOT \
                  gated against another format's figure: the insert format materially changes \
                  server-side work, and substituting one for another is the same unmeasured \
                  conversion that produced the message-size defect. Measure it with \
                  `bench ceiling --measure`.",
-                arm.wire_format
-            )),
+                    arm.wire_format
+                )),
+            }
         }
 
         Headroom { shares, unproven }
@@ -4754,6 +4773,7 @@ mod tests {
             msgs_per_s: 50_000.0,
             rows_per_s: 5_000_000.0,
             wire_format: "rowbinary",
+            server_side_transform: false,
         });
         let consume = headroom
             .shares()
@@ -4832,6 +4852,7 @@ mod tests {
             msgs_per_s: 40_562.0,
             rows_per_s: 4_056_210.0,
             wire_format: "rowbinary",
+            server_side_transform: false,
         });
         assert!(headroom.shares().is_empty(), "{:?}", headroom.shares());
         assert!(!headroom.is_proven());
@@ -4878,6 +4899,7 @@ mod tests {
             msgs_per_s: 1.0,
             rows_per_s: 1.0,
             wire_format: "rowbinary",
+            server_side_transform: false,
         });
         assert!(!headroom.is_proven());
         assert!(!headroom.infra_bound(), "an unproven gate is not a breach");
@@ -4899,6 +4921,7 @@ mod tests {
             msgs_per_s: 50_000.0,
             rows_per_s: 4_500_000.0,
             wire_format: "rowbinary",
+            server_side_transform: false,
         });
         assert!(headroom.is_proven());
         assert!(headroom.infra_bound());
@@ -4926,6 +4949,7 @@ mod tests {
             // Far over the RowBinary ceiling, and deliberately not gated by it.
             rows_per_s: 50_000_000.0,
             wire_format: "protobuf",
+            server_side_transform: false,
         });
         assert!(!headroom.infra_bound());
         assert!(!headroom.is_proven());
@@ -4955,6 +4979,7 @@ mod tests {
             msgs_per_s: 50_000.0,
             rows_per_s: 4_500_000.0,
             wire_format: "native",
+            server_side_transform: false,
         });
         assert!(headroom.is_proven(), "{:?}", headroom.unproven());
         assert!(
