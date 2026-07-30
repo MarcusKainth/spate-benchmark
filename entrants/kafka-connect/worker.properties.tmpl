@@ -1,0 +1,54 @@
+# Connect standalone worker configuration, TEMPLATE. entrypoint.sh substitutes
+# every @VAR@ from the container environment at start-up — Connect does not
+# expand environment variables inside properties files, so a literal ${VAR}
+# here would be read as those seven characters.
+#
+# Values not set here keep Kafka 4.3.1's shipped defaults on purpose; each
+# override below says why the shipped value was wrong for this workload.
+
+bootstrap.servers=@BOOTSTRAP@
+
+# Worker-level defaults. The sink overrides value.converter with the Avro
+# converter in clickhouse-sink.properties; ByteArrayConverter for keys because
+# the producer sends no keys and decoding nothing is the honest default.
+key.converter=org.apache.kafka.connect.converters.ByteArrayConverter
+value.converter=org.apache.kafka.connect.json.JsonConverter
+
+# Required by StandaloneConfig, otherwise unused for a sink: sink consumer
+# offsets go to __consumer_offsets on the broker in both standalone and
+# distributed mode. The directory exists and is appuser-writable in the image.
+offset.storage.file.filename=/opt/kafka/connect-data/connect.offsets
+
+# The 5 s durability cadence every arm is matched to (Spate commits offsets
+# every 5 s, Flink checkpoints every 5 s). Shipped default: 60000.
+offset.flush.interval.ms=5000
+
+# Where the drain starts: the driver passes `earliest` for a drain over the
+# prefilled corpus, `latest` for sustained mode.
+consumer.auto.offset.reset=@OFFSET_RESET@
+
+# One poll fills one buffered insert, at every value of the knob: templated
+# from the same variable as bufferCount so a sweep over buffer_count cannot
+# silently reintroduce the multi-poll flush this override exists to remove.
+# (The shipped 500 put four polls under every bufferCount=2000 insert. A
+# buffer_count=0 cell — buffering disabled — would render an invalid 0 here
+# and the worker refuses to start, loudly.)
+consumer.max.poll.records=@BUFFER_COUNT@
+
+# 8 MiB per partition per fetch, sized for the default buffer_count=2000. The
+# shipped 1 MiB is ~258 messages per partition per fetch at this corpus's
+# ~4.0 KiB (4065 B) mean framed message, which starves a 2000-record buffer.
+# fetch.max.bytes stays at the shipped 50 MiB, comfortably above
+# 8 partitions x 8 MiB in the worst case that never happens (a task owns at
+# most a few partitions at tasks.max=8 over 8 partitions).
+consumer.max.partition.fetch.bytes=8388608
+
+# Where plugin isolation looks. The connector and the Avro converter live in
+# separate subdirectories so each gets its own classloader with its own
+# dependency closure.
+plugin.path=/opt/kafka/plugins
+
+# The REST API is not used by the benchmark (standalone takes its connector
+# config from the command line), but the worker refuses to start without a
+# listener it can bind.
+listeners=http://0.0.0.0:8083

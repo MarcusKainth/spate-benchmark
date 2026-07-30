@@ -142,6 +142,55 @@ fn flink_jvm_sizing_fits_its_declared_container() {
 }
 
 #[test]
+fn kafka_connect_jvm_sizing_fits_its_declared_container() {
+    // The same drift `flink_jvm_sizing_fits_its_declared_container` exists to
+    // prevent, for the arm whose JVM is sized in its Dockerfile rather than in
+    // a config file: KAFKA_HEAP_OPTS is what actually sizes the Connect
+    // worker's JVM, and the descriptor's container memory is what the driver
+    // caps the cgroup at. Neither is obviously the source of truth. A heap
+    // sized for a smaller container silently handicaps a competitor; one sized
+    // for a larger container is an OOM-kill mid-drain.
+    //
+    // The JVM's committed footprint is bounded by heap + direct memory +
+    // metaspace (thread stacks and JIT code cache live in the slack, which is
+    // also why slack must exist at all).
+    let entrants = entrant::load_all(&entrants_dir()).expect("descriptors valid");
+    let kc = entrants
+        .iter()
+        .find(|e| e.id() == "kafka-connect")
+        .expect("kafka-connect entrant");
+
+    let dockerfile = std::fs::read_to_string(kc.dir.join("Dockerfile")).expect("read Dockerfile");
+    let heap_opts = dockerfile
+        .lines()
+        .find_map(|l| l.trim().split_once("KAFKA_HEAP_OPTS=\"").map(|(_, v)| v))
+        .and_then(|v| v.split('"').next())
+        .expect("the Dockerfile sets KAFKA_HEAP_OPTS on one line");
+
+    let flag = |prefix: &str| -> u64 {
+        heap_opts
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix(prefix))
+            .and_then(mib)
+            .unwrap_or_else(|| panic!("KAFKA_HEAP_OPTS carries no parseable {prefix}"))
+    };
+    let jvm = flag("-Xmx") + flag("-XX:MaxDirectMemorySize=") + flag("-XX:MaxMetaspaceSize=");
+
+    let worker = kc.data_plane().expect("a data-plane container");
+    let limit = mib(&worker.memory).expect("container memory parses");
+    assert!(
+        jvm <= limit,
+        "kafka-connect: heap+direct+metaspace {jvm}m exceeds the container's {limit}m"
+    );
+    let slack = limit - jvm;
+    assert!(
+        slack <= limit / 8,
+        "kafka-connect: heap+direct+metaspace {jvm}m leaves {slack}m of its {limit}m \
+         container unused; Connect is being handicapped"
+    );
+}
+
+#[test]
 fn a_jvm_containers_declared_gc_log_is_where_its_configuration_sends_it() {
     // The descriptor's `gc_log` is what the harness copies out after a run; the
     // arm's own configuration is what decides where the JVM writes. Neither

@@ -63,7 +63,7 @@ the workload, for the reason given above.
 
 ## Most systems are not here yet
 
-Four of the six declared entrants are unimplemented. Their blockers are written
+Three of the six declared entrants are unimplemented. Their blockers are written
 down in [the roadmap](./roadmap.md) rather than left implicit, because "we only
 measured the ones we beat" is exactly the accusation a partial comparison invites
 and the only defence is to name what is missing and why.

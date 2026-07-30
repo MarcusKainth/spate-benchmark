@@ -1844,6 +1844,16 @@ fn run_arm(
         },
         rows_per_s,
         wire_format,
+        // Arm-owned DDL means every insert also runs the arm's objects — the
+        // ingest ceilings were measured against the bare target, so the gate
+        // refuses them for such arms rather than proving headroom against
+        // work the ceiling never performed.
+        server_side_transform: arm
+            .entrant
+            .spec
+            .clickhouse
+            .as_ref()
+            .is_some_and(|ch| !ch.arm_sql.trim().is_empty()),
     });
     eprintln!("  headroom: {}", headroom.summary());
     note.push_str(&format!("; headroom {}", headroom.summary()));
@@ -3216,6 +3226,12 @@ fn substitute(
                 Mode::Sustained { .. } => sustained_topic(&opts.topic),
             }),
             Some(Placeholder::GroupId) => Some(group_id.to_owned()),
+            // The ClickHouse password the infra actually started the server
+            // with. Before this existed every arm baked the same literal into
+            // its image and the harness repeated it in two places of its own —
+            // five copies of one secret, tied together by nothing. An arm that
+            // takes it from here cannot drift when the infra's value changes.
+            Some(Placeholder::ClickhousePassword) => Some(ep.ch_password.clone()),
             // Drain replays a prefilled corpus from the beginning; sustained
             // starts at the tail. `Mode::offset_reset` carries the argument, and
             // it is not a preference — the wrong value here fails silently and
@@ -3349,7 +3365,8 @@ mod tests {
     fn buffered_exceeds_batch() -> crate::entrant::Constraint {
         crate::entrant::Constraint {
             knob: "buffered_rows".to_owned(),
-            exceeds: "max_rows".to_owned(),
+            exceeds: Some("max_rows".to_owned()),
+            at_least: None,
             why: "AsyncSinkWriter refuses to construct otherwise.".to_owned(),
         }
     }
@@ -3569,6 +3586,7 @@ mod tests {
             msgs_per_s: rows_per_s / per_message,
             rows_per_s,
             wire_format: "rowbinary",
+            server_side_transform: false,
         });
         let share = honest.binding().expect("the consume ceiling applied").share;
         assert!((share - 0.95).abs() < 1e-9, "share was {share}");
@@ -3584,6 +3602,7 @@ mod tests {
             msgs_per_s: rows_per_s / per_event,
             rows_per_s,
             wire_format: "rowbinary",
+            server_side_transform: false,
         });
         let wrong = understated
             .binding()
@@ -3614,6 +3633,7 @@ mod tests {
             // Nine tenths of what ClickHouse took for this format.
             rows_per_s: 3_600_000.0,
             wire_format: "rowbinary",
+            server_side_transform: false,
         };
         let headroom = gate.headroom(arm);
 
@@ -3649,6 +3669,7 @@ mod tests {
             msgs_per_s: 100_000.0,
             rows_per_s: 10_000_000.0,
             wire_format: "rowbinary",
+            server_side_transform: false,
         });
         assert!(nothing.shares().is_empty());
         assert!(!nothing.is_proven());
@@ -3663,6 +3684,7 @@ mod tests {
                 msgs_per_s: 100_000.0,
                 rows_per_s: 10_000_000.0,
                 wire_format: "native",
+                server_side_transform: false,
             },
         );
         assert_eq!(partial.shares().len(), 1);
@@ -3675,6 +3697,50 @@ mod tests {
             partial.summary().contains("UNPROVEN"),
             "{}",
             partial.summary()
+        );
+    }
+
+    /// An arm that installs its own ClickHouse objects is never gated against
+    /// the direct-insert ingest ceiling, even when a ceiling for its exact wire
+    /// format exists.
+    ///
+    /// The ceilings were measured against the bare target. An arm whose every
+    /// insert also runs a materialized view's flatten, filters and derived
+    /// columns asks the server for more work per row than the ceiling ever
+    /// measured, so gating it there would publish "headroom proven" for an arm
+    /// that may be saturating ClickHouse. The broker share still applies —
+    /// consume cost does not depend on what happens after the insert arrives.
+    #[test]
+    fn an_arm_with_its_own_ddl_is_not_gated_against_the_direct_insert_ceiling() {
+        let gate = gate(Some(1_000_000), vec![ingest("rowbinary", 4_000_000)]);
+        let headroom = gate.headroom(ceiling::Achieved {
+            msgs_per_s: 100_000.0,
+            // Ninety percent of the direct-insert figure: gated naively, this
+            // arm would be refused as infra-bound; gated correctly it is
+            // *unproven*, which is a different claim than either.
+            rows_per_s: 3_600_000.0,
+            wire_format: "rowbinary",
+            server_side_transform: true,
+        });
+        assert_eq!(headroom.shares().len(), 1, "{}", headroom.summary());
+        assert!(
+            headroom
+                .shares()
+                .iter()
+                .all(|s| s.kind == ceiling::Against::BrokerConsume),
+            "only the broker share may be charged: {}",
+            headroom.summary()
+        );
+        assert!(!headroom.infra_bound());
+        assert!(
+            !headroom.is_proven(),
+            "refused is unproven, never silently cleared: {}",
+            headroom.summary()
+        );
+        assert!(
+            headroom.summary().contains("UNPROVEN"),
+            "{}",
+            headroom.summary()
         );
     }
 
@@ -3701,6 +3767,7 @@ mod tests {
                 msgs_per_s: 10_000.0,
                 rows_per_s: 1_000_000.0,
                 wire_format,
+                server_side_transform: false,
             }
         }
 
