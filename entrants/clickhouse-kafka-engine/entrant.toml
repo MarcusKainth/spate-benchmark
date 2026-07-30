@@ -66,8 +66,11 @@ interval_ms = 5000
 # This arm's inserts reach the shared server through a Distributed table, so
 # every one of them arrives with `is_initial_query = 0` — the exact predicate
 # the attribution query uses to EXCLUDE distributed sub-queries for every
-# other arm. Declaring the fact here lets the driver drop only that predicate
-# for only this arm, instead of weakening the query for everyone.
+# other arm. Declaring the fact here makes the driver INVERT that predicate to
+# `NOT is_initial_query` for only this arm — never merely drop it: one
+# polarity is always present, so if this arm's Distributed table ever lived on
+# the shared server itself, the initial query and the forwarded execution it
+# spawns could not both match and be double-counted.
 #
 # No arm_sql: this arm's objects live in its own container's initdb, not on
 # the shared server. The shared `sensor_events` is untouched and identical
