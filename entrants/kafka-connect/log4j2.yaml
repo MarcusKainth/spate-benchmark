@@ -1,0 +1,27 @@
+# Log4j2 configuration for the Kafka Connect arm. Kafka 4.x configures log4j2
+# in YAML (the image ships config/connect-log4j2.yaml in exactly this format);
+# the Dockerfile's KAFKA_LOG4J_OPTS points here instead.
+#
+# Root WARN, console only. The shipped Connect config is root INFO with a
+# RollingFile appender: at INFO the consumer logs its full resolved
+# configuration per task and the connector logs per-batch lines — disk writes
+# on the hot path inside the measured cgroup, for output nothing reads. Every
+# published figure comes from outside the arm (ClickHouse, cgroup v2, gc.log),
+# so WARN loses nothing except self-reporting.
+Configuration:
+  Properties:
+    Property:
+      - name: "logPattern"
+        value: "[%d] %p %X{connector.context}%m (%c:%L)%n"
+
+  Appenders:
+    Console:
+      name: STDOUT
+      PatternLayout:
+        pattern: "${logPattern}"
+
+  Loggers:
+    Root:
+      level: WARN
+      AppenderRef:
+        - ref: STDOUT

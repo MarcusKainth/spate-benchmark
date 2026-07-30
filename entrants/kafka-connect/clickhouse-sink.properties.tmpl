@@ -1,0 +1,63 @@
+# clickhouse-kafka-connect sink configuration, TEMPLATE. entrypoint.sh
+# substitutes every @VAR@ from the container environment at start-up.
+#
+# Deliberately NOT set, so the shipped behaviour is what is measured:
+#   - clickhouseSettings: the connector already pins async_insert=0 and
+#     wait_end_of_query=1 on every insert (ClickHouseSinkConfig.java:232-236 at
+#     v1.4.0), which is exactly what server-side attribution requires.
+#   - client_version: the effective default is V1; inserts are RowBinary either
+#     way (ClickHouseWriter.java:1066).
+#   - errors.tolerance: the default `none` is kept. A poison record fails the
+#     task loudly; `all` would drop it silently, and a silent drop voids the
+#     loss gate — faster for the wrong reason.
+#   - Retry behaviour: retryable ClickHouse errors surface as
+#     RetriableException and the framework retries; the defaults are the
+#     shipped ones.
+
+# The connector NAME. Connect derives the sink's consumer group as
+# `connect-<name>` and refuses consumer group.id overrides for sinks, so the
+# driver's fresh per-repetition group id arrives by naming the connector with
+# it. See [env] in entrant.toml.
+name=@GROUP_ID@
+connector.class=com.clickhouse.kafka.connect.ClickHouseSinkConnector
+
+# One task per partition (8). A ninth task would own no partitions.
+tasks.max=@TASKS_MAX@
+topics=@TOPIC@
+
+# The nested batches land in the arm's own landing table, not in the shared
+# sensor_events: the MV in clickhouse/arm.sql performs the flatten there. The
+# topic name varies per mode (drain vs sustained), so the map is templated.
+topic2TableMap=@TOPIC@=sensor_batches_landing
+
+hostname=@CLICKHOUSE_HOST@
+port=@CLICKHOUSE_PORT@
+ssl=false
+username=default
+password=@CLICKHOUSE_PASSWORD@
+database=default
+
+# At-least-once, like every other arm (methodology/: guarantee-for-guarantee).
+# exactlyOnce=true would add ZooKeeper-style state-store round-trips no other
+# arm pays for a guarantee no other arm offers.
+exactlyOnce=false
+
+# The throughput knobs (both since 1.3.6). The at-least-once buffer flushes at
+# bufferCount records OR bufferFlushTime ms, whichever first; preCommit
+# surfaces only written offsets. bufferFlushTime MUST be > 0 whenever
+# bufferCount > 0 — a zero flush time strands a sub-bufferCount tail and the
+# drain never completes.
+bufferCount=@BUFFER_COUNT@
+bufferFlushTime=@BUFFER_FLUSH_MS@
+
+# Shipped default, stated because it matters: each task batches its own
+# partitions separately, which is what keeps the connector's derived
+# insert_deduplication_token (topic-partition-minOffset-maxOffset) coherent.
+ignorePartitionsWhenBatching=false
+
+# The decode path: Confluent-framed Avro against the live registry, through the
+# converter this arm bundles (see [[deviations]] in entrant.toml). Keys carry
+# nothing and are passed as bytes.
+value.converter=io.confluent.connect.avro.AvroConverter
+value.converter.schema.registry.url=@REGISTRY_URL@
+key.converter=org.apache.kafka.connect.converters.ByteArrayConverter

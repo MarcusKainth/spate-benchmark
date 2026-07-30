@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Avro converter for the Kafka Connect arm.
+
+  Apache Kafka's Connect runtime ships NO Avro converter, so this pom exists
+  only to resolve io.confluent:kafka-connect-avro-converter and its runtime
+  closure into a plugin directory (Dockerfile stage `deps`). Nothing is
+  compiled; `dependency:copy-dependencies` is the whole build.
+
+  Licence: the converter and every artifact in its runtime closure are
+  Apache-2.0 at the POM level (verified against
+  packages.confluent.io/maven/io/confluent/kafka-connect-avro-converter/8.3.0/
+  and the kafka-schema-registry-client 8.3.0 POM). The Confluent Community
+  Licence covers the Schema Registry *server* and the Confluent Platform
+  *images*; neither is present in this arm. The non-Central origin is declared
+  in [[deviations]] in entrant.toml.
+
+  Apicurio's Apache-2.0 converter was evaluated and rejected: its Confluent
+  compatibility is server-side only (adr/0001 in the apicurio-registry repo),
+  so its deserializer cannot resolve schemas from Redpanda's Confluent-API
+  registry — which is what the corpus is framed against.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>dev.kainth.spatebench</groupId>
+  <artifactId>connect-avro-converter-closure</artifactId>
+  <version>1.0.0</version>
+  <packaging>pom</packaging>
+  <name>Spate comparison :: Kafka Connect arm :: Avro converter closure</name>
+
+  <repositories>
+    <!-- The converter is NOT on Maven Central. This is the same repository the
+         Flink arm's pom (and Flink's own) already declares for the registry
+         client. -->
+    <repository>
+      <id>confluent</id>
+      <url>https://packages.confluent.io/maven/</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+  </repositories>
+
+  <dependencies>
+    <!-- 8.3.0: the current converter release line at pin time. Its runtime
+         closure (kafka-avro-serializer, kafka-schema-registry-client, avro,
+         and their dependencies) is what copy-dependencies collects; provided-
+         scope artifacts such as connect-api stay out, because the Connect
+         runtime supplies them and duplicate classes across the plugin
+         classloader boundary are how converters break. -->
+    <dependency>
+      <groupId>io.confluent</groupId>
+      <artifactId>kafka-connect-avro-converter</artifactId>
+      <version>8.3.0</version>
+    </dependency>
+  </dependencies>
+</project>

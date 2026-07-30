@@ -5,15 +5,21 @@ id       = "kafka-connect"
 name     = "Kafka Connect + clickhouse-kafka-connect"
 homepage = "https://github.com/ClickHouse/clickhouse-kafka-connect"
 repo     = "https://github.com/ClickHouse/clickhouse-kafka-connect"
-# The connector is Apache-2.0. The Confluent *images* commonly used to run
-# Connect are under the Confluent Community Licence, which is not OSI-approved —
-# see [planned].licence_gate.
+docs     = "https://clickhouse.com/docs/integrations/kafka/clickhouse-kafka-connect-sink"
+# Every artefact in the container is Apache-2.0: the `apache/kafka` image is the
+# ASF's own, the connector is Apache-2.0, and the Avro converter's artifacts are
+# Apache-2.0 at the POM level (verified against
+# packages.confluent.io/maven/io/confluent/kafka-connect-avro-converter/8.3.0).
+# The former [planned].licence_gate concerned the Confluent Community Licence,
+# which covers the Schema Registry *server* and the Confluent Platform *images*
+# — neither is present in this arm. The converter's non-Central origin is still
+# declared under [[deviations]] rather than smoothed over.
 licence  = "Apache-2.0"
 vendor   = "clickhouse"
 kind     = "connector-runtime"
 language = ["java"]
 runtime  = "jvm"
-status   = "planned"
+status   = "active"
 
 [maintainer]
 who = "spate-benchmark"
@@ -24,25 +30,140 @@ order = 40
 hue   = 275
 short = "Connect"
 
-[planned]
-blockers = """
-`exactlyOnce=false` to match the at-least-once semantics every other arm runs;
-`AvroConverter` against the same registry; `bufferCount` and `bufferFlushTime`
-are the throughput knobs worth tuning (both added in 1.3.6).
+[version]
+# Read from the jar filenames that actually run: the Connect runtime jar in the
+# distribution's classpath and the connector jar in the plugin path. The
+# `apache/kafka` image's OCI labels carry no usable version, and a version a
+# human typed in is not provenance. The Dockerfile's drift guard (`RUN test -n`)
+# fails the build if either jar stops matching these patterns, so this command
+# cannot silently start printing an empty half.
+#
+# Joined with `-`, not `+`: the driver's version parser accepts only
+# `[0-9A-Za-z.-]` tokens, so a `+` would resolve no version at all and refuse
+# every run.
+strategy = "command"
+command  = ["sh", "-c", "printf '%s-%s\\n' \"$(ls /opt/kafka/libs | sed -n 's/^connect-runtime-\\(.*\\)\\.jar$/\\1/p')\" \"$(ls /opt/kafka/plugins/clickhouse-kafka-connect | sed -n 's/^clickhouse-kafka-connect-\\(v[0-9.]*\\)-confluent\\.jar$/\\1/p')\""]
+pinned   = "4.3.1-v1.4.0"
 
-The interesting structural deviation, which rule 4 requires be published rather
-than smoothed over: Connect has no fan-out operator. One Kafka record cannot
-become a hundred ClickHouse rows inside it, so the arm must land the nested array
-and flatten with a ClickHouse materialized view. That is a legitimate real-world
-pattern and an interesting result in its own right, but it moves CPU to the
-server, where our cgroup sampler does not see it — so the comparison for this arm
-must lean on ClickHouse's own ProfileEvents, and the page must say why.
-"""
+[build]
+context    = "../.."
+dockerfile = "Dockerfile"
+image      = "spate-bench-kafka-connect"
 
-licence_gate = """
-The Confluent-distributed Connect images are under the Confluent Community
-Licence, not an OSI-approved licence. This arm is built and run, but its numbers
-stay unpublished until the licence text has been read and the terms of publishing
-benchmark results from those images are understood. A permissively-licensed
-Connect distribution would remove the gate entirely.
+# One container, running Connect STANDALONE: worker, connector and tasks in one
+# JVM. Standalone has no control plane by design, so there is nothing to
+# allocate on top. Distributed-with-one-worker was rejected: it adds three
+# internal topics (config, offset, status) of broker work that no other arm
+# causes, needs a REST bootstrap step to install the connector, and buys nothing
+# — a sink's consumer offsets go to `__consumer_offsets` in BOTH modes. The
+# offset storage file standalone requires is a StandaloneConfig formality,
+# otherwise unused for sinks.
+[envelope]
+cpus   = "6"
+memory = "24g"
+
+[[envelope.container]]
+role   = "data-plane"
+name   = "worker"
+cpus   = "6"
+memory = "24g"
+# Where the Dockerfile's KAFKA_OPTS aims -Xlog:gc*. The harness copies this out
+# after a run; `entrants_are_valid` checks the path against the Dockerfile.
+gc_log = "/opt/kafka/logs/gc.log"
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "offset-commit"
+# offset.flush.interval.ms in worker.properties.tmpl — matched to the 5 s
+# durability cadence every arm runs (Spate's commit interval, Flink's
+# checkpoint interval). The shipped default is 60000.
+interval_ms = 5000
+
+# Arm-specific ClickHouse objects: Connect has no fan-out operator, so the
+# connector lands the nested batch into a Null-engine landing table and a
+# materialized view does the flatten/filter/derive into the shared
+# `sensor_events`. Applied per repetition by the harness DDL hook; see
+# clickhouse/arm.sql for the SQL and the reasoning, and [[deviations]] for the
+# measurement consequence.
+[clickhouse]
+arm_sql          = "clickhouse/arm.sql"
+arm_teardown_sql = "clickhouse/arm_teardown.sql"
+# The landing table's parent inserts carry the MV's cost in system.query_log,
+# so they are attributed to this arm. Bare name — the harness qualifies it.
+attribution_tables = ["sensor_batches_landing"]
+
+# GROUP_ID is used as the CONNECTOR NAME, not as a consumer group.id: Connect
+# derives a sink's consumer group as `connect-<name>` and refuses group.id
+# overrides for sink connectors, so the fresh consumer group each repetition
+# needs comes from naming the connector with the driver's fresh id.
+[env]
+BOOTSTRAP       = "{{broker_internal}}"
+REGISTRY_URL    = "{{registry_internal}}"
+CLICKHOUSE_URL  = "{{clickhouse_internal}}"
+TOPIC           = "{{topic}}"
+GROUP_ID        = "{{group_id}}"
+OFFSET_RESET    = "{{offset_reset}}"
+TASKS_MAX       = "{{knob:tasks}}"
+BUFFER_COUNT    = "{{knob:buffer_count}}"
+BUFFER_FLUSH_MS = "{{knob:buffer_flush_ms}}"
+
+# bufferFlushTime must be > 0 whenever bufferCount > 0: the connector's
+# at-least-once buffer flushes on size OR time, and a zero flush time strands
+# any sub-buffer_count tail forever — the drain never completes. That is not
+# expressible as [[constraints]] (which only states knob-exceeds-knob), so it is
+# enforced here by comment and by the README's smoke recipe rather than by the
+# driver.
+[[variants]]
+id       = "rowbinary-mv"
+label    = "Kafka Connect · clickhouse-kafka-connect · RowBinary + MV"
+approach = "realistic"
+default  = true
+knobs    = { tasks = 8, buffer_count = 2000, buffer_flush_ms = 1000 }
+# Verified in the v1.4.0 source: inserts go as RowBinary
+# (ClickHouseWriter.java:1066; RowBinaryWithDefaults only when the target has
+# DEFAULT columns, and the landing table has none).
+reports  = { wire_format = "rowbinary" }
+
+[[deviations]]
+what = """
+Kafka Connect has no fan-out operator — one Kafka record cannot become ~100 rows
+inside the runtime — so the connector lands the nested batch (Null-engine
+landing table, per-entrant DDL) and a ClickHouse materialized view performs the
+flatten, both filters and both derived columns; the transform's CPU therefore
+runs inside the shared ClickHouse where the cgroup sampler cannot see it.
 """
+why = """
+This arm's efficiency comparison leans on ClickHouse's own ProfileEvents
+(system.query_log), whose MV cost rides on the parent insert and excludes
+background merges; the arm's client-side CPU and the other arms' are not the
+same work, and the page must say so.
+"""
+affects = ["cpu", "server-side-cpu"]
+
+[[deviations]]
+what = """
+An unbundled Avro converter — Apache Kafka's Connect runtime ships none, so this
+arm adds io.confluent:kafka-connect-avro-converter 8.3.0 and its dependency
+closure, distributed from Confluent's Maven repository rather than Maven
+Central.
+"""
+why = """
+Apache-2.0 at the artifact level (POM-verified); Apicurio's Apache-2.0 converter
+was evaluated and rejected because its Confluent compatibility is server-side
+only — its deserializer cannot resolve schemas from Redpanda's
+Confluent-API registry.
+"""
+affects = ["decode-path", "licensing"]
+
+[[deviations]]
+what = """
+clickhouse-kafka-connect derives insert_deduplication_token =
+topic-partition-minOffset-maxOffset on every schema-path insert, even with
+exactlyOnce=false.
+"""
+why = """
+Inert here — the landing table is ENGINE = Null (no parts, no dedup window) —
+but it is the same mechanism ddl.sql discloses for the Spate arm, so it is
+declared rather than discovered.
+"""
+affects = ["dedup"]

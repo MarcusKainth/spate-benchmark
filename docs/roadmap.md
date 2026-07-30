@@ -20,6 +20,13 @@ under "Not yet measured" comes from `[planned].blockers` in that system's
 | **Spate** | native (Rust) | Native and RowBinary wire formats |
 | **Apache Flink 2.2.1** | JVM | RowBinaryWithNamesAndTypes, via the official ClickHouse connector |
 | **Vector 0.57.0** | native (Rust) | ArrowStream and JSONEachRow wire formats |
+| **Kafka Connect 4.3.1 + `clickhouse-kafka-connect` v1.4.0** | JVM | RowBinary into a Null-engine landing table, flattened by a ClickHouse materialized view — Connect has no fan-out operator, so the transform's CPU moves to the server and the arm leans on ClickHouse's own profiling, declared in `[[deviations]]` |
+
+The Kafka Connect arm's former licence gate is **closed**: it runs on the ASF's
+own `apache/kafka` image with an Apache-2.0 connector and a POM-verified
+Apache-2.0 Avro converter — no Confluent-distributed image, and no
+Community-Licence artefact, is present. The converter's non-Central origin is
+declared as a deviation on the entrant.
 
 ## Not yet measured
 
@@ -34,18 +41,6 @@ resolved honestly rather than fudged — the consumption happens *inside* the
 ClickHouse container, so its CPU is not separable from the server's by the cgroup
 sampler. Either this arm runs against a dedicated ClickHouse whose whole container
 is the envelope, or it is reported on a different basis and labelled so.
-
-### Kafka Connect + `clickhouse-kafka-connect`
-
-Connect has no fan-out operator: one Kafka record cannot become a hundred
-ClickHouse rows inside it, so the arm must land the nested array and flatten with
-a materialized view. That is a legitimate real-world pattern and an interesting
-result, but it moves CPU to the server where the cgroup sampler does not see it,
-so this arm has to lean on ClickHouse's own profiling and say why.
-
-**Publication is additionally gated on a licence review.** The
-Confluent-distributed Connect images are under the Confluent Community Licence,
-which is not OSI-approved.
 
 ### Redpanda Connect
 

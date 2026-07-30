@@ -86,7 +86,7 @@ struct Arm {
 /// Every arm's transform artifacts. A new arm adds its row(s) here in the PR
 /// that activates it; [`every_active_arm_has_a_row_in_this_table`] is what makes
 /// omitting them a failure rather than a gap.
-const ARMS: [Arm; 4] = [
+const ARMS: [Arm; 5] = [
     Arm {
         entrant: "spate",
         file: "entrants/spate/src/rows.rs",
@@ -132,6 +132,17 @@ const ARMS: [Arm; 4] = [
         file: "entrants/vector/transform.vrl",
         drop_unit: |spec| vec![format!("!= {spec:?}")],
         quality_floor: |spec| vec![format!(">= {spec})")],
+        rust_oracle_check: false,
+    },
+    Arm {
+        // A config-only arm: the transform is the materialized view's SQL,
+        // applied by the per-entrant DDL hook. SQL spells the filters as
+        // predicates, so the substrings held to the oracle are the comparison
+        // operator plus the literal.
+        entrant: "kafka-connect",
+        file: "entrants/kafka-connect/clickhouse/arm.sql",
+        drop_unit: |spec| vec![format!("!= '{spec}'")],
+        quality_floor: |spec| vec![format!(">= {spec}")],
         rust_oracle_check: false,
     },
 ];
