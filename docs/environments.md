@@ -45,7 +45,7 @@ hardware.
 
 ## The envelope
 
-**Per system: 4 CPUs and 16 GiB of data plane.** A control plane — a Flink
+**Per system: 6 CPUs and 24 GiB of data plane.** A control plane — a Flink
 JobManager, a Connect coordinator — is allocated on top, with its *measured*
 consumption published alongside the arm's total rather than pre-charged against
 it. Swap is disabled so memory pressure surfaces rather than hiding.
@@ -57,7 +57,7 @@ number,
 which is the honest cost of the choice.
 
 **Infrastructure sits outside every arm's budget** and is identical for all of
-them: Redpanda at 4 CPUs / 8 GiB, ClickHouse at 9 CPUs / 12 GiB, an 8-partition
+them: Redpanda at 3 CPUs / 8 GiB, ClickHouse at 16 CPUs / 16 GiB, an 8-partition
 topic. It is declared in the environment profile rather than passed on the
 command line — which is the fix for a real failure, where a runner script, the
 driver's defaults and the written methodology stated three different envelopes
