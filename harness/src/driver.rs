@@ -1285,6 +1285,168 @@ fn measure(
     })
 }
 
+/// Reads one of an arm's committed SQL files, by the path its descriptor
+/// declares relative to the entrant directory.
+///
+/// A read failure is an `Err` naming the file rather than a panic, because it
+/// happens per repetition inside a sweep: the arm is identified by then, so the
+/// refusal is recorded against it like any other.
+fn read_arm_sql(arm: &Arm<'_>, rel: &str) -> Result<String, String> {
+    let path = arm.entrant.dir.join(rel);
+    std::fs::read_to_string(&path).map_err(|e| format!("read arm SQL {}: {e}", path.display()))
+}
+
+/// Executes one file's worth of entrant-authored SQL, split by
+/// [`corpus::split_sql`], failing softly.
+///
+/// Built on [`crate::docker::try_clickhouse_sql`] and never on the asserting
+/// variant, and the distinction is who owns the statement. A bad statement in
+/// an arm's own `arm_sql`/`arm_teardown_sql` is a defect of that arm — it gets
+/// a `Failed` record like any other refusal, because the `Err` propagates to
+/// [`measure`] with the arm already identified. `docker::clickhouse_sql`
+/// asserts on `DB::Exception`, which is the right behaviour for the SQL the
+/// harness owns (the `TRUNCATE`, the workload DDL — those failing means the
+/// bench itself is broken) and the wrong one here: a panic over one entrant's
+/// typo takes a multi-hour sweep down with every other arm's remaining
+/// repetitions. `try_clickhouse_sql`'s own doc states the principle; this is
+/// its application to SQL the harness runs but did not write.
+fn apply_arm_sql(ep: &Endpoints, sql: &str, what: &str) -> Result<(), String> {
+    apply_arm_statements(ep, &corpus::split_sql(sql), what)
+}
+
+/// Executes already-split entrant-authored statements; see [`apply_arm_sql`].
+///
+/// Split out so [`ArmObjects`], which holds its teardown pre-split, runs its
+/// statements through exactly the same execution and error path as the create
+/// side does.
+fn apply_arm_statements(ep: &Endpoints, stmts: &[String], what: &str) -> Result<(), String> {
+    for stmt in stmts {
+        let body = crate::docker::try_clickhouse_sql(
+            &ep.ch_host,
+            ep.ch_port,
+            &ep.ch_user,
+            &ep.ch_password,
+            stmt,
+        )
+        .map_err(|e| format!("{what}: {stmt:?}: {e}"))?;
+        // The body is checked here rather than asserted on: a server that
+        // answers with an exception is reporting the entrant's statement bad,
+        // which is the arm's refusal to record, not the harness's panic.
+        if body.contains("DB::Exception") {
+            return Err(format!("{what}: {stmt:?}: {body}"));
+        }
+    }
+    Ok(())
+}
+
+/// The arm's own ClickHouse objects, guaranteed torn down when the repetition
+/// ends — on **every** path.
+///
+/// The sweep loop is interleaved (`for rep { for arm }`), so an object that
+/// outlives its repetition is live through every *other* arm's measured window
+/// until this arm's next turn — a declaring arm's materialized view would tax
+/// the shared target during its competitors' measurements, and would still be
+/// installed after the sweep exits. Tearing down only at the *start* of a
+/// repetition (the defensive pass in [`run_arm`]) cannot fix that: it cleans up
+/// for this arm, not for the arms measured in between.
+///
+/// Constructed in [`run_arm`] **before** [`ArmContainers`], so that when the
+/// function unwinds — `Err` or panic — drop order (reverse of declaration)
+/// tears the containers down first and the SQL objects after: nothing is still
+/// inserting through a view while the view is being dropped. The success path
+/// consumes the guard via [`ArmObjects::finish`] after all measurement,
+/// server-side attribution included, so the teardown's own cost can never land
+/// inside anything that was measured. The `Drop` impl is the backstop for the
+/// failure paths only.
+struct ArmObjects {
+    /// A clone rather than a borrow, so the `Drop` backstop owes nothing to
+    /// `run_arm`'s locals when it fires during an unwind.
+    ep: Endpoints,
+    /// The teardown statements, read and split at construction. The failure
+    /// paths must not depend on re-reading a file mid-unwind, and the split is
+    /// then done once, by the same splitter, for every path that runs them.
+    teardown: Vec<String>,
+    /// Armed until [`ArmObjects::finish`] has run; `Drop` is a no-op after.
+    armed: bool,
+}
+
+impl ArmObjects {
+    /// Builds the guard when — and only when — the arm declares teardown SQL.
+    ///
+    /// # Errors
+    ///
+    /// If the declared file cannot be read; the arm is identified by then, so
+    /// the refusal is recorded against it.
+    fn new(ep: &Endpoints, arm: &Arm<'_>) -> Result<Option<Self>, String> {
+        let Some(ch) = arm.entrant.spec.clickhouse.as_ref() else {
+            return Ok(None);
+        };
+        if ch.arm_teardown_sql.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            ep: ep.clone(),
+            teardown: corpus::split_sql(&read_arm_sql(arm, &ch.arm_teardown_sql)?),
+            armed: true,
+        }))
+    }
+
+    /// Runs the teardown on the success path and disarms the backstop.
+    ///
+    /// Explicit and consuming, rather than leaving everything to `Drop`,
+    /// because a teardown failure on the success path is a *finding* — the
+    /// arm's objects are still installed on the shared server — and a `Drop`
+    /// cannot propagate it. Here it becomes the arm's `Err` like any other.
+    ///
+    /// # Errors
+    ///
+    /// If a teardown statement cannot be executed or the server refuses it.
+    fn finish(mut self) -> Result<(), String> {
+        // Disarmed before running, not after: these statements are about to be
+        // attempted once, and a failure is being *reported*, so the backstop
+        // re-attempting the same failing statements on drop would only bury
+        // the propagated error under a second copy of itself.
+        self.armed = false;
+        apply_arm_statements(&self.ep, &self.teardown, "arm teardown DDL")
+    }
+}
+
+impl Drop for ArmObjects {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Best-effort by necessity: a Drop cannot propagate, and this path is
+        // already unwinding out of a failed or panicked repetition. Loud by
+        // choice: a teardown that failed here has left the arm's objects live
+        // on the shared server, where they will tax every subsequent arm's
+        // measurement — an operator must see that even though no record can
+        // carry it.
+        for stmt in &self.teardown {
+            let outcome = crate::docker::try_clickhouse_sql(
+                &self.ep.ch_host,
+                self.ep.ch_port,
+                &self.ep.ch_user,
+                &self.ep.ch_password,
+                stmt,
+            );
+            match outcome {
+                Ok(body) if body.contains("DB::Exception") => eprintln!(
+                    "ARM TEARDOWN FAILED (backstop; cannot propagate from Drop): {stmt:?}: \
+                     {body}\nThe arm's ClickHouse objects may still be live and will tax \
+                     every subsequent arm until removed."
+                ),
+                Err(e) => eprintln!(
+                    "ARM TEARDOWN FAILED (backstop; cannot propagate from Drop): {stmt:?}: \
+                     {e}\nThe arm's ClickHouse objects may still be live and will tax \
+                     every subsequent arm until removed."
+                ),
+                Ok(_) => {}
+            }
+        }
+    }
+}
+
 /// Runs one arm under the requested load and measures it.
 ///
 /// Every `Err` from here names something that happened to an identified arm, so
@@ -1311,8 +1473,35 @@ fn run_arm(
     expected_rows: u64,
     schema_id: u32,
 ) -> Result<Measurement, String> {
+    // The arm's own objects go first, and the lifecycle is: teardown
+    // (defensive) → TRUNCATE → create at the start, teardown again when the
+    // repetition ends — on every path, success, `Err` or panic. Teardown
+    // before the truncate so a materialized view left by a previous *process*
+    // (a killed driver, a crash before its backstop could run) is never live
+    // while the table it targets is truncated; creation after it so the fresh
+    // objects observe an empty target; and the end-of-repetition teardown —
+    // [`ArmObjects`] — so the objects exist only inside their own arm's
+    // repetition. That last leg is what makes the invariant sweep-wide: the
+    // loop is interleaved (`for rep { for arm }`), so without it a declaring
+    // arm's MV and landing table stayed live through every OTHER arm's
+    // measured window and after the sweep — "an MV is never live across its
+    // target's truncate" held only for this arm's own truncates, which is to
+    // say it did not hold. `arm_teardown_sql` is written to be idempotent
+    // (`DROP … IF EXISTS`), so the defensive pass, which usually has nothing
+    // to drop, runs the same statements as every other.
+    //
+    // The guard is constructed before `build_specs`/`ArmContainers`, so on an
+    // unwind drop order tears the containers down first and the SQL objects
+    // after: nothing is still inserting through a view while it is dropped.
+    let arm_objects = ArmObjects::new(ep, arm)?;
+    if let Some(objs) = &arm_objects {
+        apply_arm_statements(ep, &objs.teardown, "arm teardown DDL (defensive)")?;
+    }
+
     // A clean table per repetition. Without this the gate would see the previous
-    // repetition's rows and the row delta would be meaningless.
+    // repetition's rows and the row delta would be meaningless. Harness-owned
+    // SQL, so it stays on the asserting variant: this statement failing means
+    // the bench is broken, not the arm.
     crate::docker::clickhouse_sql(
         &ep.ch_host,
         ep.ch_port,
@@ -1321,6 +1510,17 @@ fn run_arm(
         &format!("TRUNCATE TABLE {}", corpus::TABLE),
     )
     .map_err(|e| format!("truncate failed: {e}"))?;
+
+    // The arm's objects, recreated from the committed file every repetition so
+    // no state — not a stale view definition, not an implicitly kept setting —
+    // survives from one repetition into the next. The workload's own DDL is
+    // deliberately not touched here: it is applied once per run and hashed into
+    // `dataset_version`, and arm objects must never move that.
+    if let Some(ch) = arm.entrant.spec.clickhouse.as_ref()
+        && !ch.arm_sql.trim().is_empty()
+    {
+        apply_arm_sql(ep, &read_arm_sql(arm, &ch.arm_sql)?, "arm DDL")?;
+    }
 
     let specs = build_specs(arm, ep, opts, image)?;
     let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
@@ -1683,7 +1883,7 @@ fn run_arm(
     // gate, whose `uniqExact` scans charge CPU-seconds apiece to the same log —
     // they are excluded by `query_kind = 'Insert'`, but running the read first
     // keeps the figure independent of how strict the gate happens to be.
-    let server = measure_server_side(ep, &costs, &mut note);
+    let server = measure_server_side(ep, arm, &costs, &mut note);
 
     // Correctness gates. An arm that loses rows is faster for the wrong reason,
     // and one that computes different values did different work.
@@ -1732,6 +1932,14 @@ fn run_arm(
         cost.cores_used,
         cost.cpu_us_per_row(rows_f)
     );
+
+    // The repetition is over: every measurement, the server-side attribution
+    // and the gates included, has read what it needed. The arm's objects come
+    // down NOW, explicitly, so a failure is this arm's `Err` — the `Drop`
+    // backstop only covers the paths that cannot report one.
+    if let Some(objs) = arm_objects {
+        objs.finish()?;
+    }
 
     Ok(Measurement {
         cost,
@@ -2108,19 +2316,34 @@ const TARGET_DATABASE: &str = "default";
 /// as "this arm cost the server nothing".
 fn measure_server_side(
     ep: &Endpoints,
+    arm: &Arm<'_>,
     costs: &[(String, sampler::Samples)],
     note: &mut String,
 ) -> Option<serverside::ServerSideCost> {
     let series: Vec<&sampler::Samples> = costs.iter().map(|(_, s)| s).collect();
-    let table = serverside::qualify(TARGET_DATABASE, corpus::TABLE);
+    // The workload's target first, then whatever the entrant declared — the
+    // MV-flatten arm's landing table rides here, so the parent insert that
+    // carries the view's cost is attributed even if a ClickHouse version stops
+    // naming the view's target in `tables`. Qualified in this one place, so the
+    // descriptor's bare names and the log's spelling cannot drift apart.
+    let mut tables = vec![serverside::qualify(TARGET_DATABASE, corpus::TABLE)];
+    let ch = arm.entrant.spec.clickhouse.as_ref();
+    if let Some(ch) = ch {
+        for t in &ch.attribution_tables {
+            tables.push(serverside::qualify(TARGET_DATABASE, t));
+        }
+    }
+    let table_refs: Vec<&str> = tables.iter().map(String::as_str).collect();
+    let forwarded = ch.is_some_and(|c| c.forwarded_inserts);
     let measured = serverside::Window::spanning(&series).and_then(|w| {
         serverside::measure(
             &ep.ch_host,
             ep.ch_port,
             &ep.ch_user,
             &ep.ch_password,
-            &[table.as_str()],
+            &table_refs,
             w,
+            forwarded,
         )
     });
     match measured {
@@ -2216,27 +2439,6 @@ fn server_metrics(cost: &serverside::ServerSideCost, rows: f64) -> Vec<(String, 
 /// The `[entrant].runtime` value that has a collector to measure.
 const JVM_RUNTIME: &str = "jvm";
 
-/// Where an arm's JVM writes its GC log, by the role of the container.
-///
-/// Harness knowledge about one entrant, and that is what makes it temporary: the
-/// paths belong to `entrants/flink/config.yaml`, which sets
-/// `env.java.opts.taskmanager` and `env.java.opts.jobmanager`, and the right home
-/// for them is a `gc_log` field on `[[envelope.container]]` so that a second JVM
-/// entrant is a descriptor change rather than another arm of this match. This
-/// change does not own the descriptor, so the mapping lives here and says so.
-///
-/// The one other JVM entrant, `kafka-connect`, is `planned` and writes its GC
-/// log somewhere else. When it is built, these paths will simply not exist in
-/// its containers and [`read_gc`] will print `JvmError::LogUnavailable` and
-/// attach no metrics — an absence rather than another JVM's numbers, which is
-/// the direction this has to fail in until the descriptor carries the path.
-fn gc_log_path(role: Role) -> &'static str {
-    match role {
-        Role::DataPlane => jvm::FLINK_TASKMANAGER_GC_LOG,
-        Role::ControlPlane => jvm::FLINK_JOBMANAGER_GC_LOG,
-    }
-}
-
 /// Reads every JVM container's GC log, immediately before the containers go.
 ///
 /// Nothing at all for a non-JVM arm, which is not an oversight: a Rust binary
@@ -2261,6 +2463,16 @@ fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)]) -> Gc {
         let Some((name, Some(cost))) = parts.iter().find(|(n, _)| n.ends_with(&c.name)) else {
             continue;
         };
+        // The path is the descriptor's, because only the entrant's own
+        // configuration knows where its JVM writes — Flink's `env.java.opts.*`
+        // and Connect's `KAFKA_OPTS` put it in different places, and a harness
+        // that guessed would either read nothing or read another JVM's file. A
+        // JVM container that declares no `gc_log` gets no `gc_*` metrics: an
+        // absence, stated on the terminal, never a zero.
+        let Some(gc_log) = c.gc_log.as_deref() else {
+            eprintln!("  no GC figures for {name}: its [[envelope.container]] declares no gc_log");
+            continue;
+        };
         // Bounded by that container's OWN window, so the GC figures cover the
         // interval every other number on its record is divided by. A GC log
         // covers the JVM's whole life and the copy is taken after the pipeline
@@ -2268,7 +2480,7 @@ fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)]) -> Gc {
         // charges the arm for its own start-up exactly as the sampler's window
         // does. The mapping is approximate and `GcSummary::from_uptime_s` says
         // what was actually covered.
-        match jvm::measure(name, gc_log_path(c.role), Some((0.0, cost.window_s))) {
+        match jvm::measure(name, gc_log, Some((0.0, cost.window_s))) {
             Ok(summary) => match c.role {
                 Role::DataPlane => gc.data_plane = Some(summary),
                 Role::ControlPlane => gc.control_plane = Some(summary),
@@ -3235,6 +3447,7 @@ mod tests {
             cpus: "4".to_owned(),
             memory: "16g".to_owned(),
             args: vec![],
+            gc_log: None,
         };
         let good = "# cgroup=/x cpu.max=400000/100000 memory.max=17179869184 x=1";
         assert!(assert_arm_caps("sut", &declared, good).is_ok());
@@ -3836,6 +4049,7 @@ mod tests {
             cpus: "4".to_owned(),
             memory: "1048576k".to_owned(),
             args: vec![],
+            gc_log: None,
         };
         let meta = "# cgroup=/x cpu.max=400000/100000 memory.max=1073741824 x=1";
         assert!(assert_arm_caps("sut", &declared, meta).is_ok());
@@ -4027,24 +4241,6 @@ mod tests {
             "{keys:?}"
         );
         assert!(!keys.iter().any(|k| k.contains("live_peak")), "{keys:?}");
-    }
-
-    /// The path-by-role mapping. Harness knowledge about one entrant, pinned
-    /// here so that moving it onto `[[envelope.container]]` — where it belongs —
-    /// is a change somebody makes deliberately rather than one that silently
-    /// starts reading a JobManager's log for a TaskManager's pauses.
-    #[test]
-    fn each_container_role_reads_its_own_gc_log() {
-        assert_eq!(gc_log_path(Role::DataPlane), jvm::FLINK_TASKMANAGER_GC_LOG);
-        assert_eq!(
-            gc_log_path(Role::ControlPlane),
-            jvm::FLINK_JOBMANAGER_GC_LOG
-        );
-        assert_ne!(
-            gc_log_path(Role::DataPlane),
-            gc_log_path(Role::ControlPlane),
-            "the two JVMs write separate logs, or one arm's pauses are the other's"
-        );
     }
 
     /// An arm's footprint is what it held at one instant, not the sum of the

@@ -72,6 +72,13 @@ pub struct Spec {
     /// before it starts a container.
     #[serde(default, rename = "constraints")]
     pub constraints: Vec<Constraint>,
+    /// Rule 4: every deviation from the common shape, declared where the site
+    /// can render it.
+    #[serde(default, rename = "deviations")]
+    pub deviations: Vec<Deviation>,
+    /// Arm-specific ClickHouse objects and attribution facts.
+    #[serde(default)]
+    pub clickhouse: Option<ClickhouseSpec>,
     /// Why an entrant is not yet built.
     #[serde(default)]
     pub planned: Option<Planned>,
@@ -228,6 +235,15 @@ pub struct Container {
     /// Command arguments, for images that dispatch on argv.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Where this container's JVM writes its GC log, for `docker cp`.
+    ///
+    /// Descriptor knowledge, not harness knowledge: the path is set by the
+    /// entrant's own configuration (Flink's `env.java.opts.*`, Connect's
+    /// `KAFKA_OPTS`), so only the descriptor can state it truthfully. A JVM
+    /// container that declares none gets no `gc_*` metrics — an absence, never
+    /// another JVM's numbers and never a zero.
+    #[serde(default)]
+    pub gc_log: Option<String>,
 }
 
 /// Whether a container does the work or coordinates it.
@@ -419,6 +435,96 @@ pub fn knob_violations(
     out
 }
 
+/// One declared deviation from the common shape (rule 4).
+///
+/// `methodology/` and `CONTRIBUTING.md` have required this table since before
+/// it was parseable, and the site has typed and rendered it for as long
+/// (`website/src/components/Results/data.ts`) — the field names here are that
+/// type's, deliberately, so the descriptor and the page cannot disagree about
+/// what a deviation is made of. Until this struct existed, `deny_unknown_fields`
+/// turned any attempt to comply with rule 4 into a parse error, which is the
+/// exact inversion of what a disclosure rule is for.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Deviation {
+    /// What differs, stated as a fact about this arm.
+    pub what: String,
+    /// Why the difference exists — the part a reader weighs.
+    #[serde(default)]
+    pub why: String,
+    /// Which published quantities the difference touches, e.g. `envelope`,
+    /// `server-side-cpu`, `latency`. Free-form: the site prints them verbatim.
+    #[serde(default)]
+    pub affects: Vec<String>,
+}
+
+/// Arm-specific ClickHouse objects and how the arm's inserts reach the log.
+///
+/// Exists for the arms whose pipeline puts SQL objects on the shared server or
+/// changes how their inserts appear in `system.query_log`. The Kafka Connect
+/// arm lands nested batches in a landing table and flattens with a materialized
+/// view; the ClickHouse Kafka engine arm's inserts arrive as
+/// Distributed-forwarded queries. Neither fact belongs in the driver — the code
+/// that measures every system must not know any one system's shape — so the
+/// entrant states it and the driver applies it without knowing what it means,
+/// exactly as [`Constraint`] does for knobs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClickhouseSpec {
+    /// SQL applied to the shared server after the workload DDL, relative to the
+    /// entrant directory. Re-applied at the start of every repetition, after
+    /// [`Self::arm_teardown_sql`] has cleared any leftovers, so no state
+    /// survives from one repetition into the next — and the objects it creates
+    /// are removed again when the repetition ends, so they exist only inside
+    /// their own arm's repetition. See [`Self::arm_teardown_sql`] for the full
+    /// lifecycle.
+    ///
+    /// The workload's own `ddl.sql` is deliberately untouched by this
+    /// mechanism: `build.rs` hashes it into `dataset_version`, so arm objects
+    /// living there would re-key every published record over a change that
+    /// alters no other arm's bytes.
+    #[serde(default)]
+    pub arm_sql: String,
+    /// SQL that removes everything `arm_sql` creates, relative to the entrant
+    /// directory. Explicit rather than derived by parsing `arm_sql`, because a
+    /// DROP generated from a parse of somebody's CREATE is a guess with
+    /// privileges.
+    ///
+    /// The driver runs it at **both ends** of every repetition: once at the
+    /// start — a defensive pass against a previous *process's* leftovers,
+    /// before the `TRUNCATE` and the `arm_sql` re-create — and once when the
+    /// repetition ends, on every path including failure and panic. The
+    /// end-of-repetition leg is the load-bearing one: the sweep interleaves
+    /// arms (`for rep { for arm }`), so an object torn down only at its own
+    /// arm's next start would be live through every other arm's measured
+    /// window in between, taxing the shared target during measurements it has
+    /// nothing to do with. With both legs, a materialized view is never live
+    /// while the table it targets is truncated — by any arm, sweep-wide, not
+    /// merely by its own. Write it idempotent (`DROP … IF EXISTS`): the
+    /// defensive pass usually has nothing to drop and runs the same statements
+    /// regardless.
+    #[serde(default)]
+    pub arm_teardown_sql: String,
+    /// Extra **unqualified** table names whose inserts are attributed to this
+    /// arm in `system.query_log`, beside the workload's target table. The
+    /// landing table of an MV-flatten arm goes here: its parent insert is the
+    /// row that carries the view's cost.
+    #[serde(default)]
+    pub attribution_tables: Vec<String>,
+    /// Whether the arm's inserts arrive at the shared server as forwarded
+    /// distributed queries rather than as initial ones.
+    ///
+    /// The attribution query normally requires `is_initial_query` so that a
+    /// distributed sub-query is never counted beside the query that spawned it.
+    /// An arm that pushes through a `Distributed` table inverts the situation:
+    /// **every** insert it lands is `is_initial_query = 0`, and the unmodified
+    /// predicate would match nothing — which reads as an arm that never
+    /// inserted. Declaring the fact keeps the strict predicate for every arm
+    /// that does not need the exception.
+    #[serde(default)]
+    pub forwarded_inserts: bool,
+}
+
 /// Why an entrant is declared but not yet built.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -600,8 +706,135 @@ fn validate(e: &Entrant) -> Vec<String> {
     validate_envelope(e, &mut errs, &at);
     validate_variants(e, &mut errs, &at);
     validate_constraints(e, &mut errs, &at);
+    validate_deviations(e, &mut errs, &at);
+    validate_clickhouse(e, &mut errs, &at);
 
     errs
+}
+
+/// Checks that every declared deviation actually discloses something, and that
+/// the shapes which *require* a disclosure carry one.
+///
+/// A deviation with an empty `what` satisfies rule 4's letter while telling a
+/// reader nothing, which is the same shape as an empty `unshipped` entry and is
+/// refused for the same reason.
+///
+/// The control-plane check enforces `CONTRIBUTING.md`'s normative rule: "A
+/// `control-plane` container is allowed and is budgeted on top, but it requires
+/// a `[[deviations]]` entry with `\"envelope\"` in `affects`." The container
+/// declaration and the deviation are two halves of one disclosure — the first
+/// allocates resources on top of the budget every other arm gets, the second is
+/// where a reader learns that happened — and until this check existed the first
+/// half validated alone, so the site could publish an arm consuming beyond the
+/// envelope with nothing on the page saying so.
+fn validate_deviations(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) -> String) {
+    for (i, d) in e.spec.deviations.iter().enumerate() {
+        if d.what.trim().is_empty() {
+            errs.push(at(format!(
+                "[[deviations]] entry {i} has an empty `what`; a deviation that does \
+                 not say what differs discloses nothing"
+            )));
+        }
+    }
+
+    let has_control_plane = e
+        .spec
+        .envelope
+        .as_ref()
+        .is_some_and(|env| env.containers.iter().any(|c| c.role == Role::ControlPlane));
+    let discloses_envelope = e
+        .spec
+        .deviations
+        .iter()
+        .any(|d| d.affects.iter().any(|a| a == "envelope"));
+    if has_control_plane && !discloses_envelope {
+        errs.push(at(
+            "declares a control-plane container but no [[deviations]] entry with \
+             \"envelope\" in `affects`. CONTRIBUTING.md: \"A `control-plane` \
+             container is allowed and is budgeted on top, but it requires a \
+             `[[deviations]]` entry with `\"envelope\"` in `affects`.\" The \
+             container is resources allocated on top of the envelope every other \
+             arm runs inside, and the deviation is where a reader is told so."
+                .to_owned(),
+        ));
+    }
+}
+
+/// Checks the arm's ClickHouse declaration for the shapes that fail at run time.
+///
+/// The pair rule is the load-bearing one. `arm_sql` without `arm_teardown_sql`
+/// leaves the previous repetition's materialized view live while the driver
+/// truncates its target, and the first symptom is a correctness gate failing on
+/// rows that survived a TRUNCATE — a defect diagnosed hours from its cause.
+fn validate_clickhouse(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) -> String) {
+    let Some(ch) = &e.spec.clickhouse else {
+        return;
+    };
+    match (ch.arm_sql.trim(), ch.arm_teardown_sql.trim()) {
+        ("", "") => {}
+        (sql, "") | ("", sql) => errs.push(at(format!(
+            "[clickhouse] declares {:?} without its pair. arm_sql and arm_teardown_sql \
+             travel together: creation without teardown leaks objects across \
+             repetitions, and teardown without creation drops objects nothing made.",
+            sql
+        ))),
+        (sql, teardown) => {
+            for rel in [sql, teardown] {
+                // "Relative to the entrant directory" is a containment claim,
+                // and `dir.join(rel)` does not enforce it: join *replaces* the
+                // directory outright when `rel` is absolute, and `..` walks
+                // above it. Either shape would make the descriptor run SQL
+                // from outside the files this repository reviews, so both are
+                // refused where they are written.
+                let path = Path::new(rel);
+                let escapes = path.is_absolute()
+                    || path
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir));
+                if escapes {
+                    errs.push(at(format!(
+                        "[clickhouse] path {rel:?} escapes the entrant directory. \
+                         arm_sql and arm_teardown_sql are relative to the entrant \
+                         directory: an absolute path replaces it outright and a \
+                         `..` component walks above it, so either would run SQL \
+                         that lives outside the entrant's own reviewed files."
+                    )));
+                } else if !e.dir.join(rel).is_file() {
+                    errs.push(at(format!("[clickhouse] file {rel:?} not found")));
+                }
+            }
+        }
+    }
+    for t in &ch.attribution_tables {
+        if t.trim().is_empty() {
+            errs.push(at(
+                "[clickhouse].attribution_tables lists an empty name".to_owned()
+            ));
+        } else if t.trim() != t.as_str() {
+            // The driver qualifies the declared string verbatim into the
+            // attribution query, so " sensor_batches_landing" becomes
+            // "default. sensor_batches_landing" — a name `system.query_log`
+            // never writes. The predicate is `hasAny`, so it would not fail:
+            // it would silently match nothing, and the arm's inserts on that
+            // table would vanish from the server-side figure.
+            errs.push(at(format!(
+                "[clickhouse].attribution_tables entry {t:?} has surrounding \
+                 whitespace. The name is qualified verbatim into the attribution \
+                 query, so the padded form matches nothing in system.query_log \
+                 and the table's inserts silently go unattributed."
+            )));
+        }
+        // Unqualified here, qualified at the query site, so the database is
+        // spelled in exactly one place (`driver::TARGET_DATABASE`) and cannot
+        // disagree with how `system.query_log` writes it.
+        if t.contains('.') {
+            errs.push(at(format!(
+                "[clickhouse].attribution_tables entry {t:?} is qualified; declare the \
+                 bare table name and let the driver qualify it the way \
+                 system.query_log does"
+            )));
+        }
+    }
 }
 
 /// Checks the declared constraints, and checks every committed variant against
@@ -743,6 +976,21 @@ fn validate_envelope(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) ->
     }
 }
 
+/// Reduces a wire-format spelling to lowercase letters and digits, so that
+/// `"JSONEachRow"`, `"json-each-row"` and `"json_each_row"` all fold to
+/// `"jsoneachrow"`.
+///
+/// Used only to *detect* a near-miss of a canonical spelling and refuse it with
+/// the canonical form named — never to accept one. `ceiling::Format::parse`
+/// stays the single definition of what a descriptor may say; a matcher that
+/// forgave a spelling would be a second one.
+fn fold_wire_format(s: &str) -> String {
+    s.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 fn validate_variants(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) -> String) {
     if e.spec.variants.is_empty() {
         errs.push(at("active entrant declares no variants".to_owned()));
@@ -766,11 +1014,43 @@ fn validate_variants(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) ->
         }
         // Rule 5: the insert format is not the same server-side work across
         // systems, so a results table that omits it is indefensible.
-        if !v.reports.contains_key("wire_format") {
-            errs.push(at(format!(
+        match v.reports.get("wire_format") {
+            None => errs.push(at(format!(
                 "variant {:?} does not report a wire_format",
                 v.id
-            )));
+            ))),
+            Some(declared) => {
+                // A near-miss spelling of a format the rig CAN measure is
+                // refused here, because `ceiling::Format::parse` deliberately
+                // matches the canonical spelling exactly and nothing else —
+                // the descriptor grammar is defined in one place, not in a
+                // forgiving matcher. The failure a near-miss produces at run
+                // time is the quiet kind: the arm is not gated against the
+                // measured ceiling for its format and every record it emits
+                // carries HeadroomUnproven, hours after the typo was written.
+                // The normative docs' own prose spelling ("JSONEachRow") is
+                // exactly this trap.
+                //
+                // A declared format with no near-miss stays allowed: an arm
+                // may report a format the rig has no ceiling for — that is
+                // rule 5 doing its job, and HeadroomUnproven is the honest
+                // record of it.
+                let folded = fold_wire_format(declared);
+                for f in crate::ceiling::FORMATS {
+                    let canonical = f.wire_format();
+                    if declared != canonical && folded == fold_wire_format(canonical) {
+                        errs.push(at(format!(
+                            "variant {:?} reports wire_format {declared:?} — did you \
+                             mean {canonical:?}? The ceiling gate matches the \
+                             canonical spelling exactly, so this near-miss would not \
+                             fail anything: every record the arm emits would silently \
+                             carry HeadroomUnproven, ungated against the ceiling that \
+                             was measured for its own format.",
+                            v.id
+                        )));
+                    }
+                }
+            }
         }
         // Rule 1's valve. A variant that selects code the project does not ship
         // and is labelled `realistic` is the direction the rule exists to stop,
@@ -931,6 +1211,8 @@ mod tests {
                 env: BTreeMap::new(),
                 variants,
                 constraints: Vec::new(),
+                deviations: Vec::new(),
+                clickhouse: None,
                 planned: None,
             },
         }
@@ -1125,6 +1407,234 @@ mod tests {
             errs.iter().any(|x| x.contains("does not say what breaks")),
             "{errs:?}"
         );
+    }
+
+    #[test]
+    fn a_deviation_that_does_not_say_what_differs_is_refused() {
+        // Rule 4 is a disclosure rule; an entry with an empty `what` complies
+        // with its letter while telling a reader nothing.
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.deviations = vec![Deviation {
+            what: "  ".to_owned(),
+            why: "reasons".to_owned(),
+            affects: vec!["envelope".to_owned()],
+        }];
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_deviations(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("empty `what`"), "{}", errs[0]);
+
+        e.spec.deviations[0].what = "the transform runs server-side".to_owned();
+        let mut errs = Vec::new();
+        validate_deviations(&e, &mut errs, &at);
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    /// CONTRIBUTING.md's normative rule: a control-plane container is budgeted
+    /// on top of the envelope, so it requires a `[[deviations]]` entry with
+    /// "envelope" in `affects`. The container and the deviation are two halves
+    /// of one disclosure; a descriptor carrying only the first half is an arm
+    /// consuming beyond the shared budget with nothing on the page saying so.
+    #[test]
+    fn a_control_plane_container_requires_an_envelope_deviation() {
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.envelope = Some(Envelope {
+            cpus: "6".to_owned(),
+            memory: "24g".to_owned(),
+            containers: vec![
+                Container {
+                    role: Role::DataPlane,
+                    name: "sut".to_owned(),
+                    cpus: "6".to_owned(),
+                    memory: "24g".to_owned(),
+                    args: Vec::new(),
+                    gc_log: None,
+                },
+                Container {
+                    role: Role::ControlPlane,
+                    name: "jm".to_owned(),
+                    cpus: "1".to_owned(),
+                    memory: "2g".to_owned(),
+                    args: Vec::new(),
+                    gc_log: None,
+                },
+            ],
+        });
+        let at = |m: String| format!("probe: {m}");
+
+        let mut errs = Vec::new();
+        validate_deviations(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("control-plane"), "{}", errs[0]);
+        assert!(errs[0].contains("\"envelope\""), "{}", errs[0]);
+
+        // With the promised disclosure in place, the same shape passes.
+        e.spec.deviations = vec![Deviation {
+            what: "runs a JobManager control-plane container on top of the envelope".to_owned(),
+            why: "cannot run a standalone job without one".to_owned(),
+            affects: vec!["envelope".to_owned()],
+        }];
+        let mut errs = Vec::new();
+        validate_deviations(&e, &mut errs, &at);
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    /// A near-miss of a measurable format's canonical spelling is refused with
+    /// the canonical form named. `ceiling::Format::parse` matches exactly, so
+    /// at run time the near-miss would fail nothing — it would silently publish
+    /// every record as HeadroomUnproven. The normative docs' own prose spelling
+    /// "JSONEachRow" is the canonical example of the trap.
+    #[test]
+    fn a_near_miss_wire_format_is_refused_with_the_canonical_spelling() {
+        let mut v = variant("only", Approach::Realistic, &[]);
+        v.reports = BTreeMap::from([("wire_format".to_owned(), "JSONEachRow".to_owned())]);
+        let errs = errors_from(vec![v]);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("did you mean \"json_each_row\"")),
+            "{errs:?}"
+        );
+    }
+
+    /// The exact canonical spelling raises nothing; a genuinely foreign format
+    /// with no near-miss stays allowed too — an arm may report a format the rig
+    /// has no ceiling for (rule 5), and HeadroomUnproven is the honest record
+    /// of that, not a validation failure.
+    #[test]
+    fn canonical_and_genuinely_foreign_wire_formats_pass() {
+        let mut canonical = variant("only", Approach::Realistic, &[]);
+        canonical.reports =
+            BTreeMap::from([("wire_format".to_owned(), "json_each_row".to_owned())]);
+        let errs = errors_from(vec![canonical]);
+        assert!(!errs.iter().any(|e| e.contains("did you mean")), "{errs:?}");
+
+        let mut foreign = variant("only", Approach::Realistic, &[]);
+        foreign.reports = BTreeMap::from([("wire_format".to_owned(), "go_sql".to_owned())]);
+        let errs = errors_from(vec![foreign]);
+        assert!(!errs.iter().any(|e| e.contains("did you mean")), "{errs:?}");
+    }
+
+    #[test]
+    fn arm_sql_and_its_teardown_travel_together() {
+        // Creation without teardown leaks a live materialized view into the
+        // next repetition's TRUNCATE; teardown without creation drops objects
+        // nothing made. Both are refused where they are written.
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.clickhouse = Some(ClickhouseSpec {
+            arm_sql: "clickhouse/arm.sql".to_owned(),
+            arm_teardown_sql: String::new(),
+            attribution_tables: Vec::new(),
+            forwarded_inserts: false,
+        });
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_clickhouse(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("without its pair"), "{}", errs[0]);
+    }
+
+    /// The mirror of the test above: teardown without creation is the same
+    /// pairing violation and must hit the same refusal, or the or-pattern in
+    /// `validate_clickhouse` could regress on one side without a test noticing.
+    #[test]
+    fn teardown_without_arm_sql_is_refused_like_its_mirror() {
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.clickhouse = Some(ClickhouseSpec {
+            arm_sql: String::new(),
+            arm_teardown_sql: "clickhouse/teardown.sql".to_owned(),
+            attribution_tables: Vec::new(),
+            forwarded_inserts: false,
+        });
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_clickhouse(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("without its pair"), "{}", errs[0]);
+    }
+
+    /// An absolute path is not "relative to the entrant directory":
+    /// `dir.join(rel)` replaces the directory outright, so the descriptor
+    /// would run SQL from anywhere on the host.
+    #[test]
+    fn an_absolute_arm_sql_path_is_refused() {
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.clickhouse = Some(ClickhouseSpec {
+            arm_sql: "/etc/arm.sql".to_owned(),
+            arm_teardown_sql: "/etc/teardown.sql".to_owned(),
+            attribution_tables: Vec::new(),
+            forwarded_inserts: false,
+        });
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_clickhouse(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        assert!(
+            errs.iter()
+                .all(|x| x.contains("escapes the entrant directory")),
+            "{errs:?}"
+        );
+    }
+
+    /// `..` walks above the entrant directory, which is the same escape by a
+    /// different spelling — and unlike the absolute form it survives a casual
+    /// review because it still looks relative.
+    #[test]
+    fn a_parent_traversal_arm_sql_path_is_refused() {
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.clickhouse = Some(ClickhouseSpec {
+            arm_sql: "../other/arm.sql".to_owned(),
+            arm_teardown_sql: "../other/teardown.sql".to_owned(),
+            attribution_tables: Vec::new(),
+            forwarded_inserts: false,
+        });
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_clickhouse(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        assert!(
+            errs.iter()
+                .all(|x| x.contains("escapes the entrant directory")),
+            "{errs:?}"
+        );
+    }
+
+    /// A padded name is qualified verbatim into the attribution query, where
+    /// `hasAny` silently matches nothing — the arm's inserts on that table
+    /// vanish from the server-side figure rather than failing anything.
+    #[test]
+    fn an_attribution_table_with_surrounding_whitespace_is_refused() {
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.clickhouse = Some(ClickhouseSpec {
+            arm_sql: String::new(),
+            arm_teardown_sql: String::new(),
+            attribution_tables: vec![" sensor_batches_landing".to_owned()],
+            forwarded_inserts: false,
+        });
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_clickhouse(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("surrounding"), "{}", errs[0]);
+        assert!(errs[0].contains("verbatim"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn an_attribution_table_is_declared_unqualified() {
+        // The database is spelled in exactly one place, at the query site, so
+        // the declaration and system.query_log's spelling cannot drift apart.
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.clickhouse = Some(ClickhouseSpec {
+            arm_sql: String::new(),
+            arm_teardown_sql: String::new(),
+            attribution_tables: vec!["default.sensor_batches_landing".to_owned()],
+            forwarded_inserts: true,
+        });
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_clickhouse(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("is qualified"), "{}", errs[0]);
     }
 
     #[test]

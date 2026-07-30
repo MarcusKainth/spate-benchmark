@@ -50,13 +50,61 @@ strict on purpose — unknown keys are an error, not something ignored:
 - `[envelope]` and `[[envelope.container]]` — exactly one `data-plane`
   container, and the data-plane containers must sum to the declared
   `[envelope]` totals. A `control-plane` container is allowed and is budgeted on
-  top, but it requires a `[[deviations]]` entry with `"envelope"` in `affects`.
+  top, but it requires a `[[deviations]]` entry with `"envelope"` in `affects`,
+  and `bench validate` refuses the descriptor without one — the disclosure is
+  enforced, not requested. A JVM container also declares `gc_log`, the
+  in-container path its own configuration sends `-Xlog:gc*` to, so the harness
+  can `docker cp` the log out. That path is descriptor knowledge, not harness
+  knowledge — only the entrant's configuration can state it truthfully, and a
+  drift test holds the declaration to those configuration files; the descriptor
+  alone does not count as corroboration. A JVM container that declares none
+  records no `gc_*` metrics at all — an absence, never a zero — so omitting the
+  key silently forfeits the GC row.
+- `[[deviations]]` — rule 4, as data. Each entry is a `what` (required and
+  non-empty: the fact that differs), a `why` (the part a reader weighs), and an
+  `affects` list naming the published quantities the difference touches;
+  `"envelope"` in `affects` is the exact value the control-plane requirement
+  above keys on. It is a table rather than README prose so the site can render
+  it from the same source the driver reads.
+- `[clickhouse]` — only for arms whose pipeline puts SQL objects on the shared
+  server or changes how their inserts appear in `system.query_log`; most arms
+  omit it.
+  - `arm_sql` / `arm_teardown_sql` — paths relative to the entrant directory
+    (absolute and `..` paths are refused) to SQL applied around each
+    repetition: teardown, then the workload target's TRUNCATE, then create at
+    repetition start, and teardown again when the repetition ends on every
+    path — so an arm's objects exist only inside its own repetitions and are
+    never live through another arm's measured window. Write the teardown
+    idempotently (`DROP … IF EXISTS`): the first repetition runs it against a
+    server holding nothing. Statements are split with the same
+    comment-stripping, string-literal-aware splitter as the workload DDL, and a
+    failing statement records that arm's repetition as failed rather than
+    killing the sweep. The workload target's own DDL is off-limits here — it is
+    hashed into `dataset_version`, so arm objects in it would re-key every
+    published record.
+  - `attribution_tables` — extra table names whose inserts count as the arm's
+    server-side work: the landing table of an MV-flatten arm (rule 4's Kafka
+    Connect example) goes here, because its parent insert is the row that
+    carries the view's cost. Names are unqualified, with no whitespace padding
+    — they are qualified verbatim into the query-log attribution.
+  - `forwarded_inserts = true` — for an arm whose inserts reach the shared
+    server as forwarded rather than initial queries. The attribution predicate
+    is inverted (`NOT is_initial_query`), not dropped, so initial and forwarded
+    rows can never both be counted; without the flag, a Distributed-forwarding
+    arm's strict predicate matches nothing and reads as an arm that never
+    inserted.
 - `[guarantees]` — at-least-once, matched to a comparable durability interval.
   Turning fault tolerance off to go faster is not permitted.
 - `[[variants]]` — one per published arm. Each needs an `approach`
-  (`realistic` / `tuned` / `stripped`) and `reports.wire_format`,
-  because Native, RowBinary and JSONEachRow are not the same server-side work.
-  Exactly one variant is `default` and it must be `realistic`.
+  (`realistic` / `tuned` / `stripped`) and `reports.wire_format`, because the
+  wire formats are not the same server-side work. The formats the rig can prove
+  ceilings for have canonical, exact spellings — `native`, `rowbinary`,
+  `rowbinary_nt`, `json_each_row`, `arrow_stream` — and a near miss such as
+  `"JSONEachRow"` is refused at validation with the canonical suggestion, so
+  two arms on the same format cannot fail to group over a spelling. A format
+  outside that set is allowed — rule 5 still applies — but it publishes with
+  its headroom unproven, and flagged as such. Exactly one variant is `default`
+  and it must be `realistic`.
 
 Run `bench validate` before opening the PR. It is what CI runs, it reports every
 problem rather than the first, and it also checks that every environment profile

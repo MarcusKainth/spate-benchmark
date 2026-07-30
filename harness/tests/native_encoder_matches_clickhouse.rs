@@ -33,6 +33,14 @@
 //! rig — the container, the DDL, the gate window — rather than in the encoder
 //! under test. Without it, a rig bug would read as a Native defect.
 //!
+//! JSONEachRow and ArrowStream run through the same path for the same reason
+//! Native does: each carries encoding decisions a unit test cannot prove the
+//! server shares — that a numeric-epoch `DateTime64` is read digit-by-digit and
+//! timezone-free, that a full-width `UInt64` survives the JSON number path,
+//! that `Utf8` casts onto `LowCardinality` and an Arrow `Timestamp` with
+//! `"UTC"` metadata lands tick-for-tick. Their ceilings are not committed until
+//! this file has passed for them; the encoders in `ceiling.rs` say so.
+//!
 //! # Running it
 //!
 //! These tests need a Docker daemon and pull `clickhouse/clickhouse-server:26.3`,
@@ -244,4 +252,31 @@ fn a_native_block_satisfies_every_closed_form_expectation() {
 fn the_rowbinary_control_satisfies_the_same_expectations_through_the_same_rig() {
     let server = Server::start("spate-bench-native-encoder-control", 18133);
     block_satisfies_every_closed_form_expectation(&server, Format::RowBinary);
+}
+
+/// The JSONEachRow encoder's decisions, live: numeric-epoch `DateTime64` values
+/// that must land tick-for-tick regardless of the server's timezone (the
+/// `batch_ts` sum is the check), full-width integers through the JSON number
+/// path, `null` into `Nullable(Float64)`, and JSON arrays into
+/// `Array(LowCardinality(String))`. A ceiling measured through this encoder is
+/// not committed until this has passed — see the format-addition rule on
+/// `ceiling::Format`.
+#[test]
+#[ignore = "needs a Docker daemon; run with `cargo test --test native_encoder_matches_clickhouse -- --ignored`"]
+fn a_json_each_row_block_satisfies_every_closed_form_expectation() {
+    let server = Server::start("spate-bench-json-each-row-encoder", 18135);
+    block_satisfies_every_closed_form_expectation(&server, Format::JsonEachRow);
+}
+
+/// The ArrowStream encoder's schema mapping, live: `Utf8` cast onto four
+/// `LowCardinality(String)` columns, `List<Utf8>` onto the array of
+/// dictionaries, Arrow validity onto `Nullable(Float64)`, and both
+/// `Timestamp` units — with their explicit `"UTC"` — onto the `DateTime64`
+/// scales, at the same index-width-crossing block size as Native. Same
+/// commitment rule as JSONEachRow above.
+#[test]
+#[ignore = "needs a Docker daemon; run with `cargo test --test native_encoder_matches_clickhouse -- --ignored`"]
+fn an_arrow_stream_block_satisfies_every_closed_form_expectation() {
+    let server = Server::start("spate-bench-arrow-stream-encoder", 18137);
+    block_satisfies_every_closed_form_expectation(&server, Format::ArrowStream);
 }

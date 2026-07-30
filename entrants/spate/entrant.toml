@@ -64,6 +64,15 @@ durability  = "offset-commit"
 # the same guarantee at the same cadence. Fixed by METHODOLOGY, not a knob.
 interval_ms = 5000
 
+# The disclosure workload/clickhouse/ddl.sql promises on this entrant. The
+# asymmetry is applied by the framework under test rather than by anything in
+# this directory, so a reviewer grepping these sources would never find it —
+# this entry is where a reader is told anyway.
+[[deviations]]
+what    = "The framework's writer sets insert_deduplication_token on every sealed batch, so ClickHouse skips content-hash deduplication for this arm's inserts; every other arm's inserts are deduplicated by block content hash."
+why     = "The token is part of the framework's shipped at-least-once delivery path (rule 1: the system's own API, as any user would run it), but it changes what the arm asks of the shared target and favours the vendor's arm, so it is declared rather than left in a SQL comment. See workload/clickhouse/ddl.sql."
+affects = ["server-side"]
+
 [env]
 BOOTSTRAP      = "{{broker_internal}}"
 REGISTRY_URL   = "{{registry_internal}}"

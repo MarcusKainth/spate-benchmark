@@ -142,6 +142,101 @@ fn flink_jvm_sizing_fits_its_declared_container() {
 }
 
 #[test]
+fn a_jvm_containers_declared_gc_log_is_where_its_configuration_sends_it() {
+    // The descriptor's `gc_log` is what the harness copies out after a run; the
+    // arm's own configuration is what decides where the JVM writes. Neither
+    // file is obviously the source of truth, which is the shape that drifts
+    // silently — and a drift here does not fail anything, it just records no GC
+    // figures (or another JVM's) for an arm that produced them.
+    let entrants = entrant::load_all(&entrants_dir()).expect("descriptors valid");
+    let mut seen_a_declaration = false;
+    for e in entrants.iter().filter(|e| {
+        e.spec.entrant.runtime == "jvm" && e.spec.entrant.status == entrant::Status::Active
+    }) {
+        let envelope = e
+            .spec
+            .envelope
+            .as_ref()
+            .expect("active JVM arm has envelope");
+        // Every JVM container declares one, and no two containers of one arm
+        // share a path — a shared path would read one JVM's pauses as the
+        // other's.
+        let mut paths = std::collections::BTreeSet::new();
+        for c in &envelope.containers {
+            let gc_log = c.gc_log.as_deref().unwrap_or_else(|| {
+                panic!(
+                    "{}: container {:?} declares no gc_log; a JVM arm without one \
+                     publishes no GC figures at all",
+                    e.id(),
+                    c.name
+                )
+            });
+            assert!(
+                paths.insert(gc_log),
+                "{}: two containers declare gc_log {gc_log:?}; the JVMs write \
+                 separate logs or one arm's pauses are the other's",
+                e.id()
+            );
+            seen_a_declaration = true;
+            // The path must appear in the entrant's own configuration — the
+            // file that actually aims the JVM's -Xlog — somewhere under its
+            // directory. Searched rather than parsed, because each runtime
+            // spells its options differently (Flink's config.yaml, Connect's
+            // Dockerfile KAFKA_OPTS) and a parser per runtime would be the
+            // per-entrant harness knowledge this field exists to remove.
+            // `configuration_files` deliberately skips `entrant.toml`: the
+            // descriptor contains the declared string by definition, so
+            // including it would satisfy this check with the declaration
+            // itself and no drift could ever fail here.
+            let mentioned = configuration_files(&e.dir)
+                .iter()
+                .any(|text| text.contains(gc_log));
+            assert!(
+                mentioned,
+                "{}: gc_log {gc_log:?} appears in no configuration file under {}; \
+                 the descriptor names a path nothing writes to",
+                e.id(),
+                e.dir.display()
+            );
+        }
+    }
+    assert!(
+        seen_a_declaration,
+        "no active JVM arm declared a gc_log; this test is checking nothing"
+    );
+}
+
+/// Every plausibly-configuration file directly under an entrant's directory,
+/// read as text. Flat rather than recursive: the files that aim a JVM's flags
+/// live at the top of the entrant, and a recursive walk would read source trees.
+///
+/// `entrant.toml` is excluded, and the exclusion is load-bearing: the declared
+/// `gc_log` path is a string in the descriptor, so a scan that includes the
+/// descriptor finds the declaration in itself and the containment check above
+/// passes vacuously — rename the path in `config.yaml` without touching the
+/// descriptor and nothing fails, which is precisely the drift the check exists
+/// to catch. The declaration cannot be its own corroboration; what the test
+/// needs is a file the *container actually reads* sending GC logging to the
+/// declared path.
+fn configuration_files(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.file_name().is_some_and(|n| n == "entrant.toml") {
+                continue;
+            }
+            if path.is_file()
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push(text);
+            }
+        }
+    }
+    out
+}
+
+#[test]
 fn the_flink_images_parallelism_matches_the_number_it_asserts_about_itself() {
     // Two files inside one image have to agree, and neither is obviously the
     // source of truth — the shape that drifts silently.
