@@ -10,8 +10,11 @@
 #
 # The constants are RESTATED here, not imported: `methodology/` makes the
 # flatten, the filters and the derived columns user code in every system, and
-# `harness/tests/each_arm_restates_the_transform.rs` holds this file's literals
-# (`!= "drop"`, `>= 0.2`) to `workload/workload.toml`. An arm whose transform
+# `harness/tests/each_arm_restates_the_transform.rs` holds the sentinel-unit
+# inequality and the quality-floor comparison in the CODE below to
+# `workload/workload.toml`. Its needles are spelled nowhere in this comment,
+# deliberately: the test matches by substring, and a comment that contained a
+# needle would satisfy it while the program drifted. An arm whose transform
 # came from the oracle that marks it could not disagree with the marking scheme,
 # and an arm that cannot fail is not being tested.
 

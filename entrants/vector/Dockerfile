@@ -46,11 +46,13 @@ PY
 # ---------------------------------------------------------------------------
 # Stage 2 — the runtime image.
 #
-# 0.57.0 pinned: the clickhouse sink's `format` option (the ArrowStream /
-# JSONEachRow axis this arm publishes) shipped in 0.57, and `[version].pinned`
-# in entrant.toml refuses the run if the resolved version ever disagrees. The
-# -debian variant rather than -distroless-static: glibc, plus a shell for the
-# descriptor's version command.
+# 0.57.0 pinned: the current release at activation, and the exact binary every
+# published number describes — `[version].pinned` in entrant.toml refuses the
+# run if the resolved version ever disagrees. (The clickhouse sink's `format`
+# option — the ArrowStream / JSONEachRow axis this arm publishes — shipped
+# earlier, in 0.53 via vector#24373; what 0.57 specifically brings is the
+# env-var interpolation gate handled below.) The -debian variant rather than
+# -distroless-static: glibc, plus a shell for the descriptor's version command.
 # ---------------------------------------------------------------------------
 FROM timberio/vector:0.57.0-debian
 
@@ -62,11 +64,14 @@ COPY entrants/vector/transform.vrl /etc/vector/transform.vrl
 # reviewer who starts the container by hand gets the configuration the numbers
 # describe (rule 7 sends this image's configuration upstream).
 #
-# VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION is a 0.57 breaking change:
-# without it, Vector no longer interpolates `${...}` in config files, so every
-# knob below would silently no-op and the arm would run the `:-` defaults while
-# the record claimed otherwise. The name is upstream's, not a comment on this
-# use: the values interpolated here are the driver's own knobs, not secrets.
+# VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION gates a 0.57 breaking change:
+# without it, Vector leaves `${...}` in config files as literal text — the `:-`
+# machinery is part of the interpolator, so the defaults are NOT applied — and
+# the numeric fields then fail config deserialization, which the `vector
+# validate` below turns into a build failure rather than a runtime surprise.
+# The flag is what makes the knobs knobs. The name is upstream's, not a comment
+# on this use: the values interpolated here are the driver's own knobs, not
+# secrets.
 #
 # VECTOR_LOG=warn keeps per-batch chatter off the hot path's stdout; no metrics
 # exporter is configured, because no published figure comes from an arm's

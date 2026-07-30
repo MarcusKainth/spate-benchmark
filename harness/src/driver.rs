@@ -3192,45 +3192,49 @@ fn substitute(
     group_id: &str,
     containers: &BTreeMap<&str, String>,
 ) -> Result<String, String> {
-    let mut out = raw.to_owned();
-    let simple = [
-        ("{{broker_internal}}", ep.bootstrap_internal.clone()),
-        ("{{registry_internal}}", ep.registry_internal.clone()),
-        ("{{clickhouse_internal}}", ep.ch_internal.clone()),
-        // Sustained mode reads a different topic from the one drain replays; see
-        // `sustained_topic` for why the two are kept apart.
-        (
-            "{{topic}}",
-            match opts.mode {
-                Mode::Drain => opts.topic.clone(),
-                Mode::Sustained { .. } => sustained_topic(&opts.topic),
-            },
-        ),
-        ("{{group_id}}", group_id.to_owned()),
-        // Drain replays a prefilled corpus from the beginning; sustained starts
-        // at the tail. `Mode::offset_reset` carries the argument, and it is not
-        // a preference — the wrong value here fails silently and publishes a
-        // drain's backlog age under a latency metric's name.
-        ("{{offset_reset}}", opts.mode.offset_reset().to_owned()),
-    ];
-    for (k, v) in simple {
-        out = out.replace(k, &v);
-    }
+    use crate::entrant::Placeholder;
 
     // The EFFECTIVE knobs, which are the variant's with this invocation's
     // overrides applied. `RunOptions::knobs_for` is also what the record's
     // variant map is built from, so what is substituted into the container and
     // what the record claims cannot be two different answers.
-    for (k, v) in &opts.knobs_for(variant) {
-        out = out.replace(&format!("{{{{knob:{k}}}}}"), &knob_text(v));
-    }
-    for (name, container) in containers {
-        out = out.replace(&format!("{{{{container:{name}}}}}"), container);
+    let effective = opts.knobs_for(variant);
+
+    // The vocabulary is `entrant::Placeholder`, shared with descriptor
+    // validation: one definition, so a spelling validation accepts and this
+    // function does not — or the reverse — cannot be written.
+    let mut out = raw.to_owned();
+    for (token, inner) in crate::entrant::placeholder_tokens(raw) {
+        let resolved = match inner.and_then(Placeholder::parse) {
+            Some(Placeholder::BrokerInternal) => Some(ep.bootstrap_internal.clone()),
+            Some(Placeholder::RegistryInternal) => Some(ep.registry_internal.clone()),
+            Some(Placeholder::ClickhouseInternal) => Some(ep.ch_internal.clone()),
+            // Sustained mode reads a different topic from the one drain replays;
+            // see `sustained_topic` for why the two are kept apart.
+            Some(Placeholder::Topic) => Some(match opts.mode {
+                Mode::Drain => opts.topic.clone(),
+                Mode::Sustained { .. } => sustained_topic(&opts.topic),
+            }),
+            Some(Placeholder::GroupId) => Some(group_id.to_owned()),
+            // Drain replays a prefilled corpus from the beginning; sustained
+            // starts at the tail. `Mode::offset_reset` carries the argument, and
+            // it is not a preference — the wrong value here fails silently and
+            // publishes a drain's backlog age under a latency metric's name.
+            Some(Placeholder::OffsetReset) => Some(opts.mode.offset_reset().to_owned()),
+            Some(Placeholder::Knob(k)) => effective.get(k).map(knob_text),
+            Some(Placeholder::Container(c)) => containers.get(c).cloned(),
+            // Left in place for the refusal below, never silently dropped.
+            None => None,
+        };
+        if let Some(v) = resolved {
+            out = out.replace(token, &v);
+        }
     }
 
     // An unresolved placeholder would reach the container verbatim and be read as
     // a literal, so the arm would run misconfigured while the record claimed the
-    // intended value. Fail instead.
+    // intended value. Fail instead. Descriptor validation refuses the spellings
+    // it can see; this guard covers what only run time knows.
     if out.contains("{{") {
         return Err(format!(
             "REFUSED: unresolved placeholder in {raw:?} (produced {out:?}). A \

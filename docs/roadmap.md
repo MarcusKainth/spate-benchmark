@@ -6,10 +6,12 @@ description: Which systems are measured, which are not yet, and exactly what eac
 
 A partial comparison invites one accusation above all others: *you only measured
 the ones you beat*. The only defence is to name what is missing and what it is
-waiting on, in a file that CI checks rather than in prose that quietly rots.
+waiting on, in the descriptors CI checks — which this page mirrors — rather than
+in prose that quietly rots.
 
-Each entry below comes from `[planned].blockers` in that system's
-`entrant.toml`. Validation refuses a planned entrant that does not say why.
+The Implemented table lists the arms whose descriptors are `active`. Each entry
+under "Not yet measured" comes from `[planned].blockers` in that system's
+`entrant.toml`; validation refuses a planned entrant that does not say why.
 
 ## Implemented
 

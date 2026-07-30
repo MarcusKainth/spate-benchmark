@@ -435,6 +435,88 @@ pub fn knob_violations(
     out
 }
 
+/// One placeholder in an `[env]` value, parsed from the text between `{{ }}`.
+///
+/// This enum is the **entire** placeholder vocabulary: `driver::substitute`
+/// resolves exactly these and refuses anything left over, and descriptor
+/// validation refuses any other spelling where it is written. One definition shared by
+/// both, deliberately — a second list is how the two drift, and a spelling
+/// validation accepted but the driver did not would pass every gate and fail at
+/// the sweep's first live repetition, the most expensive place to learn about a
+/// typo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placeholder<'a> {
+    /// Kafka bootstrap servers, on the bench network.
+    BrokerInternal,
+    /// Schema Registry base URL.
+    RegistryInternal,
+    /// ClickHouse HTTP base URL.
+    ClickhouseInternal,
+    /// The topic this run consumes. Mode-dependent: drain replays the corpus
+    /// topic, sustained reads its own.
+    Topic,
+    /// The per-run consumer group.
+    GroupId,
+    /// `earliest` or `latest`, decided by the run mode, not by the descriptor.
+    OffsetReset,
+    /// The named knob's effective value for the variant being started.
+    Knob(&'a str),
+    /// The named `[[envelope.container]]`'s DNS name on the bench network.
+    Container(&'a str),
+}
+
+impl<'a> Placeholder<'a> {
+    /// Every supported spelling, quoted into refusals so the fix is in the
+    /// message rather than in this file's source.
+    pub const GRAMMAR: &'static str = "{{broker_internal}}, {{registry_internal}}, \
+         {{clickhouse_internal}}, {{topic}}, {{group_id}}, {{offset_reset}}, \
+         {{knob:NAME}}, {{container:NAME}}";
+
+    /// Parses the text between `{{` and `}}`. `None` is a spelling the driver
+    /// resolves no value for.
+    #[must_use]
+    pub fn parse(inner: &'a str) -> Option<Self> {
+        match inner {
+            "broker_internal" => Some(Self::BrokerInternal),
+            "registry_internal" => Some(Self::RegistryInternal),
+            "clickhouse_internal" => Some(Self::ClickhouseInternal),
+            "topic" => Some(Self::Topic),
+            "group_id" => Some(Self::GroupId),
+            "offset_reset" => Some(Self::OffsetReset),
+            _ => {
+                if let Some(k) = inner.strip_prefix("knob:") {
+                    Some(Self::Knob(k))
+                } else {
+                    inner.strip_prefix("container:").map(Self::Container)
+                }
+            }
+        }
+    }
+}
+
+/// Every `{{…}}` token in a raw `[env]` value: the token as written, and the
+/// text between the braces — `None` when the `{{` never closes, so a truncated
+/// spelling is reported rather than silently skipped.
+#[must_use]
+pub fn placeholder_tokens(raw: &str) -> Vec<(&str, Option<&str>)> {
+    let mut out = Vec::new();
+    let mut rest = raw;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start..];
+        match after.find("}}") {
+            Some(end) => {
+                out.push((&after[..end + 2], Some(&after[2..end])));
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push((after, None));
+                rest = "";
+            }
+        }
+    }
+    out
+}
+
 /// One declared deviation from the common shape (rule 4).
 ///
 /// `methodology/` and `CONTRIBUTING.md` have required this table since before
@@ -705,6 +787,7 @@ fn validate(e: &Entrant) -> Vec<String> {
     validate_guarantees(e, &mut errs, &at);
     validate_envelope(e, &mut errs, &at);
     validate_variants(e, &mut errs, &at);
+    validate_env(e, &mut errs, &at);
     validate_constraints(e, &mut errs, &at);
     validate_deviations(e, &mut errs, &at);
     validate_clickhouse(e, &mut errs, &at);
@@ -833,6 +916,74 @@ fn validate_clickhouse(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) 
                  bare table name and let the driver qualify it the way \
                  system.query_log does"
             )));
+        }
+    }
+}
+
+/// Checks every `[env]` value's placeholders against the vocabulary the driver
+/// resolves.
+///
+/// The failure this moves earlier: `driver::substitute` refuses an unresolved
+/// placeholder at run time, so a stale `{{knob:threads}}` left behind by a
+/// variant rename passed `bench validate` and CI, and failed at the sweep's
+/// first live repetition. Every fact needed to catch it is in the descriptor.
+///
+/// The entrant-wide `[env]` is substituted for **every** variant, so a knob it
+/// names must exist in every variant's `knobs` — one variant without it is one
+/// arm of the sweep refused mid-run. A variant's own `env` binds only to that
+/// variant's knobs.
+fn validate_env(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) -> String) {
+    let mut check = |place: &str, key: &str, raw: &str, variants: &[&Variant]| {
+        for (token, inner) in placeholder_tokens(raw) {
+            let Some(inner) = inner else {
+                errs.push(at(format!(
+                    "{place} {key} = {raw:?}: {token:?} opens a placeholder that never closes"
+                )));
+                continue;
+            };
+            match Placeholder::parse(inner) {
+                None => errs.push(at(format!(
+                    "{place} {key} = {raw:?}: {token:?} is not a placeholder the driver \
+                     resolves. Known: {}. Run time refuses an unresolved placeholder, so \
+                     this descriptor would pass every gate and fail at the sweep's first \
+                     live repetition — the most expensive place to learn about a typo.",
+                    Placeholder::GRAMMAR
+                ))),
+                Some(Placeholder::Knob(k)) => {
+                    for v in variants.iter().filter(|v| !v.knobs.contains_key(k)) {
+                        errs.push(at(format!(
+                            "{place} {key} names {{{{knob:{k}}}}} but variant {:?} declares \
+                             no knob {k:?}. Substitution is per variant, so that variant's \
+                             arm would be refused mid-sweep with an unresolved placeholder.",
+                            v.id
+                        )));
+                    }
+                }
+                Some(Placeholder::Container(c)) => {
+                    let declared = e
+                        .spec
+                        .envelope
+                        .as_ref()
+                        .is_some_and(|env| env.containers.iter().any(|ct| ct.name == c));
+                    if !declared {
+                        errs.push(at(format!(
+                            "{place} {key} names {{{{container:{c}}}}} but no \
+                             [[envelope.container]] is named {c:?}"
+                        )));
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    };
+
+    let all: Vec<&Variant> = e.spec.variants.iter().collect();
+    for (key, raw) in &e.spec.env {
+        check("[env]", key, raw, &all);
+    }
+    for v in &e.spec.variants {
+        for (key, raw) in &v.env {
+            check(&format!("variant {:?} env", v.id), key, raw, &[v]);
         }
     }
 }
@@ -1635,6 +1786,113 @@ mod tests {
         validate_clickhouse(&e, &mut errs, &at);
         assert_eq!(errs.len(), 1, "{errs:?}");
         assert!(errs[0].contains("is qualified"), "{}", errs[0]);
+    }
+
+    fn env_errors(e: &Entrant) -> Vec<String> {
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_env(e, &mut errs, &at);
+        errs
+    }
+
+    /// A single-container envelope for the placeholder tests.
+    fn sut_envelope() -> Envelope {
+        Envelope {
+            cpus: "6".to_owned(),
+            memory: "24g".to_owned(),
+            containers: vec![Container {
+                role: Role::DataPlane,
+                name: "sut".to_owned(),
+                cpus: "6".to_owned(),
+                memory: "24g".to_owned(),
+                args: Vec::new(),
+                gc_log: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn an_env_using_only_the_supported_vocabulary_validates() {
+        // Every placeholder kind at once: a driver-owned value, a knob present
+        // in both variants, a declared container, and a variant-scoped knob
+        // that exists only in the variant whose env names it.
+        let mut a = variant("a", Approach::Realistic, &[]);
+        a.knobs = knobs(&[("threads", 6), ("only_a", 1)]);
+        a.env = BTreeMap::from([("ONLY_A".to_owned(), "{{knob:only_a}}".to_owned())]);
+        let mut b = variant("b", Approach::Realistic, &[]);
+        b.knobs = knobs(&[("threads", 8)]);
+
+        let mut e = entrant_with(vec![a, b]);
+        e.spec.envelope = Some(sut_envelope());
+        e.spec.env = BTreeMap::from([
+            ("BOOTSTRAP".to_owned(), "{{broker_internal}}".to_owned()),
+            ("THREADS".to_owned(), "{{knob:threads}}".to_owned()),
+            ("PEER".to_owned(), "{{container:sut}}".to_owned()),
+            ("PLAIN".to_owned(), "no placeholder at all".to_owned()),
+        ]);
+        let errs = env_errors(&e);
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn an_unknown_placeholder_fails_validation_rather_than_the_sweep() {
+        // The gap this closes: `driver::substitute` refuses an unresolved
+        // placeholder at RUN time, so a spelling outside the vocabulary passed
+        // `bench validate` and CI and failed at the first live repetition.
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.env = BTreeMap::from([("TOPIC".to_owned(), "{{topics}}".to_owned())]);
+        let errs = env_errors(&e);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("{{topics}}"), "{}", errs[0]);
+        assert!(
+            errs[0].contains("{{knob:NAME}}"),
+            "the fix belongs in the message: {}",
+            errs[0]
+        );
+    }
+
+    #[test]
+    fn a_knob_placeholder_absent_from_one_variant_names_that_variant() {
+        // The stale-rename case. The entrant-wide [env] is substituted for
+        // every variant, so a knob one variant lost in a retune is that
+        // variant's arm refused mid-sweep — and the message must say which.
+        let mut with = variant("with", Approach::Realistic, &[]);
+        with.knobs = knobs(&[("threads", 6)]);
+        let without = variant("without", Approach::Realistic, &[]);
+
+        let mut e = entrant_with(vec![with, without]);
+        e.spec.env = BTreeMap::from([("THREADS".to_owned(), "{{knob:threads}}".to_owned())]);
+        let errs = env_errors(&e);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("\"without\""), "{}", errs[0]);
+        assert!(errs[0].contains("threads"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn a_container_placeholder_must_name_a_declared_container() {
+        // `{{container:jm}}` with no such [[envelope.container]] resolves
+        // nothing; the flink arm's JOB_MANAGER_RPC_ADDRESS is the live use.
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.envelope = Some(sut_envelope());
+        e.spec.env = BTreeMap::from([("RPC".to_owned(), "{{container:jm}}".to_owned())]);
+        let errs = env_errors(&e);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("{{container:jm}}"), "{}", errs[0]);
+        assert!(errs[0].contains("[[envelope.container]]"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn an_unterminated_placeholder_is_refused_where_it_is_written() {
+        // `{{knob:threads` never closes, so no replacement ever matches it; at
+        // run time it survives every substitution and hits the driver's
+        // unresolved-placeholder refusal mid-sweep.
+        let mut only = variant("only", Approach::Realistic, &[]);
+        only.knobs = knobs(&[("threads", 6)]);
+        let mut e = entrant_with(vec![only]);
+        e.spec.env = BTreeMap::from([("THREADS".to_owned(), "{{knob:threads".to_owned())]);
+        let errs = env_errors(&e);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("never closes"), "{}", errs[0]);
     }
 
     #[test]

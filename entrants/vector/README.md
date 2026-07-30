@@ -6,14 +6,20 @@ this file records only what is specific to Vector.
 
 Delivery is **at-least-once**: end-to-end acknowledgements are on, so a source
 offset commits (every 5 s) only after ClickHouse has acked every row derived
-from the message —
-[Vector's own architecture doc](https://vector.dev/docs/architecture/end-to-end-acknowledgements/)
-is explicit that acknowledgement state is shared across all events a transform
-emits from one input. Two wire formats are published — `arrow_stream` (default)
-and `json_each_row` — because they are not the same amount of server-side work;
-the `format` option shipped in
-[0.57 via vector#24373](https://github.com/vectordotdev/vector/pull/24373),
-which quotes JSONEachRow as "~4-5x less efficient" server-side. ArrowStream is
+from the message.
+[Vector's acknowledgement doc](https://vector.dev/docs/about/under-the-hood/architecture/end-to-end-acknowledgements/)
+states this for *copies* of an event — status is shared across all copies, the
+source is notified once all are processed, worst status wins — and the fan-out
+case rides the same mechanism: each child of a remap's array-assign carries a
+clone of the parent's metadata, whose finalizers are `Arc`-shared
+([finalization.rs](https://github.com/vectordotdev/vector/blob/master/lib/vector-common/src/finalization.rs)),
+so the offset resolves only when the last child does. Two wire formats are
+published — `arrow_stream` (default) and `json_each_row` — because they are not
+the same amount of server-side work; the `format` option shipped in 0.53 via
+[vector#24373](https://github.com/vectordotdev/vector/pull/24373), whose
+motivating issue
+[vector#24074](https://github.com/vectordotdev/vector/issues/24074) quotes
+JSONEachRow as "~4-5x less efficient" server-side. ArrowStream is still
 labelled **beta** in the 0.57 docs, so it is also a declared deviation, and the
 GA `json-each-row` variant is the control that quantifies what the beta format
 buys.
@@ -24,35 +30,43 @@ reason to run it.
 ## Topology: 8 sources → 8 remaps → 1 sink
 
 A Vector [kafka source](https://vector.dev/docs/reference/configuration/sources/kafka/)
-is one librdkafka consumer whose decoding runs in that source's own task; the
-maintainers' scaling guidance is one source per partition
-([discussion #15884](https://github.com/vectordotdev/vector/discussions/15884)).
-The topic has 8 partitions, so the config declares eight identical sources in
-one consumer group under `cooperative-sticky` assignment, which settles at one
-partition per consumer. The envelope allows one container, so the eight
-consumers share the process. Each source feeds its own
-[remap](https://vector.dev/docs/reference/configuration/transforms/remap/)
-(a remap is one task; a single shared remap would serialize the fan-out onto one
-core), and all eight remaps load the same committed
-[`transform.vrl`](transform.vrl). In [`vector.yaml.tmpl`](vector.yaml.tmpl) the
-sources `in-1`..`in-7` are YAML aliases of `in-0`, so "identical" is
-parser-enforced rather than promised.
+is one librdkafka consumer whose decoding runs in that source's own task, so a
+single source cannot spread eight partitions' decode across cores. The
+maintainers' scaling guidance is one Vector **instance** per partition with
+`cooperative-sticky` assignment
+([discussion #15884](https://github.com/vectordotdev/vector/discussions/15884));
+the envelope allows one container, so this arm runs the in-process analogue:
+eight identical sources in one consumer group, which the group protocol treats
+exactly as it would eight processes, settling at one partition per consumer.
+Each source feeds its own
+[remap](https://vector.dev/docs/reference/configuration/transforms/remap/) —
+structure rather than necessity:
+[Vector's concurrency model](https://vector.dev/docs/about/under-the-hood/architecture/concurrency-model/)
+says a remap is a stateless function transform it may parallelize on its own,
+but one remap per source keeps each partition's pipeline a straight line with no
+fan-in point whose scheduling would be trusted implicitly. All eight remaps load
+the same committed [`transform.vrl`](transform.vrl). In
+[`vector.yaml.tmpl`](vector.yaml.tmpl) the sources `in-1`..`in-7` are YAML
+aliases of `in-0`, so "identical" is parser-enforced rather than promised.
 
 ## Configuration
 
-Everything tunable lives in [`vector.yaml.tmpl`](vector.yaml.tmpl), reaches the
-container as environment variables, and nothing tunable lives anywhere else. The
-committed `${...:-default}` values equal the published knobs, so a hand-run
-container matches the numbers.
+Every knob reaches the container as an environment variable. Five live in
+[`vector.yaml.tmpl`](vector.yaml.tmpl) as `${...:-default}` placeholders; the
+sixth, `threads`, is `VECTOR_THREADS` — the binary's own variable, with no
+config-file line to hold it — so its default lives only in the Dockerfile `ENV`
+block, beside the other five's. All committed defaults equal the published
+knobs (a harness test holds the Dockerfile, the template and the descriptor to
+the same values), so a hand-run container matches the numbers.
 
 ### Knobs the driver sets per run
 
 | Knob | Shipped default | Ours | Why |
 |---|---|---|---|
-| `threads` | detected core count | **6** | `VECTOR_THREADS`. Vector detects the host's cores, not the cgroup quota, so on the reference host it would start ~32 workers under a 6-CPU cap — pure scheduler churn. Matched to the envelope instead. |
+| `threads` | detected parallelism | **6** | `VECTOR_THREADS`, the tokio worker count. Vector's default uses `available_parallelism()`, which honors the cgroup quota, so inside the container it would likely land on 6 anyway — the knob makes the width a declared statement rather than a detection. Six is deliberate against the partition-count rule in [envelope.md](../../methodology/envelope.md): that rule guards partition-*owning* units, and here those are the eight sources, which multiplex freely over the workers — no partition pins to a starved thread, and more busy threads than the 6-CPU quota buys only throttling churn. The first tuning sweep should still test 8. |
 | `batch_events` | ~40k rows effective (the 10 MiB byte bound seals first) | **262144** | Rows per INSERT, equal to Spate's cap so the cross-arm batch quantity is comparable, and inside a fixed 256 MiB byte cap raised so that **events** bind and the declared batch size is the one in force. |
 | `batch_timeout_secs` | 1 | **1** | Kept: it is the sustained-mode p99 floor; in drain, batches fill on size first. Sweepable. |
-| `request_concurrency` | `adaptive` | **8** | Fixed width over the adaptive (ARC) controller: a drain window is tens of seconds and ARC spends exactly that long probing its way up, so the measurement would be of the controller's warm-up. Eight is the concurrent-INSERT width the other arms hold. |
+| `request_concurrency` | `adaptive` | **8** | Fixed width over the adaptive (ARC) controller: a drain window is tens of seconds and ARC spends exactly that long probing its way up, so the measurement would be of the controller's warm-up. Eight is a starting width matched to the partition count, not a cross-arm constant — the other arms' insert-concurrency knobs count different things (Spate: inflight per shard; Flink: inflight per subtask), so no single number "matches" them. Sweepable. |
 | `buffer_events` | 500 | **524288** | The shipped 500-event sink buffer cannot feed even one 262144-row batch — the batcher would seal on starvation every time. 2× the batch so the next batch fills while the last drains. |
 | `compression` | `gzip` | **`none`** | The default spends the envelope's scarce CPU compressing inserts to save same-host bandwidth the environment has in abundance. |
 
@@ -69,9 +83,10 @@ minutes into a cell.
 | `query_settings.async_insert_settings.enabled` | `false` | ClickHouse 26.3 defaults `async_insert` on, under which the server acks before writing — an ack the acknowledgement chain would then trust. Matched to every other arm. |
 | `buffer.when_full` | `block` | Backpressure, not loss: `drop_newest` breaks at-least-once while flattering throughput. |
 | `skip_unknown_fields` | `false` | An unknown field means the transform emitted a column the table lacks — a bug to fail on, not absorb. |
+| `drop_on_error` | `true` | A decided stance on the poison path. Vector's default forwards the *original, un-flattened* event on a VRL runtime error, which `skip_unknown_fields = false` turns into a rejected INSERT carrying 262144 good rows (or a wedge behind `when_full: block`). Dropping costs exactly the errored message's rows, which the loss gate counts and publishes. Unreachable on the deterministic corpus. |
 | `date_time_best_effort` | `true` | Lands the epoch-derived `DateTime64(3)`/`(6)` values at full precision. |
 | `batch.max_bytes` | 256 MiB | Lifted from the shipped 10 MiB so `batch_events` is what binds (see knob table). |
-| 8 sources / 8 remaps | structural | One consumer and one transform task per partition; see Topology. |
+| 8 sources / 8 remaps | structural | One consumer per partition; one remap per source for structure, not parallelism (see Topology). |
 | `partition.assignment.strategy` | `cooperative-sticky` | Settles eight consumers on one partition each; incremental rebalance, so a late joiner does not stall the other seven. |
 | `fetch.message.max.bytes` | 8 MiB | Above the corpus's largest framed message; the 1 MiB default costs extra round-trips. |
 | `queued.max.messages.kbytes` | 262144 (= 256 MiB) | Per-consumer prefetch bound; in drain the consumer must never be the starved side. 8 × 256 MiB is small against 24 GiB. |
@@ -107,10 +122,14 @@ By hand, which is what a reviewer runs to look inside the container. One
 container, the full 6 CPU / 24 GiB data-plane envelope, no control plane:
 
 ```sh
-docker run -d --name spate-bench-vector-sut --network spate-bench-net \
+docker run -d --name spate-bench-sut-sut --network spate-bench-net \
   --cpus 6 --memory 24g --memory-swap 24g \
   spate-bench-vector
 ```
+
+(`spate-bench-sut-sut` is the name the harness gives this container —
+`spate-bench-sut-` plus the descriptor's container name — so sampler output
+correlates; any name works for a look inside.)
 
 `--memory-swap` equals `--memory`, so memory pressure surfaces instead of hiding
 in a swapfile. `FORMAT` selects `arrow_stream` or `json_each_row`; the six knobs
@@ -172,12 +191,21 @@ rather than `-distroless-static`: glibc, plus a shell for the version command.
 - **Multiple kafka sources in one consumer group.**
   [Issue #21329](https://github.com/vectordotdev/vector/issues/21329) reports
   sources in the same group interfering — in the *different-topics* case. This
-  arm's eight sources consume the **same** topic, which is the configuration
-  the one-source-per-partition guidance in
-  [#15884](https://github.com/vectordotdev/vector/discussions/15884) describes,
-  and `cooperative-sticky` is set precisely so the eight consumers settle
-  cleanly. If upstream review (rule 7) says this topology mis-serves Vector,
-  that is exactly the PR this repository most wants.
+  arm's eight sources consume the **same** topic, the in-process analogue of
+  the instance-per-partition deployment
+  [#15884](https://github.com/vectordotdev/vector/discussions/15884)
+  recommends — but no upstream doc blesses this shape by name, so the first
+  live run must confirm the eight consumers settle 1:1 and stay settled.
+  Adjacent: [#22006](https://github.com/vectordotdev/vector/issues/22006)
+  (consumers stop after a rebalance; fixed in rust-rdkafka 0.37 — check which
+  rust-rdkafka 0.57.0 vendors). If upstream review (rule 7) says this topology
+  mis-serves Vector, that is exactly the PR this repository most wants.
+- **`async_insert` must actually be off on the wire.** The config sends
+  `query_settings.async_insert_settings.enabled: false` and `vector validate`
+  proves the key parses, but nothing here proves the setting reaches every
+  `arrow_stream` request. On the first live run, check
+  `system.query_log.Settings` for the arm's INSERTs: an async ack would make
+  the e2e-acknowledgement chain trust a write that is not yet durable.
 - **The remap fan-out is the throughput risk.** One event in, an array of up to
   100 objects assigned to `.` — per-element object construction in VRL is the
   hottest code in the arm. If it binds, the rule-1-compliant fallbacks are a

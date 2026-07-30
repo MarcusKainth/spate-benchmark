@@ -6,31 +6,38 @@
 # a double-quoted YAML scalar — methodology/ forbids re-declaring the schema
 # inline, and baking it from the one committed file is what keeps that true for
 # a system with no Schema Registry client. Every dollar-brace placeholder is
-# resolved by Vector's own env-var interpolation at start-up (which 0.57 gates
+# resolved by Vector's own env-var interpolation at start-up, which 0.57 gates
 # behind VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true — set in the
-# Dockerfile, because without it every knob here would silently no-op). The
-# interpolator reads the RAW file text, comments included, so no comment in this
-# file may spell a literal placeholder. The defaults after `:-` equal the
-# published knobs, so a reviewer starting the container by hand gets the
-# configuration the numbers describe.
+# Dockerfile. Without the flag the placeholders stay literal text (the `:-`
+# defaults live inside the interpolator, so they are NOT applied) and the
+# numeric fields fail config deserialization — loudly, at the Dockerfile's
+# `vector validate`. The interpolator reads the RAW file text, comments
+# included, so no comment in this file may spell a literal placeholder. The
+# defaults after `:-` equal the published knobs, so a reviewer starting the
+# container by hand gets the configuration the numbers describe.
 #
 # WHY EIGHT SOURCES: a Vector kafka source is one librdkafka consumer whose
-# decoding runs in that source's own task, and the maintainers' guidance for
-# scaling is one source per partition (vectordotdev/vector discussion #15884).
-# The topic has 8 partitions; eight sources in the same consumer group, under
-# cooperative-sticky assignment, settle at exactly one partition each. The
-# envelope allows one container, so the eight consumers share the process.
+# decoding runs in that source's own task, so a single source cannot spread
+# eight partitions' decode across cores. The maintainers' scaling guidance
+# (vectordotdev/vector discussion #15884) is one Vector INSTANCE per partition,
+# cooperative-sticky; the envelope allows one container, so this arm runs the
+# in-process analogue — eight sources in the same consumer group, which the
+# group protocol treats exactly as it would eight processes, settling at one
+# partition each. No upstream doc blesses same-topic multi-source in one
+# process by name; README's "Traps" section flags it for the first live run.
 # `in-1`..`in-7` are YAML aliases of `in-0`: the blocks are IDENTICAL by
 # construction, and the alias makes that a parser-enforced fact rather than a
 # copy-paste promise. (Plain anchors/aliases only — `<<:` merge keys are not
 # supported by Vector's YAML loader. If aliases ever regress, enumerate the
 # eight blocks literally; `vector validate` in the Dockerfile is the guard.)
 #
-# WHY EIGHT REMAPS: a remap transform is one task. A single shared remap fed by
-# eight sources would serialize the fan-out — the hottest per-row work in the
-# pipeline — onto one core. One remap per source keeps decode and transform
-# parallel at the topic's width; all eight load the same committed
-# /etc/vector/transform.vrl, so there is still exactly one transform to review.
+# WHY EIGHT REMAPS: structure, not a parallelism requirement. Vector's
+# concurrency model documents remap as a stateless function transform it may
+# parallelize on its own, so a single shared remap is not doomed to one core —
+# but one remap per source keeps each partition's pipeline a straight line with
+# no fan-in point whose scheduling we would be trusting implicitly, and it
+# costs nothing: all eight load the same committed /etc/vector/transform.vrl,
+# so there is still exactly one transform to review.
 
 # No published figure comes from an arm's self-report, and an idle API server is
 # still a listener on the measured process.
@@ -89,39 +96,56 @@ sources:
 # fan-out happens inside it: assigning an array to `.` emits one event per
 # element, and acknowledgement state is shared across the children, so
 # at-least-once survives the 1:100 explosion.
+#
+# drop_on_error is a decided stance, not the default: Vector's default (false)
+# forwards the ORIGINAL, un-flattened event downstream on a VRL runtime error,
+# and skip_unknown_fields=false would then have ClickHouse reject the whole
+# 262144-row INSERT the raw event rode in — one poison message costing a batch
+# of good rows, or a wedge behind when_full: block. Dropping instead costs
+# exactly that message's rows, which the loss gate counts and publishes.
+# Unreachable on the deterministic corpus; the stance exists for the day it
+# is not.
 transforms:
   shape-0:
     type: remap
     inputs: ["in-0"]
     file: /etc/vector/transform.vrl
+    drop_on_error: true
   shape-1:
     type: remap
     inputs: ["in-1"]
     file: /etc/vector/transform.vrl
+    drop_on_error: true
   shape-2:
     type: remap
     inputs: ["in-2"]
     file: /etc/vector/transform.vrl
+    drop_on_error: true
   shape-3:
     type: remap
     inputs: ["in-3"]
     file: /etc/vector/transform.vrl
+    drop_on_error: true
   shape-4:
     type: remap
     inputs: ["in-4"]
     file: /etc/vector/transform.vrl
+    drop_on_error: true
   shape-5:
     type: remap
     inputs: ["in-5"]
     file: /etc/vector/transform.vrl
+    drop_on_error: true
   shape-6:
     type: remap
     inputs: ["in-6"]
     file: /etc/vector/transform.vrl
+    drop_on_error: true
   shape-7:
     type: remap
     inputs: ["in-7"]
     file: /etc/vector/transform.vrl
+    drop_on_error: true
 
 sinks:
   clickhouse:
@@ -139,9 +163,9 @@ sinks:
     database: default
     table: sensor_events
     # The variant axis: `arrow_stream` (default; fetches the table schema from
-    # system.columns once at start-up, vector#24373, beta in 0.57) or
-    # `json_each_row` (the GA control). Not the same server-side work, which is
-    # why both are published.
+    # system.columns once at start-up; added in 0.53 via vector#24373, still
+    # beta in 0.57) or `json_each_row` (the GA control). Not the same
+    # server-side work, which is why both are published.
     format: "${FORMAT:-arrow_stream}"
     # DateTime64 columns receive epoch-derived timestamps; best-effort parsing
     # is what lands them at full precision rather than rejected.
@@ -174,7 +198,10 @@ sinks:
     request:
       # Fixed width rather than the default adaptive (ARC) controller: a drain
       # window is tens of seconds, and ARC spends exactly that long probing its
-      # way up. Eight concurrent INSERTs is the width the other arms hold.
+      # way up — the measurement would be of the controller's warm-up. Eight is
+      # a starting width matched to the partition count, not a cross-arm
+      # constant (each arm's insert-concurrency knob means something different:
+      # Spate holds inflight-per-shard, Flink inflight-per-subtask). Sweepable.
       concurrency: ${SINK_REQUEST_CONCURRENCY:-8}
     buffer:
       type: memory

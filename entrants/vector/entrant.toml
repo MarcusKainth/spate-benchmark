@@ -88,10 +88,11 @@ SINK_COMPRESSION         = "{{knob:compression}}"
 knob    = "buffer_events"
 exceeds = "batch_events"
 why     = """
-The sink's memory buffer feeds the batcher, so a buffer smaller than one batch
-means every batch seals early on buffer starvation and the declared batch_events
-never takes effect — the record would misdescribe the arm. Raise buffer_events
-with batch_events.
+The sink's memory buffer feeds the batcher, so it must hold strictly more than
+one batch: smaller, and every batch seals early on buffer starvation; equal, and
+the next batch cannot begin filling while the last drains — either way the
+declared batch_events is not the quantity actually in force and the record would
+misdescribe the arm. Raise buffer_events with batch_events.
 """
 
 # Rule 4. Machine-readable, so the site renders these from the same source the
@@ -137,8 +138,9 @@ knobs    = { threads = 6, batch_events = 262144, batch_timeout_secs = 1, request
 reports  = { wire_format = "arrow_stream" }
 
 # The GA wire-format control. Vector's clickhouse sink wrote JSONEachRow only
-# until 0.57 added `format` (vector#24373, which quotes JSONEachRow as "~4-5x
-# less efficient" server-side); this arm quantifies what the beta format buys.
+# until 0.53 added `format` (vector#24373; the motivating issue vector#24074
+# quotes JSONEachRow as "~4-5x less efficient" server-side); this variant
+# quantifies what the still-beta format buys.
 [[variants]]
 id       = "json-each-row"
 label    = "Vector · JSONEachRow"
