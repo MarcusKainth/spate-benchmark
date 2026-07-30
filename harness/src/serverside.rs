@@ -33,20 +33,31 @@
 //! polling interval, and it would rise every time somebody made the gate
 //! stricter.
 //!
-//! Four predicates narrow the log to the arm, and each one is doing distinct
-//! work:
+//! The base predicates narrow the log to the arm, and each one is doing
+//! distinct work:
 //!
 //! * `query_kind = 'Insert'` — removes the driver's `SELECT count()` polls and
 //!   the gate's scans outright, and also the `TRUNCATE` that precedes every
 //!   repetition, which the log records as kind `Drop`.
-//! * `hasAny(tables, [...])` — the workload's target table, **fully qualified**
-//!   (`default.sensor_events`), because that is how `system.query_log` writes it.
+//! * `hasAny(tables, [...])` — the workload's target table plus any
+//!   `attribution_tables` the arm's descriptor declares, all **fully
+//!   qualified** (`default.sensor_events`), because that is how
+//!   `system.query_log` writes them. The extra names carry the MV-landing
+//!   shape: an arm that lands nested rows in its own table and flattens with a
+//!   materialized view is attributed through the parent insert on that landing
+//!   table, which is the row that carries the view's cost.
 //! * `query_start_time_microseconds` inside the measurement window — the
 //!   sampler's own window, not the driver's clock. See [`Window`].
-//! * `is_initial_query` — a distributed sub-query would otherwise be counted
-//!   beside the query that spawned it. Vacuous on a single node, and kept
-//!   because it stops being vacuous the day the infrastructure grows a second
-//!   one.
+//! * `is_initial_query` — required by default, so a distributed sub-query is
+//!   never counted beside the query that spawned it. When the descriptor
+//!   declares `forwarded_inserts = true` the predicate is **inverted** to
+//!   `NOT is_initial_query`, never dropped: such an arm's inserts arrive at
+//!   the shared server as forwarded executions of an initial query that ran on
+//!   the arm's own node, whose log this module never reads, so the strict form
+//!   would match nothing — and *no* form would let an initial query and the
+//!   forwarded execution it spawned both match, double-counting the arm's
+//!   `written_rows` and CPU. One polarity is always present, so
+//!   double-counting is impossible by construction.
 //!
 //! ## What can still leak in, and what leaks out
 //!
@@ -85,6 +96,14 @@
 //!    table, so naming the workload's target table attributes it — believed, and
 //!    **unverified until a Connect arm exists**. Pass the landing table too if
 //!    in doubt; the predicate is `hasAny`, not equality.
+//! 6. **Under the inverted predicate, any other non-initial query touching an
+//!    attribution table inside the window is attributed to the arm.** The
+//!    inversion trades one admission for another: the strict form admits
+//!    stray *initial* inserts (item 1) and the inverted form admits stray
+//!    *forwarded* ones — some other client's distributed write whose
+//!    sub-query lands on an attributed table in the window. The arm lock
+//!    makes that a protocol violation just as it does for item 1, and it
+//!    would be exactly as invisible here.
 //!
 //! # Which counters constitute "CPU per row"
 //!
@@ -699,15 +718,22 @@ pub const FLUSH_LOGS_SQL: &str = "SYSTEM FLUSH LOGS";
 /// every month the server has been up. The day of slack is because `event_date`
 /// is derived in the server's timezone while the bounds are epoch milliseconds,
 /// and being generous costs one partition where being exact could cost a row.
-/// `forwarded_inserts` widens the fourth predicate for the one arm shape that
-/// needs it. An arm pushing through a `Distributed` table lands **every** insert
-/// on the shared server with `is_initial_query = 0` — the initial query ran on
-/// the arm's own node, whose log this module never reads — so the strict
-/// predicate would match nothing at all, and nothing looks exactly like an arm
-/// that never inserted. The exception is declared per-entrant
-/// (`[clickhouse].forwarded_inserts`) rather than defaulted, so every arm that
-/// does not need it keeps the predicate that stops a distributed sub-query
-/// being counted beside the query that spawned it.
+/// `forwarded_inserts` **inverts** the fourth predicate for the one arm shape
+/// that needs it — it never drops it. An arm pushing through a `Distributed`
+/// table lands **every** insert on the shared server with
+/// `is_initial_query = 0` — the initial query ran on the arm's own node, whose
+/// log this module never reads — so the strict predicate would match nothing at
+/// all, and nothing looks exactly like an arm that never inserted. Substituting
+/// `NOT is_initial_query` matches exactly those forwarded executions. Dropping
+/// the predicate instead would match both sides of a forward: if such an arm's
+/// `Distributed` table ever lived on the shared server itself, the initial
+/// query and the forwarded execution it spawned would each carry
+/// `written_rows` and CPU, and the arm would be double-counted. With one form
+/// or its negation always present, that is impossible by construction. The
+/// exception is declared per-entrant (`[clickhouse].forwarded_inserts`) rather
+/// than defaulted, so every arm that does not need it keeps the predicate that
+/// stops a distributed sub-query being counted beside the query that spawned
+/// it.
 #[must_use]
 pub fn attribution_sql(tables: &[&str], window: Window, forwarded_inserts: bool) -> String {
     let counters = COUNTERS
@@ -721,7 +747,7 @@ pub fn attribution_sql(tables: &[&str], window: Window, forwarded_inserts: bool)
         .collect::<Vec<_>>()
         .join(", ");
     let initial = if forwarded_inserts {
-        ""
+        "AND NOT is_initial_query "
     } else {
         "AND is_initial_query "
     };
@@ -1290,23 +1316,29 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
     /// insert executes on the shared server as a non-initial query — the initial
     /// one ran on the arm's own node, whose log this module never reads — so the
     /// strict predicate would attribute nothing and the refusal would read as an
-    /// arm that never inserted.
+    /// arm that never inserted. The predicate is negated, never dropped: with no
+    /// predicate at all, a `Distributed` table living on the shared server would
+    /// have BOTH the initial query and its forwarded execution match, and the
+    /// arm's `written_rows` and CPU would be double-counted.
     #[test]
-    fn a_forwarded_inserts_arm_drops_only_the_initial_query_predicate() {
+    fn a_forwarded_inserts_arm_inverts_the_initial_query_predicate() {
         let strict = attribution_sql(&["default.sensor_events"], window(), false);
         let forwarded = attribution_sql(&["default.sensor_events"], window(), true);
-        assert!(!forwarded.contains("is_initial_query"), "{forwarded}");
-        // Every other predicate survives: the widening is one predicate wide,
-        // never a different query.
-        for kept in [
-            "query_kind = 'Insert'",
-            "hasAny(tables, ['default.sensor_events'])",
-            "query_start_time_microseconds >=",
-            "event_date >=",
-        ] {
-            assert!(forwarded.contains(kept), "{kept} missing: {forwarded}");
-            assert!(strict.contains(kept), "{kept} missing: {strict}");
-        }
+        // The strict predicate appears exactly once, so the replace below is
+        // provably a single edit and not a family of them.
+        assert_eq!(
+            strict.matches("AND is_initial_query ").count(),
+            1,
+            "{strict}"
+        );
+        // The whole transformation is that one negation and nothing else: the
+        // forwarded query IS the strict query with the predicate inverted, so
+        // every other predicate survives by equality rather than by a
+        // hand-maintained list.
+        assert_eq!(
+            forwarded,
+            strict.replace("AND is_initial_query ", "AND NOT is_initial_query "),
+        );
     }
 
     /// The window is the sampler's, so that the server-side figure and the arm's

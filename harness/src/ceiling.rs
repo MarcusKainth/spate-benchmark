@@ -271,16 +271,21 @@
 //! block that is subtly wrong is worse than no Native ceiling, because the
 //! refusal it replaces is at least honest: a mis-serialised `LowCardinality`
 //! index width does not fail loudly, it lands the wrong dictionary entry in
-//! every row and reports a ceiling for an insert nobody performs. So
-//! `harness/tests/native_encoder_matches_clickhouse.rs` POSTs blocks from this
-//! encoder at a live `clickhouse/clickhouse-server:26.3`, under the committed
-//! DDL, and checks what landed against [`corpus::run_gates`] — the same
-//! closed-form oracle every published arm is held to, covering row identity,
-//! both value sums, the `sensor`/`region`/name/`unit`/`tags` fingerprints, the
-//! `DateTime64` scaling and the null pattern. RowBinary runs through the same
-//! path as a control, so a failure there indicts the test rig rather than the
-//! encoder. That test needs a Docker daemon and is `#[ignore]`d; it is the
-//! reason this format is claimed rather than the claim itself.
+//! every row and reports a ceiling for an insert nobody performs. So the
+//! proof is mechanical, and it runs twice over. Every measurement re-proves
+//! its encoder inside the pass itself: [`prove_format_lands_correctly`] POSTs
+//! a proof block at the live target before a single rung is timed and checks
+//! what landed against [`corpus::run_gates`] — the same closed-form oracle
+//! every published arm is held to, covering row identity, both value sums, the
+//! `sensor`/`region`/name/`unit`/`tags` fingerprints, the `DateTime64` scaling
+//! and the null pattern — and a measurement whose rows the oracle rejects is
+//! refused rather than recorded. Before that,
+//! `harness/tests/native_encoder_matches_clickhouse.rs` runs the same chain
+//! against a fresh `clickhouse/clickhouse-server:26.3` under the committed
+//! DDL, with RowBinary as a control so a failure there indicts the test rig
+//! rather than the encoder. That test needs a Docker daemon and is
+//! `#[ignore]`d; it is the pre-merge proof that a format may be claimed at
+//! all, not the only time the claim is checked.
 //!
 //! # Why the measured figure is safe to gate against even if our inserter is slow
 //!
@@ -1240,17 +1245,22 @@ fn mb_to_bytes(mb_per_s: f64) -> u64 {
 /// The set is small on purpose. Every format here is encoded by this crate, from
 /// the committed column list, with no dependency on any system under test — the
 /// same rule that makes the harness write its own Avro rather than borrow the
-/// framework's. And an encoder is not trusted because it was written carefully:
-/// the live-server proof in `harness/tests/native_encoder_matches_clickhouse.rs`
-/// — this crate's bytes POSTed at a real server and what lands held to
-/// [`corpus::run_gates`] — is what stands behind each format, and it **still
-/// gates commitment**: a ceiling measured through `JsonEachRow` or
-/// `ArrowStream`, the two newest, is not committed until that Docker-gated test
-/// has passed for them the way it has for Native. The encoders exist first so
-/// the next ceiling pass can measure the formats the two new benchmark arms will
-/// report; until a format's ceiling is committed, an arm declaring it is not
-/// gated against ClickHouse at all — the honest consequence stated in the module
-/// docs and enforced in [`Ceiling::headroom`].
+/// framework's. And an encoder is not trusted because it was written carefully;
+/// it is trusted because the chain that checks it is mechanical, twice. Every
+/// ceiling measurement re-proves its encoder against the live server **in the
+/// pass itself**: [`prove_format_lands_correctly`] POSTs a proof block and
+/// holds what lands to [`corpus::run_gates`] before any rung is timed, so a
+/// format whose bytes the oracle rejects cannot produce a committable figure —
+/// not by discipline, but because [`measure_ingest`] refuses before it
+/// measures. The Docker-gated
+/// `harness/tests/native_encoder_matches_clickhouse.rs` runs the same chain
+/// against a fresh pinned server and is the **pre-merge** proof — the reason a
+/// new `Format` variant may land in this enum at all — not the only time the
+/// proof runs. The encoders exist first so the next ceiling pass can measure
+/// the formats the two new benchmark arms will report; until a format's
+/// ceiling is committed, an arm declaring it is not gated against ClickHouse
+/// at all — the honest consequence stated in the module docs and enforced in
+/// [`Ceiling::headroom`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     /// ClickHouse's own columnar block format. What the headline
@@ -1587,11 +1597,14 @@ pub fn measure(
     }
 
     // Note what is NOT here any more: a truncation of the arms' own tables. The
-    // rig used to write into the very tables the arms are gated on, so it had to
-    // tidy up after itself or the next arm's correctness gate would fail against
-    // data the arm never produced. It now writes into a table of its own, whose
-    // lifetime is a [`CeilingTable`] value, so neither the tidying nor the
-    // failure mode it guarded against exists here.
+    // rig used to write its measured rows into the very tables the arms are
+    // gated on, so it had to tidy up after itself or the next arm's correctness
+    // gate would fail against data the arm never produced. The measurement now
+    // goes into a table of its own, whose lifetime is a [`CeilingTable`] value.
+    // The one write that still touches the arms' table — the pre-sweep proof
+    // block, which lands there because [`corpus::run_gates`] queries that table
+    // by construction — carries its own [`ProofRows`] guard for exactly the
+    // failure mode this comment used to have to explain.
 
     let b = &env.spec.infra.broker;
     let c = &env.spec.infra.clickhouse;
@@ -2005,6 +2018,19 @@ const INSERT_BLOCK_POOL: u64 = 8;
 /// Seconds one insert may take before the pass gives up on it.
 const INSERT_TIMEOUT_S: u64 = 120;
 
+/// Batches in the proof block every ingest measurement POSTs, and gates,
+/// before its sweep is allowed to start. See [`prove_format_lands_correctly`].
+///
+/// The same width the Docker-gated live test uses, for the same reason: it is
+/// chosen to cross the `LowCardinality` index-width boundary rather than for
+/// speed. `sensor` is `batch_id % 1024`, so 400 batches put more than 256
+/// distinct entries in the dictionary — where the indexes step from one byte
+/// to two — and [`corpus::run_gates`] excludes the boundary batches, leaving
+/// 398 gated and roughly 29,000 rows after the workload's filters. A narrower
+/// proof would exercise only the narrow branch and pass with the dangerous one
+/// broken.
+const PROOF_BATCHES: u64 = 400;
+
 /// The concurrency the ingest sweep's first rung runs at.
 ///
 /// Below the shape of any arm this ceiling gates — the Flink arm keeps two
@@ -2340,6 +2366,139 @@ impl Burst {
     }
 }
 
+/// Rows the pre-sweep proof leaves in the arms' own table, gone again for as
+/// long as this value says so.
+///
+/// The proof has to land in [`corpus::TABLE`] because that is the table
+/// [`corpus::run_gates`] queries — the oracle is shared with every published
+/// arm precisely by not being parameterised — and the arms' table is not this
+/// pass's to leave rows in. A `Drop` truncation rather than a call at the end
+/// of [`prove_format_lands_correctly`], because that function refuses on four
+/// paths and a refusal that left 29,000 proof rows behind would fail the next
+/// arm's correctness gate against data the arm never produced — the exact
+/// failure mode moving the measurement into [`CeilingTable`] closed.
+#[derive(Debug)]
+struct ProofRows<'a> {
+    ep: &'a Endpoints,
+}
+
+impl Drop for ProofRows<'_> {
+    fn drop(&mut self) {
+        // Best-effort by design, like `CeilingTable::remove`: this is
+        // housekeeping, and the pass has already succeeded or refused on the
+        // merits by the time it runs.
+        let _ = docker::try_clickhouse_sql(
+            &self.ep.ch_host,
+            self.ep.ch_port,
+            &self.ep.ch_user,
+            &self.ep.ch_password,
+            &format!("TRUNCATE TABLE IF EXISTS {}", corpus::TABLE),
+        );
+    }
+}
+
+/// Re-proves one format's encoder against the live target, on every
+/// measurement, before a single rung is timed.
+///
+/// One block of [`PROOF_BATCHES`] batches is POSTed into the arms' own table
+/// behind the same statement shape the sweep sends, and what lands is held to
+/// [`corpus::run_gates`] — the same closed-form oracle every published arm is
+/// gated on, covering row identity, both value sums, the string and tag
+/// fingerprints, the `DateTime64` scaling and the null pattern. A measurement
+/// whose bytes fail that oracle is refused here rather than recorded: the
+/// Docker-gated `harness/tests/native_encoder_matches_clickhouse.rs` proves
+/// each encoder before its format is merged, but a pre-merge proof cannot see
+/// the server this pass is actually measuring, and a ceiling whose rows the
+/// gates would reject is a rate for an insert no correct arm performs.
+///
+/// The proof goes through [`corpus::TABLE`] rather than the ceiling table
+/// because `run_gates` queries the former by construction. That table's
+/// deduplication window is live, unlike the ceiling table's, and it does not
+/// matter here: the block is POSTed once, so there is no repeat for the window
+/// to drop — which the landed-count check below would catch if it ever changed.
+///
+/// # Errors
+///
+/// If the truncation or the insert is refused, if fewer rows landed than were
+/// POSTed, or if the gates fail or find duplicates. Every one is a refusal of
+/// this format's measurement before it costs a window.
+fn prove_format_lands_correctly(ep: &Endpoints, format: Format) -> Result<(), String> {
+    // Constructed before the table is touched, so every failure path below
+    // unwinds through the truncation.
+    let _rows = ProofRows { ep };
+    let sql = |s: &str| {
+        docker::try_clickhouse_sql(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password, s)
+    };
+    let body = sql(&format!("TRUNCATE TABLE IF EXISTS {}", corpus::TABLE))
+        .map_err(|e| format!("truncate {} for the encoder proof: {e}", corpus::TABLE))?;
+    if body.contains("DB::Exception") {
+        return Err(format!(
+            "truncate {} for the encoder proof: {body}",
+            corpus::TABLE
+        ));
+    }
+
+    let block = encode_batches(format, 0, PROOF_BATCHES);
+    insert(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        &insert_sql(format),
+        &block.body,
+    )
+    .map_err(|e| {
+        format!(
+            "REFUSED: the target rejected this rig's {} proof block, so nothing this \
+             pass could measure for that format would describe an insert that works: {e}",
+            format.wire_format(),
+        )
+    })?;
+
+    let landed = landed_rows(ep, corpus::TABLE)
+        .ok_or_else(|| format!("counting the {} proof rows failed", format.wire_format()))?;
+    if landed != block.rows {
+        return Err(format!(
+            "REFUSED: the target accepted the {} proof block and landed {landed} of its \
+             {} rows. A block the server reads as a different number of rows than it \
+             holds is mis-encoded in a way the gates cannot even reach.",
+            format.wire_format(),
+            block.rows,
+        ));
+    }
+
+    let gates = corpus::run_gates(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        PROOF_BATCHES,
+    )
+    .map_err(|e| {
+        format!(
+            "the {} proof block could not be gated: {e}",
+            format.wire_format()
+        )
+    })?;
+    if let Some(why) = gates.failure() {
+        return Err(format!(
+            "REFUSED: the {} proof block landed rows the corpus gates reject — {why}. A \
+             ceiling measured through bytes the oracle refuses would be a rate for an \
+             insert no correct arm performs.",
+            format.wire_format(),
+        ));
+    }
+    if gates.duplicates != 0 {
+        return Err(format!(
+            "REFUSED: one {} proof block cannot legitimately duplicate a row, and the \
+             gates counted {} duplicates.",
+            format.wire_format(),
+            gates.duplicates,
+        ));
+    }
+    Ok(())
+}
+
 /// Measures how fast ClickHouse absorbs rows for one format, at the
 /// concurrency it absorbs them fastest at.
 ///
@@ -2377,16 +2536,27 @@ impl Burst {
 ///
 /// # Errors
 ///
-/// If the ceiling table cannot be created or settled, if ClickHouse refuses an
-/// insert at the first rung, if the rows a rung POSTed did not land, or if the
-/// sweep reaches its bound while still improving — the last of which is a
-/// refusal precisely because the alternative is publishing a floor as a ceiling.
+/// If the pre-sweep proof finds the encoder's landed rows failing the corpus
+/// gates, if the ceiling table cannot be created or settled, if ClickHouse
+/// refuses an insert at the first rung, if the rows a rung POSTed did not land,
+/// or if the sweep reaches its bound while still improving — the last of which
+/// is a refusal precisely because the alternative is publishing a floor as a
+/// ceiling.
 fn measure_ingest(
     ep: &Endpoints,
     opts: &PassOptions,
     format: Format,
     cap_cores: f64,
 ) -> Result<MeasuredIngest, String> {
+    // Before the pool is even encoded: a format whose bytes the gates refuse
+    // has no measurement worth the minutes a sweep costs.
+    prove_format_lands_correctly(ep, format)?;
+    eprintln!(
+        "  {}: encoder proven against the live target — one {PROOF_BATCHES}-batch block \
+         landed and passed the corpus gates",
+        format.wire_format(),
+    );
+
     let pool: Vec<Block> = (0..INSERT_BLOCK_POOL)
         .map(|k| encode_block(format, k * INSERT_BLOCK_BATCHES))
         .collect();
@@ -2790,12 +2960,12 @@ fn server_cost(
 /// is the positional wire contract for RowBinary, and it is also what tells a
 /// reader of the query log which insert a ceiling describes.
 ///
-/// The table is a parameter because the two callers legitimately differ. The
-/// ceiling pass inserts into its own table, whose deduplication window is off so
-/// that its rows land; the encoder's live test inserts into the arms' table,
-/// because what it proves is that the bytes this rig sends satisfy the same
-/// closed-form oracle an arm is gated on, and that has to be checked against the
-/// real target.
+/// The table is a parameter because the callers legitimately differ. The
+/// ceiling sweep inserts into its own table, whose deduplication window is off
+/// so that its rows land; the pre-sweep proof and the encoder's live test
+/// insert into the arms' table, because what each proves is that the bytes
+/// this rig sends satisfy the same closed-form oracle an arm is gated on, and
+/// [`corpus::run_gates`] asks that of the real target table.
 fn insert_sql_into(table: &str, format: Format) -> String {
     format!(
         "INSERT INTO {table} ({}) FORMAT {}",
@@ -2808,7 +2978,8 @@ fn insert_sql_into(table: &str, format: Format) -> String {
     )
 }
 
-/// The statement the encoder's live correctness test POSTs: the arms' own table.
+/// The statement the pre-sweep proof and the encoder's live correctness test
+/// POST: the arms' own table, which is the one [`corpus::run_gates`] queries.
 fn insert_sql(format: Format) -> String {
     insert_sql_into(corpus::TABLE, format)
 }
@@ -3735,35 +3906,47 @@ fn push_json_string(out: &mut String, s: &str) {
 /// thinking about shortening rules. ClickHouse accepts trailing zeros; a
 /// whole-second value serialises as `"1772000000.000"`, not `"1772000000"`.
 ///
+/// # Why a negative tick count is refused rather than serialised
+///
+/// Measured, not assumed, like the quoting above: the server does not reject
+/// the signed form loudly, it misparses it silently — which is worse. Against
+/// a fresh `clickhouse-server:26.3`, `CREATE TABLE t (ts DateTime64(3))` and
+/// an `INSERT … FORMAT JSONEachRow` of `{"ts":"-0.001"}`, the server ACCEPTS
+/// the row and lands `toUnixTimestamp64Milli(ts) = 1` — *plus* one
+/// millisecond, the sign dropped on the floor. An encoder that emitted the
+/// sign would therefore corrupt every pre-epoch value with no error anywhere
+/// to notice it. The corpus is never pre-epoch, so refusing loses nothing
+/// legitimate; the assert turns a measured silent-corruption path into a loud
+/// panic at the encoder, before a byte reaches the wire.
+///
 /// # Panics
 ///
-/// If `scale` is 0 or above 9. A zero scale would emit a trailing `.` with no
-/// digits — not a decimal the text parser reads — and nothing in ClickHouse
-/// goes finer than nanoseconds. The committed DDL uses 3 and 6.
+/// If `scale` is 0 or above 9 — a zero scale would emit a trailing `.` with no
+/// digits, not a decimal the text parser reads, and nothing in ClickHouse goes
+/// finer than nanoseconds (the committed DDL uses 3 and 6). And if `ticks` is
+/// negative, for the measured reason above.
 fn push_json_datetime64(out: &mut String, ticks: i64, scale: u8) {
     use std::fmt::Write as _;
     assert!(
         (1..=9).contains(&scale),
         "DateTime64 scale {scale} has no JSON epoch form this encoder emits"
     );
+    assert!(
+        ticks >= 0,
+        "a pre-epoch DateTime64 ({ticks} ticks at scale {scale}) is refused: \
+         clickhouse-server:26.3 accepts \"-0.001\" and lands +0.001 — the sign is \
+         silently dropped, not rejected — so emitting it would corrupt rather than \
+         fail loudly"
+    );
     let per_second = 10u64.pow(u32::from(scale));
-    // Decomposed over the magnitude so that a negative tick count — before the
-    // epoch, which this corpus never is but the encoder does not get to assume
-    // — reads as a negative decimal rather than as floor-division debris:
-    // -1 tick at scale 3 is "-0.001", not "-1.999".
-    let magnitude = ticks.unsigned_abs();
-    out.push('"');
-    if ticks < 0 {
-        out.push('-');
-    }
+    let ticks = ticks.unsigned_abs();
     let _ = write!(
         out,
-        "{}.{:0width$}",
-        magnitude / per_second,
-        magnitude % per_second,
+        "\"{}.{:0width$}\"",
+        ticks / per_second,
+        ticks % per_second,
         width = usize::from(scale)
     );
-    out.push('"');
 }
 
 impl Cell {
@@ -3833,7 +4016,22 @@ impl Cell {
 /// [`Cell::write_json`] and [`push_json_datetime64`], beside the code that
 /// takes them.
 fn encode_json_each_row_block(lo: u64, batches: u64) -> Block {
-    let declared = corpus::COLUMNS;
+    // Hoisted out of the row loop because the key fragments are properties of
+    // the *column list*: `,"name":` is byte-identical on every row, so pushing
+    // each name through the escaper per row would multiply twelve escape scans
+    // by every row of a thousand-batch block for no extra bytes of output.
+    // Built through `push_json_string` all the same, so a column name that one
+    // day needed escaping would take the same path the values do.
+    let keys: Vec<String> = corpus::COLUMNS
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| {
+            let mut key = String::from(if i > 0 { "," } else { "" });
+            push_json_string(&mut key, name);
+            key.push(':');
+            key
+        })
+        .collect();
     let mut body = String::new();
     let mut rows = 0u64;
     for batch_id in lo..lo + batches {
@@ -3844,18 +4042,14 @@ fn encode_json_each_row_block(lo: u64, batches: u64) -> Block {
             let row = row_of(batch_id, seq);
             assert_eq!(
                 row.len(),
-                declared.len(),
+                keys.len(),
                 "a row carries {} cells but the target declares {} columns",
                 row.len(),
-                declared.len()
+                keys.len()
             );
             body.push('{');
-            for (i, ((name, _), cell)) in declared.iter().zip(&row).enumerate() {
-                if i > 0 {
-                    body.push(',');
-                }
-                push_json_string(&mut body, name);
-                body.push(':');
+            for (key, cell) in keys.iter().zip(&row) {
+                body.push_str(key);
                 cell.write_json(&mut body);
             }
             body.push_str("}\n");
@@ -4090,17 +4284,18 @@ fn encode_batches(format: Format, lo: u64, batches: u64) -> Block {
     // Native and ArrowStream are columnar, and JSONEachRow is text; none of
     // the three shares anything with the row-oriented binary path below beyond
     // `row_of`, which all of them read so that none can drift from the DDL.
-    if format == Format::Native {
-        return encode_native_block(lo, batches);
-    }
-    if format == Format::JsonEachRow {
-        return encode_json_each_row_block(lo, batches);
-    }
-    if format == Format::ArrowStream {
-        return encode_arrow_stream_block(lo, batches);
-    }
+    // One exhaustive match rather than early-return guards, so that a future
+    // `Format` variant is a missing arm the compiler refuses — not a silent
+    // fall-through that encodes it as RowBinary bytes.
+    let with_header = match format {
+        Format::Native => return encode_native_block(lo, batches),
+        Format::JsonEachRow => return encode_json_each_row_block(lo, batches),
+        Format::ArrowStream => return encode_arrow_stream_block(lo, batches),
+        Format::RowBinary => false,
+        Format::RowBinaryWithNamesAndTypes => true,
+    };
     let mut body = Vec::new();
-    if format == Format::RowBinaryWithNamesAndTypes {
+    if with_header {
         let columns = corpus::COLUMNS;
         put_varint(&mut body, columns.len() as u64);
         for (name, _) in columns {
@@ -4911,12 +5106,18 @@ mod tests {
         out.clear();
         push_json_datetime64(&mut out, 1_772_000_000_000_000, 6);
         assert_eq!(out, "\"1772000000.000000\"");
+    }
 
-        // Before the epoch — unreachable from this corpus, and the sign must
-        // still read as a decimal rather than as floor-division debris.
-        out.clear();
+    /// Before the epoch there is no serialised form at all. The refusal is a
+    /// measured decision, not caution: 26.3 accepts `"-0.001"` and lands
+    /// `+0.001` — the sign silently dropped, the row kept — so an encoder
+    /// that emitted the sign would corrupt values the server never complains
+    /// about. See [`push_json_datetime64`] for the measurement.
+    #[test]
+    #[should_panic(expected = "pre-epoch")]
+    fn a_pre_epoch_datetime64_is_refused_rather_than_landed_with_its_sign_dropped() {
+        let mut out = String::new();
         push_json_datetime64(&mut out, -1, 3);
-        assert_eq!(out, "\"-0.001\"");
     }
 
     /// The escaper's contract: quotes, backslashes and control characters, and
@@ -5002,14 +5203,16 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), kept.len());
 
+        // A property of the column list rather than of any line, so derived
+        // once rather than rebuilt and re-sorted per row.
+        let mut sorted: Vec<&str> = corpus::COLUMNS.iter().map(|(n, _)| *n).collect();
+        sorted.sort_unstable();
+
         for (line, &(batch_id, seq)) in lines.iter().zip(&kept) {
             let v: serde_json::Value =
                 serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
             let obj = v.as_object().expect("a row is an object");
-            let declared: Vec<&str> = corpus::COLUMNS.iter().map(|(n, _)| *n).collect();
             let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-            let mut sorted = declared.clone();
-            sorted.sort_unstable();
             assert_eq!(keys, sorted, "serde_json sorts keys; the sets must match");
 
             assert_eq!(obj["batch_id"].as_u64(), Some(batch_id));
@@ -5210,7 +5413,10 @@ mod tests {
         assert_eq!(send_tss.value(0), corpus::send_ts_us_prefill(0));
 
         assert_eq!(event_seqs.value(1), 4);
-        assert!((qualities.value(1) - 0.28).abs() < f64::EPSILON);
+        // The Arrow wire carries the raw f64 bits, so the round trip is
+        // bit-exact and the comparison is too — the same reason the JSON twin
+        // compares exactly after shortest-round-trip printing.
+        assert_eq!(qualities.value(1), 0.28);
 
         assert_eq!(event_seqs.value(2), 5);
         let row2_tags = tags.value(2);

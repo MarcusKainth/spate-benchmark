@@ -71,7 +71,9 @@ struct Arm {
     /// The exact substrings this file must contain, derived from the oracle's
     /// value. More than one entry means "any of these spellings", because how a
     /// language spells a literal is not a fact about the workload. Empty means
-    /// this file carries no constants (it is listed for the oracle check only).
+    /// this file carries no constants (it is listed for the oracle check only);
+    /// [`every_row_in_this_table_checks_something`] is what stops that escape
+    /// from producing a row that checks nothing at all.
     drop_unit: fn(&str) -> Vec<String>,
     /// As `drop_unit`, for the quality floor.
     quality_floor: fn(f64) -> Vec<String>,
@@ -198,6 +200,35 @@ fn every_arm_restates_the_quality_floor_the_workload_specifies() {
         assert!(
             wanted.iter().any(|w| src.contains(w)),
             "the {} arm must restate the quality floor in {} as one of {wanted:?}",
+            arm.entrant,
+            arm.file
+        );
+    }
+}
+
+/// The rule that keeps the completeness rule honest: having a row is only
+/// evidence if the row does something. The empty-vec escape on the extractors
+/// is legitimate — `entrants/spate/src/main.rs` carries no constants and is
+/// listed for the oracle check alone — but it composes into a trap: a row with
+/// empty extractors AND `rust_oracle_check: false` satisfies
+/// [`every_active_arm_has_a_row_in_this_table`] while asserting nothing at
+/// all. So every row must exercise at least one of the three checks.
+#[test]
+fn every_row_in_this_table_checks_something() {
+    // The extractors are called with the real oracle values, exactly as the
+    // restatement tests call them, so "empty" here means empty for the specs
+    // that actually run — not for some probe input.
+    for arm in &ARMS {
+        let checks_a_constant = !(arm.drop_unit)(corpus::DROP_UNIT).is_empty()
+            || !(arm.quality_floor)(corpus::QUALITY_FLOOR).is_empty();
+        assert!(
+            checks_a_constant || arm.rust_oracle_check,
+            "the {} row for {} has empty drop_unit and quality_floor extractors \
+             and rust_oracle_check: false — it checks nothing. A row that checks \
+             nothing is worse than a missing row: a missing row fails \
+             every_active_arm_has_a_row_in_this_table, but this one passes it and \
+             reads as coverage. Give the row a constant to restate or an oracle \
+             edge to check, or delete it.",
             arm.entrant,
             arm.file
         );

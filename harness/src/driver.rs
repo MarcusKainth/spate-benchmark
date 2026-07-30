@@ -1296,6 +1296,157 @@ fn read_arm_sql(arm: &Arm<'_>, rel: &str) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("read arm SQL {}: {e}", path.display()))
 }
 
+/// Executes one file's worth of entrant-authored SQL, split by
+/// [`corpus::split_sql`], failing softly.
+///
+/// Built on [`crate::docker::try_clickhouse_sql`] and never on the asserting
+/// variant, and the distinction is who owns the statement. A bad statement in
+/// an arm's own `arm_sql`/`arm_teardown_sql` is a defect of that arm — it gets
+/// a `Failed` record like any other refusal, because the `Err` propagates to
+/// [`measure`] with the arm already identified. `docker::clickhouse_sql`
+/// asserts on `DB::Exception`, which is the right behaviour for the SQL the
+/// harness owns (the `TRUNCATE`, the workload DDL — those failing means the
+/// bench itself is broken) and the wrong one here: a panic over one entrant's
+/// typo takes a multi-hour sweep down with every other arm's remaining
+/// repetitions. `try_clickhouse_sql`'s own doc states the principle; this is
+/// its application to SQL the harness runs but did not write.
+fn apply_arm_sql(ep: &Endpoints, sql: &str, what: &str) -> Result<(), String> {
+    apply_arm_statements(ep, &corpus::split_sql(sql), what)
+}
+
+/// Executes already-split entrant-authored statements; see [`apply_arm_sql`].
+///
+/// Split out so [`ArmObjects`], which holds its teardown pre-split, runs its
+/// statements through exactly the same execution and error path as the create
+/// side does.
+fn apply_arm_statements(ep: &Endpoints, stmts: &[String], what: &str) -> Result<(), String> {
+    for stmt in stmts {
+        let body = crate::docker::try_clickhouse_sql(
+            &ep.ch_host,
+            ep.ch_port,
+            &ep.ch_user,
+            &ep.ch_password,
+            stmt,
+        )
+        .map_err(|e| format!("{what}: {stmt:?}: {e}"))?;
+        // The body is checked here rather than asserted on: a server that
+        // answers with an exception is reporting the entrant's statement bad,
+        // which is the arm's refusal to record, not the harness's panic.
+        if body.contains("DB::Exception") {
+            return Err(format!("{what}: {stmt:?}: {body}"));
+        }
+    }
+    Ok(())
+}
+
+/// The arm's own ClickHouse objects, guaranteed torn down when the repetition
+/// ends — on **every** path.
+///
+/// The sweep loop is interleaved (`for rep { for arm }`), so an object that
+/// outlives its repetition is live through every *other* arm's measured window
+/// until this arm's next turn — a declaring arm's materialized view would tax
+/// the shared target during its competitors' measurements, and would still be
+/// installed after the sweep exits. Tearing down only at the *start* of a
+/// repetition (the defensive pass in [`run_arm`]) cannot fix that: it cleans up
+/// for this arm, not for the arms measured in between.
+///
+/// Constructed in [`run_arm`] **before** [`ArmContainers`], so that when the
+/// function unwinds — `Err` or panic — drop order (reverse of declaration)
+/// tears the containers down first and the SQL objects after: nothing is still
+/// inserting through a view while the view is being dropped. The success path
+/// consumes the guard via [`ArmObjects::finish`] after all measurement,
+/// server-side attribution included, so the teardown's own cost can never land
+/// inside anything that was measured. The `Drop` impl is the backstop for the
+/// failure paths only.
+struct ArmObjects {
+    /// A clone rather than a borrow, so the `Drop` backstop owes nothing to
+    /// `run_arm`'s locals when it fires during an unwind.
+    ep: Endpoints,
+    /// The teardown statements, read and split at construction. The failure
+    /// paths must not depend on re-reading a file mid-unwind, and the split is
+    /// then done once, by the same splitter, for every path that runs them.
+    teardown: Vec<String>,
+    /// Armed until [`ArmObjects::finish`] has run; `Drop` is a no-op after.
+    armed: bool,
+}
+
+impl ArmObjects {
+    /// Builds the guard when — and only when — the arm declares teardown SQL.
+    ///
+    /// # Errors
+    ///
+    /// If the declared file cannot be read; the arm is identified by then, so
+    /// the refusal is recorded against it.
+    fn new(ep: &Endpoints, arm: &Arm<'_>) -> Result<Option<Self>, String> {
+        let Some(ch) = arm.entrant.spec.clickhouse.as_ref() else {
+            return Ok(None);
+        };
+        if ch.arm_teardown_sql.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            ep: ep.clone(),
+            teardown: corpus::split_sql(&read_arm_sql(arm, &ch.arm_teardown_sql)?),
+            armed: true,
+        }))
+    }
+
+    /// Runs the teardown on the success path and disarms the backstop.
+    ///
+    /// Explicit and consuming, rather than leaving everything to `Drop`,
+    /// because a teardown failure on the success path is a *finding* — the
+    /// arm's objects are still installed on the shared server — and a `Drop`
+    /// cannot propagate it. Here it becomes the arm's `Err` like any other.
+    ///
+    /// # Errors
+    ///
+    /// If a teardown statement cannot be executed or the server refuses it.
+    fn finish(mut self) -> Result<(), String> {
+        // Disarmed before running, not after: these statements are about to be
+        // attempted once, and a failure is being *reported*, so the backstop
+        // re-attempting the same failing statements on drop would only bury
+        // the propagated error under a second copy of itself.
+        self.armed = false;
+        apply_arm_statements(&self.ep, &self.teardown, "arm teardown DDL")
+    }
+}
+
+impl Drop for ArmObjects {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Best-effort by necessity: a Drop cannot propagate, and this path is
+        // already unwinding out of a failed or panicked repetition. Loud by
+        // choice: a teardown that failed here has left the arm's objects live
+        // on the shared server, where they will tax every subsequent arm's
+        // measurement — an operator must see that even though no record can
+        // carry it.
+        for stmt in &self.teardown {
+            let outcome = crate::docker::try_clickhouse_sql(
+                &self.ep.ch_host,
+                self.ep.ch_port,
+                &self.ep.ch_user,
+                &self.ep.ch_password,
+                stmt,
+            );
+            match outcome {
+                Ok(body) if body.contains("DB::Exception") => eprintln!(
+                    "ARM TEARDOWN FAILED (backstop; cannot propagate from Drop): {stmt:?}: \
+                     {body}\nThe arm's ClickHouse objects may still be live and will tax \
+                     every subsequent arm until removed."
+                ),
+                Err(e) => eprintln!(
+                    "ARM TEARDOWN FAILED (backstop; cannot propagate from Drop): {stmt:?}: \
+                     {e}\nThe arm's ClickHouse objects may still be live and will tax \
+                     every subsequent arm until removed."
+                ),
+                Ok(_) => {}
+            }
+        }
+    }
+}
+
 /// Runs one arm under the requested load and measures it.
 ///
 /// Every `Err` from here names something that happened to an identified arm, so
@@ -1322,30 +1473,35 @@ fn run_arm(
     expected_rows: u64,
     schema_id: u32,
 ) -> Result<Measurement, String> {
-    // The arm's own objects go first, and the order is teardown → TRUNCATE →
-    // create. Teardown before the truncate so a materialized view left from the
-    // previous repetition is never live while the table it targets is
-    // truncated; creation after it so the fresh objects observe an empty
-    // target. `arm_teardown_sql` is written to be idempotent (`DROP … IF
-    // EXISTS`), so the first repetition, which has nothing to drop, runs the
-    // same statements as every later one.
-    if let Some(ch) = arm.entrant.spec.clickhouse.as_ref()
-        && !ch.arm_teardown_sql.trim().is_empty()
-    {
-        for stmt in corpus::split_sql(&read_arm_sql(arm, &ch.arm_teardown_sql)?) {
-            crate::docker::clickhouse_sql(
-                &ep.ch_host,
-                ep.ch_port,
-                &ep.ch_user,
-                &ep.ch_password,
-                &stmt,
-            )
-            .map_err(|e| format!("arm teardown DDL failed: {e}"))?;
-        }
+    // The arm's own objects go first, and the lifecycle is: teardown
+    // (defensive) → TRUNCATE → create at the start, teardown again when the
+    // repetition ends — on every path, success, `Err` or panic. Teardown
+    // before the truncate so a materialized view left by a previous *process*
+    // (a killed driver, a crash before its backstop could run) is never live
+    // while the table it targets is truncated; creation after it so the fresh
+    // objects observe an empty target; and the end-of-repetition teardown —
+    // [`ArmObjects`] — so the objects exist only inside their own arm's
+    // repetition. That last leg is what makes the invariant sweep-wide: the
+    // loop is interleaved (`for rep { for arm }`), so without it a declaring
+    // arm's MV and landing table stayed live through every OTHER arm's
+    // measured window and after the sweep — "an MV is never live across its
+    // target's truncate" held only for this arm's own truncates, which is to
+    // say it did not hold. `arm_teardown_sql` is written to be idempotent
+    // (`DROP … IF EXISTS`), so the defensive pass, which usually has nothing
+    // to drop, runs the same statements as every other.
+    //
+    // The guard is constructed before `build_specs`/`ArmContainers`, so on an
+    // unwind drop order tears the containers down first and the SQL objects
+    // after: nothing is still inserting through a view while it is dropped.
+    let arm_objects = ArmObjects::new(ep, arm)?;
+    if let Some(objs) = &arm_objects {
+        apply_arm_statements(ep, &objs.teardown, "arm teardown DDL (defensive)")?;
     }
 
     // A clean table per repetition. Without this the gate would see the previous
-    // repetition's rows and the row delta would be meaningless.
+    // repetition's rows and the row delta would be meaningless. Harness-owned
+    // SQL, so it stays on the asserting variant: this statement failing means
+    // the bench is broken, not the arm.
     crate::docker::clickhouse_sql(
         &ep.ch_host,
         ep.ch_port,
@@ -1363,16 +1519,7 @@ fn run_arm(
     if let Some(ch) = arm.entrant.spec.clickhouse.as_ref()
         && !ch.arm_sql.trim().is_empty()
     {
-        for stmt in corpus::split_sql(&read_arm_sql(arm, &ch.arm_sql)?) {
-            crate::docker::clickhouse_sql(
-                &ep.ch_host,
-                ep.ch_port,
-                &ep.ch_user,
-                &ep.ch_password,
-                &stmt,
-            )
-            .map_err(|e| format!("arm DDL failed: {e}"))?;
-        }
+        apply_arm_sql(ep, &read_arm_sql(arm, &ch.arm_sql)?, "arm DDL")?;
     }
 
     let specs = build_specs(arm, ep, opts, image)?;
@@ -1785,6 +1932,14 @@ fn run_arm(
         cost.cores_used,
         cost.cpu_us_per_row(rows_f)
     );
+
+    // The repetition is over: every measurement, the server-side attribution
+    // and the gates included, has read what it needed. The arm's objects come
+    // down NOW, explicitly, so a failure is this arm's `Err` — the `Drop`
+    // backstop only covers the paths that cannot report one.
+    if let Some(objs) = arm_objects {
+        objs.finish()?;
+    }
 
     Ok(Measurement {
         cost,

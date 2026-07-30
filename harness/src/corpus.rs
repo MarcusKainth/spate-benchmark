@@ -671,19 +671,90 @@ pub fn ddl_statements() -> Vec<String> {
 /// rules — comments stripped before the `;` split, so a documented gate query in
 /// a trailing comment is prose rather than a statement fragment. Two splitters
 /// would eventually disagree about precisely that.
+///
+/// The split is a character state machine rather than a line-wise
+/// strip-then-split, and the quote-awareness is load-bearing for the
+/// entrant-authored half of the contract. The workload DDL is ours and can be
+/// written around a naive splitter; an arm's SQL is somebody else's, and
+/// ClickHouse SQL routinely puts both split tokens inside string literals —
+/// `splitByString('--', x)`, `WHERE unit != ';'`. A splitter that read those as
+/// a comment opener and a statement boundary would execute mangled fragments of
+/// a statement the entrant wrote correctly, and the failure would surface as a
+/// server exception naming SQL that appears in no committed file.
+///
+/// Inside a single-quoted string literal, `--` and `;` are content. Both of
+/// ClickHouse's escape forms are honoured — the doubled quote (`''`) and the
+/// backslash (`\'`) — because either one, misread as a closing quote, silently
+/// re-opens code where the entrant wrote data. Backtick- and double-quoted
+/// identifiers are treated as quoted regions under the same rules, since an
+/// identifier can legally contain either token too. Outside quotes, `--` starts
+/// a comment that runs to end of line and `;` splits. Comment-only lines
+/// disappear, statements are trimmed, and empty fragments are dropped — exactly
+/// the behaviour the committed workload DDL has always relied on.
 #[must_use]
 pub fn split_sql(sql: &str) -> Vec<String> {
-    let stripped: String = sql
-        .lines()
-        .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
-        .collect::<Vec<_>>()
-        .join("\n");
-    stripped
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect()
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    // The quote character currently open, if any. One slot is enough: quoted
+    // regions in SQL cannot nest, they only close on their own delimiter.
+    let mut quote: Option<char> = None;
+    let mut chars = sql.chars().peekable();
+
+    let mut flush = |buf: &mut String| {
+        let stmt = buf.trim();
+        if !stmt.is_empty() {
+            out.push(stmt.to_owned());
+        }
+        buf.clear();
+    };
+
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            buf.push(c);
+            if c == '\\' {
+                // Backslash escape: whatever follows is content, including a
+                // quote character that would otherwise close the region.
+                if let Some(&next) = chars.peek() {
+                    buf.push(next);
+                    chars.next();
+                }
+            } else if c == q {
+                if chars.peek() == Some(&q) {
+                    // The doubled-delimiter escape: two delimiters are one
+                    // literal delimiter, and the region stays open.
+                    buf.push(q);
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+        } else {
+            match c {
+                '\'' | '"' | '`' => {
+                    quote = Some(c);
+                    buf.push(c);
+                }
+                '-' if chars.peek() == Some(&'-') => {
+                    // A comment runs to end of line. The newline itself is
+                    // kept, so a statement continued on the next line keeps
+                    // the whitespace the comment replaced.
+                    for rest in chars.by_ref() {
+                        if rest == '\n' {
+                            buf.push('\n');
+                            break;
+                        }
+                    }
+                }
+                ';' => flush(&mut buf),
+                _ => buf.push(c),
+            }
+        }
+    }
+    // An unterminated quote reaches here still open; the text is passed
+    // through as-is and the server, not this splitter, reports the syntax
+    // error — inventing a closing quote would execute SQL nobody wrote.
+    flush(&mut buf);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1746,6 +1817,71 @@ mod tests {
         let stmts = split_sql("CREATE TABLE t (a UInt64) -- note; with a semicolon\n;");
         assert_eq!(stmts.len(), 1);
         assert_eq!(stmts[0], "CREATE TABLE t (a UInt64)");
+    }
+
+    /// A `;` inside a string literal is content, not a statement boundary.
+    /// Splitting on it would hand the server two fragments of one statement the
+    /// entrant wrote correctly.
+    #[test]
+    fn a_semicolon_inside_a_string_literal_does_not_split() {
+        let stmts = split_sql("SELECT 1 WHERE unit != ';';\nSELECT 2;");
+        assert_eq!(stmts.len(), 2, "{stmts:#?}");
+        assert_eq!(stmts[0], "SELECT 1 WHERE unit != ';'");
+        assert_eq!(stmts[1], "SELECT 2");
+    }
+
+    /// A `--` inside a string literal is content, not a comment opener. The
+    /// old line-wise strip read everything after it as prose and truncated the
+    /// statement mid-literal.
+    #[test]
+    fn a_comment_marker_inside_a_string_literal_is_content() {
+        let stmts = split_sql("SELECT splitByString('--', x) FROM t;");
+        assert_eq!(stmts.len(), 1, "{stmts:#?}");
+        assert_eq!(stmts[0], "SELECT splitByString('--', x) FROM t");
+    }
+
+    /// Both of ClickHouse's escape forms keep the literal open. Either one,
+    /// misread as a closing quote, re-opens code where the entrant wrote data —
+    /// and the very next `;` in the literal would then split the statement.
+    #[test]
+    fn escaped_quotes_keep_the_literal_open() {
+        let doubled = split_sql("SELECT 'it''s; not a boundary' AS a;SELECT 2;");
+        assert_eq!(doubled.len(), 2, "{doubled:#?}");
+        assert_eq!(doubled[0], "SELECT 'it''s; not a boundary' AS a");
+
+        let backslashed = split_sql("SELECT 'it\\'s; not a boundary' AS a;SELECT 2;");
+        assert_eq!(backslashed.len(), 2, "{backslashed:#?}");
+        assert_eq!(backslashed[0], "SELECT 'it\\'s; not a boundary' AS a");
+    }
+
+    /// Quoted identifiers get the same protection as string literals: a
+    /// backtick- or double-quoted name can legally contain both split tokens.
+    #[test]
+    fn quoted_identifiers_are_quoted_regions() {
+        let stmts = split_sql("SELECT `odd;--name`, \"other;--name\" FROM t;");
+        assert_eq!(stmts.len(), 1, "{stmts:#?}");
+        assert_eq!(stmts[0], "SELECT `odd;--name`, \"other;--name\" FROM t");
+    }
+
+    /// After a literal closes, `--` is a comment again. Quote-awareness must
+    /// not overshoot into treating the whole line as protected.
+    #[test]
+    fn a_comment_after_code_on_a_line_with_a_literal_is_still_stripped() {
+        let stmts = split_sql("SELECT 'a' -- trailing; note\nFROM t;");
+        assert_eq!(stmts.len(), 1, "{stmts:#?}");
+        assert_eq!(stmts[0], "SELECT 'a' \nFROM t");
+    }
+
+    /// The committed workload DDL must split exactly as it always has: one
+    /// non-empty statement. The state machine replaced a line-wise splitter,
+    /// and `dataset_version` hashes the DDL text — so a behavioural drift here
+    /// would change what the driver executes without changing the hash that
+    /// claims nothing changed.
+    #[test]
+    fn the_state_machine_splits_the_committed_ddl_unchanged() {
+        let stmts = ddl_statements();
+        assert!(!stmts.is_empty());
+        assert_eq!(stmts.len(), 1, "expected 1 statement, got {stmts:#?}");
     }
 
     /// Every column the DDL declares must appear in the positional column list,

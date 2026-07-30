@@ -184,6 +184,10 @@ fn a_jvm_containers_declared_gc_log_is_where_its_configuration_sends_it() {
             // spells its options differently (Flink's config.yaml, Connect's
             // Dockerfile KAFKA_OPTS) and a parser per runtime would be the
             // per-entrant harness knowledge this field exists to remove.
+            // `configuration_files` deliberately skips `entrant.toml`: the
+            // descriptor contains the declared string by definition, so
+            // including it would satisfy this check with the declaration
+            // itself and no drift could ever fail here.
             let mentioned = configuration_files(&e.dir)
                 .iter()
                 .any(|text| text.contains(gc_log));
@@ -205,11 +209,23 @@ fn a_jvm_containers_declared_gc_log_is_where_its_configuration_sends_it() {
 /// Every plausibly-configuration file directly under an entrant's directory,
 /// read as text. Flat rather than recursive: the files that aim a JVM's flags
 /// live at the top of the entrant, and a recursive walk would read source trees.
+///
+/// `entrant.toml` is excluded, and the exclusion is load-bearing: the declared
+/// `gc_log` path is a string in the descriptor, so a scan that includes the
+/// descriptor finds the declaration in itself and the containment check above
+/// passes vacuously — rename the path in `config.yaml` without touching the
+/// descriptor and nothing fails, which is precisely the drift the check exists
+/// to catch. The declaration cannot be its own corroboration; what the test
+/// needs is a file the *container actually reads* sending GC logging to the
+/// declared path.
 fn configuration_files(dir: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for entry in rd.filter_map(Result::ok) {
             let path = entry.path();
+            if path.file_name().is_some_and(|n| n == "entrant.toml") {
+                continue;
+            }
             if path.is_file()
                 && let Ok(text) = std::fs::read_to_string(&path)
             {

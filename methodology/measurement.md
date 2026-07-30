@@ -17,7 +17,7 @@ Everything published comes from outside the system under test:
 | Memory | cgroup v2 peak **anonymous** memory, plus `memory.peak` and (for JVM arms) configured vs used heap |
 | Latency | `ingest_ts - send_ts` computed in ClickHouse, where `ingest_ts` is a `MATERIALIZED now64(6)` column. Sustained mode only |
 | Server-side cost | ClickHouse's own `ProfileEvents` CPU-per-row, via `system.query_log` |
-| GC (JVM arms) | `-Xlog:gc*`, read out of the container with `docker cp` |
+| GC (JVM arms) | `-Xlog:gc*`, read with `docker cp` from the path the container's descriptor declares (`gc_log`) |
 
 Every row above is collected. Three caveats travel with them rather than with
 the table. **Latency exists only in sustained mode** — in drain the topic is
@@ -26,10 +26,12 @@ old the backlog was; a drain record carries no latency metric at all, and the
 harness makes that structural rather than conventional. **Server-side cost
 excludes background merges**, which live in `system.part_log` and are
 arm-dependent: 25,000-row batches make far more parts than 262,144-row ones, and
-that cost lands nowhere in this figure. **A GC number exists only for JVM arms**,
-and its absence is not a zero — a Rust arm has no collector, so a chart drawing a
-missing pause total as a zero-length bar would be asserting a measurement nobody
-made.
+that cost lands nowhere in this figure. **A GC number exists only for JVM arms**
+— and only for a container whose descriptor declares `gc_log`; a JVM container
+that declares none records no GC figures, an absence, not a zero. The absence is
+never a zero in the other direction either: a Rust arm has no collector, so a
+chart drawing a missing pause total as a zero-length bar would be asserting a
+measurement nobody made.
 
 One property of the latency figure is worth stating outright, because it is the
 usual reason a latency number is worthless. `send_ts` is the message's *intended

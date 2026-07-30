@@ -70,6 +70,14 @@ args   = ["taskmanager"]
 # Where config.yaml's env.java.opts.taskmanager sends -Xlog:gc*.
 gc_log = "/opt/flink/log/gc.log"
 
+# The disclosure the control-plane container above requires: a container
+# budgeted on top of the envelope must be declared as a deviation with
+# "envelope" in `affects`, and validation refuses the descriptor without it.
+[[deviations]]
+what    = "Runs as two containers: the 6 CPU / 24 GiB data plane, plus a JobManager control-plane container (1 CPU / 2 GiB) allocated on top of the envelope."
+why     = "Flink cannot run a standalone job without a JobManager. Its measured consumption (0.07–0.21 cores) is published beside the arm's totals rather than silently pre-charged against the data plane's budget."
+affects = ["envelope"]
+
 [guarantees]
 delivery    = "at-least-once"
 durability  = "checkpoint"
