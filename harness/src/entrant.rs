@@ -72,6 +72,13 @@ pub struct Spec {
     /// before it starts a container.
     #[serde(default, rename = "constraints")]
     pub constraints: Vec<Constraint>,
+    /// Rule 4: every deviation from the common shape, declared where the site
+    /// can render it.
+    #[serde(default, rename = "deviations")]
+    pub deviations: Vec<Deviation>,
+    /// Arm-specific ClickHouse objects and attribution facts.
+    #[serde(default)]
+    pub clickhouse: Option<ClickhouseSpec>,
     /// Why an entrant is not yet built.
     #[serde(default)]
     pub planned: Option<Planned>,
@@ -228,6 +235,15 @@ pub struct Container {
     /// Command arguments, for images that dispatch on argv.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Where this container's JVM writes its GC log, for `docker cp`.
+    ///
+    /// Descriptor knowledge, not harness knowledge: the path is set by the
+    /// entrant's own configuration (Flink's `env.java.opts.*`, Connect's
+    /// `KAFKA_OPTS`), so only the descriptor can state it truthfully. A JVM
+    /// container that declares none gets no `gc_*` metrics — an absence, never
+    /// another JVM's numbers and never a zero.
+    #[serde(default)]
+    pub gc_log: Option<String>,
 }
 
 /// Whether a container does the work or coordinates it.
@@ -419,6 +435,80 @@ pub fn knob_violations(
     out
 }
 
+/// One declared deviation from the common shape (rule 4).
+///
+/// `methodology/` and `CONTRIBUTING.md` have required this table since before
+/// it was parseable, and the site has typed and rendered it for as long
+/// (`website/src/components/Results/data.ts`) — the field names here are that
+/// type's, deliberately, so the descriptor and the page cannot disagree about
+/// what a deviation is made of. Until this struct existed, `deny_unknown_fields`
+/// turned any attempt to comply with rule 4 into a parse error, which is the
+/// exact inversion of what a disclosure rule is for.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Deviation {
+    /// What differs, stated as a fact about this arm.
+    pub what: String,
+    /// Why the difference exists — the part a reader weighs.
+    #[serde(default)]
+    pub why: String,
+    /// Which published quantities the difference touches, e.g. `envelope`,
+    /// `server-side-cpu`, `latency`. Free-form: the site prints them verbatim.
+    #[serde(default)]
+    pub affects: Vec<String>,
+}
+
+/// Arm-specific ClickHouse objects and how the arm's inserts reach the log.
+///
+/// Exists for the arms whose pipeline puts SQL objects on the shared server or
+/// changes how their inserts appear in `system.query_log`. The Kafka Connect
+/// arm lands nested batches in a landing table and flattens with a materialized
+/// view; the ClickHouse Kafka engine arm's inserts arrive as
+/// Distributed-forwarded queries. Neither fact belongs in the driver — the code
+/// that measures every system must not know any one system's shape — so the
+/// entrant states it and the driver applies it without knowing what it means,
+/// exactly as [`Constraint`] does for knobs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClickhouseSpec {
+    /// SQL applied to the shared server after the workload DDL, relative to the
+    /// entrant directory. Re-applied before every repetition, after
+    /// [`Self::arm_teardown_sql`] has removed the previous repetition's objects,
+    /// so no state survives from one repetition into the next.
+    ///
+    /// The workload's own `ddl.sql` is deliberately untouched by this
+    /// mechanism: `build.rs` hashes it into `dataset_version`, so arm objects
+    /// living there would re-key every published record over a change that
+    /// alters no other arm's bytes.
+    #[serde(default)]
+    pub arm_sql: String,
+    /// SQL that removes everything `arm_sql` creates, relative to the entrant
+    /// directory. Explicit rather than derived by parsing `arm_sql`, because a
+    /// DROP generated from a parse of somebody's CREATE is a guess with
+    /// privileges. Runs before every repetition's `TRUNCATE`, so a materialized
+    /// view is never live while the table it targets is truncated.
+    #[serde(default)]
+    pub arm_teardown_sql: String,
+    /// Extra **unqualified** table names whose inserts are attributed to this
+    /// arm in `system.query_log`, beside the workload's target table. The
+    /// landing table of an MV-flatten arm goes here: its parent insert is the
+    /// row that carries the view's cost.
+    #[serde(default)]
+    pub attribution_tables: Vec<String>,
+    /// Whether the arm's inserts arrive at the shared server as forwarded
+    /// distributed queries rather than as initial ones.
+    ///
+    /// The attribution query normally requires `is_initial_query` so that a
+    /// distributed sub-query is never counted beside the query that spawned it.
+    /// An arm that pushes through a `Distributed` table inverts the situation:
+    /// **every** insert it lands is `is_initial_query = 0`, and the unmodified
+    /// predicate would match nothing — which reads as an arm that never
+    /// inserted. Declaring the fact keeps the strict predicate for every arm
+    /// that does not need the exception.
+    #[serde(default)]
+    pub forwarded_inserts: bool,
+}
+
 /// Why an entrant is declared but not yet built.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -600,8 +690,71 @@ fn validate(e: &Entrant) -> Vec<String> {
     validate_envelope(e, &mut errs, &at);
     validate_variants(e, &mut errs, &at);
     validate_constraints(e, &mut errs, &at);
+    validate_deviations(e, &mut errs, &at);
+    validate_clickhouse(e, &mut errs, &at);
 
     errs
+}
+
+/// Checks that every declared deviation actually discloses something.
+///
+/// A deviation with an empty `what` satisfies rule 4's letter while telling a
+/// reader nothing, which is the same shape as an empty `unshipped` entry and is
+/// refused for the same reason.
+fn validate_deviations(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) -> String) {
+    for (i, d) in e.spec.deviations.iter().enumerate() {
+        if d.what.trim().is_empty() {
+            errs.push(at(format!(
+                "[[deviations]] entry {i} has an empty `what`; a deviation that does \
+                 not say what differs discloses nothing"
+            )));
+        }
+    }
+}
+
+/// Checks the arm's ClickHouse declaration for the shapes that fail at run time.
+///
+/// The pair rule is the load-bearing one. `arm_sql` without `arm_teardown_sql`
+/// leaves the previous repetition's materialized view live while the driver
+/// truncates its target, and the first symptom is a correctness gate failing on
+/// rows that survived a TRUNCATE — a defect diagnosed hours from its cause.
+fn validate_clickhouse(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) -> String) {
+    let Some(ch) = &e.spec.clickhouse else {
+        return;
+    };
+    match (ch.arm_sql.trim(), ch.arm_teardown_sql.trim()) {
+        ("", "") => {}
+        (sql, "") | ("", sql) => errs.push(at(format!(
+            "[clickhouse] declares {:?} without its pair. arm_sql and arm_teardown_sql \
+             travel together: creation without teardown leaks objects across \
+             repetitions, and teardown without creation drops objects nothing made.",
+            sql
+        ))),
+        (sql, teardown) => {
+            for rel in [sql, teardown] {
+                if !e.dir.join(rel).is_file() {
+                    errs.push(at(format!("[clickhouse] file {rel:?} not found")));
+                }
+            }
+        }
+    }
+    for t in &ch.attribution_tables {
+        if t.trim().is_empty() {
+            errs.push(at(
+                "[clickhouse].attribution_tables lists an empty name".to_owned()
+            ));
+        }
+        // Unqualified here, qualified at the query site, so the database is
+        // spelled in exactly one place (`driver::TARGET_DATABASE`) and cannot
+        // disagree with how `system.query_log` writes it.
+        if t.contains('.') {
+            errs.push(at(format!(
+                "[clickhouse].attribution_tables entry {t:?} is qualified; declare the \
+                 bare table name and let the driver qualify it the way \
+                 system.query_log does"
+            )));
+        }
+    }
 }
 
 /// Checks the declared constraints, and checks every committed variant against
@@ -931,6 +1084,8 @@ mod tests {
                 env: BTreeMap::new(),
                 variants,
                 constraints: Vec::new(),
+                deviations: Vec::new(),
+                clickhouse: None,
                 planned: None,
             },
         }
@@ -1125,6 +1280,65 @@ mod tests {
             errs.iter().any(|x| x.contains("does not say what breaks")),
             "{errs:?}"
         );
+    }
+
+    #[test]
+    fn a_deviation_that_does_not_say_what_differs_is_refused() {
+        // Rule 4 is a disclosure rule; an entry with an empty `what` complies
+        // with its letter while telling a reader nothing.
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.deviations = vec![Deviation {
+            what: "  ".to_owned(),
+            why: "reasons".to_owned(),
+            affects: vec!["envelope".to_owned()],
+        }];
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_deviations(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("empty `what`"), "{}", errs[0]);
+
+        e.spec.deviations[0].what = "the transform runs server-side".to_owned();
+        let mut errs = Vec::new();
+        validate_deviations(&e, &mut errs, &at);
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn arm_sql_and_its_teardown_travel_together() {
+        // Creation without teardown leaks a live materialized view into the
+        // next repetition's TRUNCATE; teardown without creation drops objects
+        // nothing made. Both are refused where they are written.
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.clickhouse = Some(ClickhouseSpec {
+            arm_sql: "clickhouse/arm.sql".to_owned(),
+            arm_teardown_sql: String::new(),
+            attribution_tables: Vec::new(),
+            forwarded_inserts: false,
+        });
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_clickhouse(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("without its pair"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn an_attribution_table_is_declared_unqualified() {
+        // The database is spelled in exactly one place, at the query site, so
+        // the declaration and system.query_log's spelling cannot drift apart.
+        let mut e = entrant_with(vec![variant("only", Approach::Realistic, &[])]);
+        e.spec.clickhouse = Some(ClickhouseSpec {
+            arm_sql: String::new(),
+            arm_teardown_sql: String::new(),
+            attribution_tables: vec!["default.sensor_batches_landing".to_owned()],
+            forwarded_inserts: true,
+        });
+        let mut errs = Vec::new();
+        let at = |m: String| format!("probe: {m}");
+        validate_clickhouse(&e, &mut errs, &at);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("is qualified"), "{}", errs[0]);
     }
 
     #[test]

@@ -1285,6 +1285,17 @@ fn measure(
     })
 }
 
+/// Reads one of an arm's committed SQL files, by the path its descriptor
+/// declares relative to the entrant directory.
+///
+/// A read failure is an `Err` naming the file rather than a panic, because it
+/// happens per repetition inside a sweep: the arm is identified by then, so the
+/// refusal is recorded against it like any other.
+fn read_arm_sql(arm: &Arm<'_>, rel: &str) -> Result<String, String> {
+    let path = arm.entrant.dir.join(rel);
+    std::fs::read_to_string(&path).map_err(|e| format!("read arm SQL {}: {e}", path.display()))
+}
+
 /// Runs one arm under the requested load and measures it.
 ///
 /// Every `Err` from here names something that happened to an identified arm, so
@@ -1311,6 +1322,28 @@ fn run_arm(
     expected_rows: u64,
     schema_id: u32,
 ) -> Result<Measurement, String> {
+    // The arm's own objects go first, and the order is teardown → TRUNCATE →
+    // create. Teardown before the truncate so a materialized view left from the
+    // previous repetition is never live while the table it targets is
+    // truncated; creation after it so the fresh objects observe an empty
+    // target. `arm_teardown_sql` is written to be idempotent (`DROP … IF
+    // EXISTS`), so the first repetition, which has nothing to drop, runs the
+    // same statements as every later one.
+    if let Some(ch) = arm.entrant.spec.clickhouse.as_ref()
+        && !ch.arm_teardown_sql.trim().is_empty()
+    {
+        for stmt in corpus::split_sql(&read_arm_sql(arm, &ch.arm_teardown_sql)?) {
+            crate::docker::clickhouse_sql(
+                &ep.ch_host,
+                ep.ch_port,
+                &ep.ch_user,
+                &ep.ch_password,
+                &stmt,
+            )
+            .map_err(|e| format!("arm teardown DDL failed: {e}"))?;
+        }
+    }
+
     // A clean table per repetition. Without this the gate would see the previous
     // repetition's rows and the row delta would be meaningless.
     crate::docker::clickhouse_sql(
@@ -1321,6 +1354,26 @@ fn run_arm(
         &format!("TRUNCATE TABLE {}", corpus::TABLE),
     )
     .map_err(|e| format!("truncate failed: {e}"))?;
+
+    // The arm's objects, recreated from the committed file every repetition so
+    // no state — not a stale view definition, not an implicitly kept setting —
+    // survives from one repetition into the next. The workload's own DDL is
+    // deliberately not touched here: it is applied once per run and hashed into
+    // `dataset_version`, and arm objects must never move that.
+    if let Some(ch) = arm.entrant.spec.clickhouse.as_ref()
+        && !ch.arm_sql.trim().is_empty()
+    {
+        for stmt in corpus::split_sql(&read_arm_sql(arm, &ch.arm_sql)?) {
+            crate::docker::clickhouse_sql(
+                &ep.ch_host,
+                ep.ch_port,
+                &ep.ch_user,
+                &ep.ch_password,
+                &stmt,
+            )
+            .map_err(|e| format!("arm DDL failed: {e}"))?;
+        }
+    }
 
     let specs = build_specs(arm, ep, opts, image)?;
     let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
@@ -1683,7 +1736,7 @@ fn run_arm(
     // gate, whose `uniqExact` scans charge CPU-seconds apiece to the same log —
     // they are excluded by `query_kind = 'Insert'`, but running the read first
     // keeps the figure independent of how strict the gate happens to be.
-    let server = measure_server_side(ep, &costs, &mut note);
+    let server = measure_server_side(ep, arm, &costs, &mut note);
 
     // Correctness gates. An arm that loses rows is faster for the wrong reason,
     // and one that computes different values did different work.
@@ -2108,19 +2161,34 @@ const TARGET_DATABASE: &str = "default";
 /// as "this arm cost the server nothing".
 fn measure_server_side(
     ep: &Endpoints,
+    arm: &Arm<'_>,
     costs: &[(String, sampler::Samples)],
     note: &mut String,
 ) -> Option<serverside::ServerSideCost> {
     let series: Vec<&sampler::Samples> = costs.iter().map(|(_, s)| s).collect();
-    let table = serverside::qualify(TARGET_DATABASE, corpus::TABLE);
+    // The workload's target first, then whatever the entrant declared — the
+    // MV-flatten arm's landing table rides here, so the parent insert that
+    // carries the view's cost is attributed even if a ClickHouse version stops
+    // naming the view's target in `tables`. Qualified in this one place, so the
+    // descriptor's bare names and the log's spelling cannot drift apart.
+    let mut tables = vec![serverside::qualify(TARGET_DATABASE, corpus::TABLE)];
+    let ch = arm.entrant.spec.clickhouse.as_ref();
+    if let Some(ch) = ch {
+        for t in &ch.attribution_tables {
+            tables.push(serverside::qualify(TARGET_DATABASE, t));
+        }
+    }
+    let table_refs: Vec<&str> = tables.iter().map(String::as_str).collect();
+    let forwarded = ch.is_some_and(|c| c.forwarded_inserts);
     let measured = serverside::Window::spanning(&series).and_then(|w| {
         serverside::measure(
             &ep.ch_host,
             ep.ch_port,
             &ep.ch_user,
             &ep.ch_password,
-            &[table.as_str()],
+            &table_refs,
             w,
+            forwarded,
         )
     });
     match measured {
@@ -2216,27 +2284,6 @@ fn server_metrics(cost: &serverside::ServerSideCost, rows: f64) -> Vec<(String, 
 /// The `[entrant].runtime` value that has a collector to measure.
 const JVM_RUNTIME: &str = "jvm";
 
-/// Where an arm's JVM writes its GC log, by the role of the container.
-///
-/// Harness knowledge about one entrant, and that is what makes it temporary: the
-/// paths belong to `entrants/flink/config.yaml`, which sets
-/// `env.java.opts.taskmanager` and `env.java.opts.jobmanager`, and the right home
-/// for them is a `gc_log` field on `[[envelope.container]]` so that a second JVM
-/// entrant is a descriptor change rather than another arm of this match. This
-/// change does not own the descriptor, so the mapping lives here and says so.
-///
-/// The one other JVM entrant, `kafka-connect`, is `planned` and writes its GC
-/// log somewhere else. When it is built, these paths will simply not exist in
-/// its containers and [`read_gc`] will print `JvmError::LogUnavailable` and
-/// attach no metrics — an absence rather than another JVM's numbers, which is
-/// the direction this has to fail in until the descriptor carries the path.
-fn gc_log_path(role: Role) -> &'static str {
-    match role {
-        Role::DataPlane => jvm::FLINK_TASKMANAGER_GC_LOG,
-        Role::ControlPlane => jvm::FLINK_JOBMANAGER_GC_LOG,
-    }
-}
-
 /// Reads every JVM container's GC log, immediately before the containers go.
 ///
 /// Nothing at all for a non-JVM arm, which is not an oversight: a Rust binary
@@ -2261,6 +2308,16 @@ fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)]) -> Gc {
         let Some((name, Some(cost))) = parts.iter().find(|(n, _)| n.ends_with(&c.name)) else {
             continue;
         };
+        // The path is the descriptor's, because only the entrant's own
+        // configuration knows where its JVM writes — Flink's `env.java.opts.*`
+        // and Connect's `KAFKA_OPTS` put it in different places, and a harness
+        // that guessed would either read nothing or read another JVM's file. A
+        // JVM container that declares no `gc_log` gets no `gc_*` metrics: an
+        // absence, stated on the terminal, never a zero.
+        let Some(gc_log) = c.gc_log.as_deref() else {
+            eprintln!("  no GC figures for {name}: its [[envelope.container]] declares no gc_log");
+            continue;
+        };
         // Bounded by that container's OWN window, so the GC figures cover the
         // interval every other number on its record is divided by. A GC log
         // covers the JVM's whole life and the copy is taken after the pipeline
@@ -2268,7 +2325,7 @@ fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)]) -> Gc {
         // charges the arm for its own start-up exactly as the sampler's window
         // does. The mapping is approximate and `GcSummary::from_uptime_s` says
         // what was actually covered.
-        match jvm::measure(name, gc_log_path(c.role), Some((0.0, cost.window_s))) {
+        match jvm::measure(name, gc_log, Some((0.0, cost.window_s))) {
             Ok(summary) => match c.role {
                 Role::DataPlane => gc.data_plane = Some(summary),
                 Role::ControlPlane => gc.control_plane = Some(summary),
@@ -3235,6 +3292,7 @@ mod tests {
             cpus: "4".to_owned(),
             memory: "16g".to_owned(),
             args: vec![],
+            gc_log: None,
         };
         let good = "# cgroup=/x cpu.max=400000/100000 memory.max=17179869184 x=1";
         assert!(assert_arm_caps("sut", &declared, good).is_ok());
@@ -3836,6 +3894,7 @@ mod tests {
             cpus: "4".to_owned(),
             memory: "1048576k".to_owned(),
             args: vec![],
+            gc_log: None,
         };
         let meta = "# cgroup=/x cpu.max=400000/100000 memory.max=1073741824 x=1";
         assert!(assert_arm_caps("sut", &declared, meta).is_ok());
@@ -4027,24 +4086,6 @@ mod tests {
             "{keys:?}"
         );
         assert!(!keys.iter().any(|k| k.contains("live_peak")), "{keys:?}");
-    }
-
-    /// The path-by-role mapping. Harness knowledge about one entrant, pinned
-    /// here so that moving it onto `[[envelope.container]]` — where it belongs —
-    /// is a change somebody makes deliberately rather than one that silently
-    /// starts reading a JobManager's log for a TaskManager's pauses.
-    #[test]
-    fn each_container_role_reads_its_own_gc_log() {
-        assert_eq!(gc_log_path(Role::DataPlane), jvm::FLINK_TASKMANAGER_GC_LOG);
-        assert_eq!(
-            gc_log_path(Role::ControlPlane),
-            jvm::FLINK_JOBMANAGER_GC_LOG
-        );
-        assert_ne!(
-            gc_log_path(Role::DataPlane),
-            gc_log_path(Role::ControlPlane),
-            "the two JVMs write separate logs, or one arm's pauses are the other's"
-        );
     }
 
     /// An arm's footprint is what it held at one instant, not the sum of the

@@ -663,7 +663,16 @@ pub fn ddl_statements() -> Vec<String> {
     split_sql(DDL)
 }
 
-fn split_sql(sql: &str) -> Vec<String> {
+/// Split any committed SQL file into executable statements, the way
+/// [`ddl_statements`] splits the workload DDL.
+///
+/// Public because an entrant's own `arm_sql`/`arm_teardown_sql` (the
+/// `[clickhouse]` descriptor hook) is applied by the driver with exactly these
+/// rules — comments stripped before the `;` split, so a documented gate query in
+/// a trailing comment is prose rather than a statement fragment. Two splitters
+/// would eventually disagree about precisely that.
+#[must_use]
+pub fn split_sql(sql: &str) -> Vec<String> {
     let stripped: String = sql
         .lines()
         .map(|line| line.split_once("--").map_or(line, |(code, _)| code))

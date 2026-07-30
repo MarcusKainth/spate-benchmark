@@ -56,6 +56,10 @@ name   = "jm"
 cpus   = "1"
 memory = "2g"
 args   = ["standalone-job"]
+# Where config.yaml's env.java.opts.jobmanager sends -Xlog:gc*. The harness
+# reads GC figures from the path declared here; a container that declared none
+# would simply record no gc_* metrics.
+gc_log = "/opt/flink/log/gc-jm.log"
 
 [[envelope.container]]
 role   = "data-plane"
@@ -63,6 +67,8 @@ name   = "tm"
 cpus   = "6"
 memory = "24g"
 args   = ["taskmanager"]
+# Where config.yaml's env.java.opts.taskmanager sends -Xlog:gc*.
+gc_log = "/opt/flink/log/gc.log"
 
 [guarantees]
 delivery    = "at-least-once"

@@ -109,16 +109,6 @@ use std::fmt;
 
 use crate::docker::docker_try;
 
-/// Where `entrants/flink/config.yaml` sends the TaskManager's GC log.
-///
-/// A constant here rather than a literal at the call site because the value is
-/// owned by a file this module cannot see: if the arm's `env.java.opts.taskmanager`
-/// changes, this is the one place that has to change with it.
-pub const FLINK_TASKMANAGER_GC_LOG: &str = "/opt/flink/log/gc.log";
-
-/// Where `entrants/flink/config.yaml` sends the JobManager's GC log.
-pub const FLINK_JOBMANAGER_GC_LOG: &str = "/opt/flink/log/gc-jm.log";
-
 /// The unified-logging levels, used to tell a level decoration from a tag one.
 const LEVELS: [&str; 6] = ["off", "trace", "debug", "info", "warning", "error"];
 

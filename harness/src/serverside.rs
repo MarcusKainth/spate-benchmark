@@ -699,8 +699,17 @@ pub const FLUSH_LOGS_SQL: &str = "SYSTEM FLUSH LOGS";
 /// every month the server has been up. The day of slack is because `event_date`
 /// is derived in the server's timezone while the bounds are epoch milliseconds,
 /// and being generous costs one partition where being exact could cost a row.
+/// `forwarded_inserts` widens the fourth predicate for the one arm shape that
+/// needs it. An arm pushing through a `Distributed` table lands **every** insert
+/// on the shared server with `is_initial_query = 0` — the initial query ran on
+/// the arm's own node, whose log this module never reads — so the strict
+/// predicate would match nothing at all, and nothing looks exactly like an arm
+/// that never inserted. The exception is declared per-entrant
+/// (`[clickhouse].forwarded_inserts`) rather than defaulted, so every arm that
+/// does not need it keeps the predicate that stops a distributed sub-query
+/// being counted beside the query that spawned it.
 #[must_use]
-pub fn attribution_sql(tables: &[&str], window: Window) -> String {
+pub fn attribution_sql(tables: &[&str], window: Window, forwarded_inserts: bool) -> String {
     let counters = COUNTERS
         .iter()
         .map(|c| format!("'{c}'"))
@@ -711,6 +720,11 @@ pub fn attribution_sql(tables: &[&str], window: Window) -> String {
         .map(|t| format!("'{t}'"))
         .collect::<Vec<_>>()
         .join(", ");
+    let initial = if forwarded_inserts {
+        ""
+    } else {
+        "AND is_initial_query "
+    };
     format!(
         "SELECT type, written_rows, query_duration_ms, \
          mapFilter((k, v) -> k IN ({counters}), ProfileEvents) \
@@ -720,7 +734,7 @@ pub fn attribution_sql(tables: &[&str], window: Window) -> String {
            AND query_start_time_microseconds >= fromUnixTimestamp64Milli({from}) \
            AND query_start_time_microseconds < fromUnixTimestamp64Milli({to}) \
            AND query_kind = 'Insert' \
-           AND is_initial_query \
+           {initial}\
            AND hasAny(tables, [{names}]) \
          ORDER BY event_time_microseconds \
          FORMAT TSV",
@@ -978,9 +992,10 @@ pub fn measure(
     password: &str,
     tables: &[&str],
     window: Window,
+    forwarded_inserts: bool,
 ) -> Result<ServerSideCost, ServerSideError> {
     flush_logs(host, port, user, password)?;
-    let sql = attribution_sql(tables, window);
+    let sql = attribution_sql(tables, window, forwarded_inserts);
     let body = try_clickhouse_sql(host, port, user, password, &sql)
         .map_err(|e| ServerSideError::Transport(e.to_string()))?;
     let rows = parse_response(&body)?;
@@ -1233,7 +1248,7 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
     /// artefact a reader can audit without a live server.
     #[test]
     fn the_attribution_query_excludes_the_harnesss_own_queries() {
-        let sql = attribution_sql(&["default.sensor_events"], window());
+        let sql = attribution_sql(&["default.sensor_events"], window(), false);
         assert!(sql.contains("query_kind = 'Insert'"), "{sql}");
         assert!(
             sql.contains("hasAny(tables, ['default.sensor_events'])"),
@@ -1260,11 +1275,38 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
             assert!(sql.contains(c), "{c} is missing from the projection");
         }
         // Both tables of a multi-table arm.
-        let two = attribution_sql(&["default.landing", "default.sensor_events"], window());
+        let two = attribution_sql(
+            &["default.landing", "default.sensor_events"],
+            window(),
+            false,
+        );
         assert!(
             two.contains("hasAny(tables, ['default.landing', 'default.sensor_events'])"),
             "{two}"
         );
+    }
+
+    /// The one arm shape that inverts `is_initial_query`: a Distributed-forwarded
+    /// insert executes on the shared server as a non-initial query — the initial
+    /// one ran on the arm's own node, whose log this module never reads — so the
+    /// strict predicate would attribute nothing and the refusal would read as an
+    /// arm that never inserted.
+    #[test]
+    fn a_forwarded_inserts_arm_drops_only_the_initial_query_predicate() {
+        let strict = attribution_sql(&["default.sensor_events"], window(), false);
+        let forwarded = attribution_sql(&["default.sensor_events"], window(), true);
+        assert!(!forwarded.contains("is_initial_query"), "{forwarded}");
+        // Every other predicate survives: the widening is one predicate wide,
+        // never a different query.
+        for kept in [
+            "query_kind = 'Insert'",
+            "hasAny(tables, ['default.sensor_events'])",
+            "query_start_time_microseconds >=",
+            "event_date >=",
+        ] {
+            assert!(forwarded.contains(kept), "{kept} missing: {forwarded}");
+            assert!(strict.contains(kept), "{kept} missing: {strict}");
+        }
     }
 
     /// The window is the sampler's, so that the server-side figure and the arm's

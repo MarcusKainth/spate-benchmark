@@ -31,17 +31,91 @@
 //! that they agree is exactly the state the defect produced. A behavioural test
 //! would have passed on the broken code. So the edge is checked directly, in the
 //! only place it exists — the arm's own source.
+//!
+//! # One table, every arm
+//!
+//! The checks are driven by [`ARMS`] rather than written out per entrant,
+//! because the failure mode of the per-entrant shape was demonstrated by this
+//! very file: it named spate and flink literally, so a third arm's transform
+//! would simply have gone unchecked until somebody remembered this test existed.
+//! An arm is added by adding a row, and
+//! [`every_active_arm_has_a_row_in_this_table`] is what makes forgetting the row
+//! loud.
+//!
+//! Config-only arms are rows too. A VRL program, a materialized view's SQL and
+//! a Java class restate the constants in different spellings, so each row states
+//! the exact substrings its artifact must contain — derived from the oracle's
+//! value, never written as a second literal here.
 
 use std::path::{Path, PathBuf};
 
-/// The transform each arm must own. Not `SensorBatch`, which is the Avro wire
-/// contract every arm reads off the same registry, and not the test-only
-/// fixtures: a test comparing an arm against the oracle is the point.
+use spate_benchmark_harness::{corpus, entrant};
+
+/// The oracle items no Rust arm may import. Not `SensorBatch`, which is the
+/// Avro wire contract every arm reads off the same registry, and not the
+/// test-only fixtures: a test comparing an arm against the oracle is the point.
 const TRANSFORM: [&str; 4] = [
     "ascii_upper",
     "value_scaled_of",
     "DROP_UNIT",
     "QUALITY_FLOOR",
+];
+
+/// One transform artifact and how it must restate the workload's constants.
+struct Arm {
+    /// The entrant the artifact belongs to. Every active entrant must appear on
+    /// at least one row.
+    entrant: &'static str,
+    /// Repo-relative file holding (part of) the transform.
+    file: &'static str,
+    /// The exact substrings this file must contain, derived from the oracle's
+    /// value. More than one entry means "any of these spellings", because how a
+    /// language spells a literal is not a fact about the workload. Empty means
+    /// this file carries no constants (it is listed for the oracle check only).
+    drop_unit: fn(&str) -> Vec<String>,
+    /// As `drop_unit`, for the quality floor.
+    quality_floor: fn(f64) -> Vec<String>,
+    /// Whether the file is Rust that could reach the oracle through `use`.
+    /// Only a Rust arm links against the harness crate; a Java, SQL or VRL
+    /// artifact has no import edge to check.
+    rust_oracle_check: bool,
+}
+
+/// Every arm's transform artifacts. A new arm adds its row(s) here in the PR
+/// that activates it; [`every_active_arm_has_a_row_in_this_table`] is what makes
+/// omitting them a failure rather than a gap.
+const ARMS: [Arm; 3] = [
+    Arm {
+        entrant: "spate",
+        file: "entrants/spate/src/rows.rs",
+        drop_unit: |spec| vec![format!("const DROP_UNIT: &str = {spec:?};")],
+        quality_floor: |spec| vec![format!("const QUALITY_FLOOR: f64 = {spec};")],
+        rust_oracle_check: true,
+    },
+    Arm {
+        // The pipeline entry point must not import the oracle either; the
+        // constants themselves live in rows.rs.
+        entrant: "spate",
+        file: "entrants/spate/src/main.rs",
+        drop_unit: |_| Vec::new(),
+        quality_floor: |_| Vec::new(),
+        rust_oracle_check: true,
+    },
+    Arm {
+        entrant: "flink",
+        file: "entrants/flink/src/main/java/dev/kainth/spatebench/flink/Rows.java",
+        drop_unit: |spec| vec![format!("DROP_UNIT = {spec:?}")],
+        // Java spells the same value `0.2d`. Accepted in either spelling rather
+        // than pinned to one, because which suffix a Java author writes is not
+        // a fact about the workload.
+        quality_floor: |spec| {
+            vec![
+                format!("QUALITY_FLOOR = {spec}d"),
+                format!("QUALITY_FLOOR = {spec};"),
+            ]
+        },
+        rust_oracle_check: false,
+    },
 ];
 
 fn repo_root() -> PathBuf {
@@ -64,9 +138,9 @@ fn production_source(src: &str) -> &str {
 }
 
 #[test]
-fn the_spate_arm_does_not_import_its_transform_from_the_oracle() {
-    for file in ["entrants/spate/src/rows.rs", "entrants/spate/src/main.rs"] {
-        let src = read(file);
+fn no_rust_arm_imports_its_transform_from_the_oracle() {
+    for arm in ARMS.iter().filter(|a| a.rust_oracle_check) {
+        let src = read(arm.file);
         let production = production_source(&src);
         for item in TRANSFORM {
             // Matched against the import, not against any mention: the arm names
@@ -75,11 +149,12 @@ fn the_spate_arm_does_not_import_its_transform_from_the_oracle() {
             for line in production.lines().filter(|l| l.contains("use ")) {
                 assert!(
                     !(line.contains("corpus") && line.contains(item)),
-                    "{file} imports {item} from the oracle:\n  {}\n\nThe module that \
+                    "{} imports {item} from the oracle:\n  {}\n\nThe module that \
                      computes the gate's expectations must not also supply an arm's \
                      transform: an arm that cannot disagree with the marking scheme is \
                      not being marked. Implement it in the arm, as the Flink arm does, \
                      and let this test hold the constants to the workload.",
+                    arm.file,
                     line.trim()
                 );
             }
@@ -93,39 +168,59 @@ fn every_arm_restates_the_drop_unit_the_workload_specifies() {
     // `build.rs` hashes into `dataset_version`. Restating it in each arm is what
     // makes a change to the specification fail loudly in every arm at once,
     // instead of flowing silently into whichever one imported it.
-    let spec = spate_benchmark_harness::corpus::DROP_UNIT;
-
-    let spate = read("entrants/spate/src/rows.rs");
-    assert!(
-        spate.contains(&format!("const DROP_UNIT: &str = {spec:?};")),
-        "the Spate arm must restate DROP_UNIT as {spec:?}; the workload specifies it \
-         and `build.rs` derives the constant this test compares against"
-    );
-
-    let flink = read("entrants/flink/src/main/java/dev/kainth/spatebench/flink/Rows.java");
-    assert!(
-        flink.contains(&format!("DROP_UNIT = {spec:?}")),
-        "the Flink arm must restate DROP_UNIT as {spec:?}"
-    );
+    let spec = corpus::DROP_UNIT;
+    for arm in &ARMS {
+        let wanted = (arm.drop_unit)(spec);
+        if wanted.is_empty() {
+            continue;
+        }
+        let src = read(arm.file);
+        assert!(
+            wanted.iter().any(|w| src.contains(w)),
+            "the {} arm must restate the drop unit in {} as one of {wanted:?}; the \
+             workload specifies it and `build.rs` derives the constant this test \
+             compares against",
+            arm.entrant,
+            arm.file
+        );
+    }
 }
 
 #[test]
 fn every_arm_restates_the_quality_floor_the_workload_specifies() {
-    let spec = spate_benchmark_harness::corpus::QUALITY_FLOOR;
+    let spec = corpus::QUALITY_FLOOR;
+    for arm in &ARMS {
+        let wanted = (arm.quality_floor)(spec);
+        if wanted.is_empty() {
+            continue;
+        }
+        let src = read(arm.file);
+        assert!(
+            wanted.iter().any(|w| src.contains(w)),
+            "the {} arm must restate the quality floor in {} as one of {wanted:?}",
+            arm.entrant,
+            arm.file
+        );
+    }
+}
 
-    let spate = read("entrants/spate/src/rows.rs");
-    assert!(
-        spate.contains(&format!("const QUALITY_FLOOR: f64 = {spec};")),
-        "the Spate arm must restate QUALITY_FLOOR as {spec}"
-    );
-
-    // Java spells the same value `0.2d`. Accepted in either spelling rather than
-    // pinned to one, because which suffix a Java author writes is not a fact
-    // about the workload.
-    let flink = read("entrants/flink/src/main/java/dev/kainth/spatebench/flink/Rows.java");
-    assert!(
-        flink.contains(&format!("QUALITY_FLOOR = {spec}d"))
-            || flink.contains(&format!("QUALITY_FLOOR = {spec};")),
-        "the Flink arm must restate QUALITY_FLOOR as {spec}"
-    );
+/// The rule that makes the table complete: an arm cannot become `active`
+/// without a row here, so a new system's transform is checked from its first
+/// green build rather than from whenever somebody remembers this file.
+#[test]
+fn every_active_arm_has_a_row_in_this_table() {
+    let entrants = entrant::load_all(&repo_root().join("entrants")).expect("descriptors are valid");
+    for e in entrants {
+        if e.spec.entrant.status != entrant::Status::Active {
+            continue;
+        }
+        assert!(
+            ARMS.iter().any(|a| a.entrant == e.id()),
+            "{} is active but has no row in ARMS: its transform restatement is \
+             unchecked. Add a row naming the file that restates DROP_UNIT and \
+             QUALITY_FLOOR (a VRL program and a materialized view's SQL are rows \
+             too), in the same PR that activates the arm.",
+            e.id()
+        );
+    }
 }
