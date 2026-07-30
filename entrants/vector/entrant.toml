@@ -5,39 +5,144 @@ id       = "vector"
 name     = "Vector"
 homepage = "https://vector.dev"
 repo     = "https://github.com/vectordotdev/vector"
+docs     = "https://vector.dev/docs/"
 licence  = "MPL-2.0"
 vendor   = "datadog"
 kind     = "observability-pipeline"
 language = ["rust"]
 runtime  = "native"
-# `planned` relaxes validation: no Dockerfile, no envelope, no variants required.
-# It exists so the site can show what is not yet measured as a FILE rather than a
-# promise in prose — a roadmap that CI checks and that cannot quietly rot.
-status   = "planned"
+status   = "active"
 
 [maintainer]
 who = "spate-benchmark"
+# Rule 7. Not yet sent upstream; the site shows this honestly rather than
+# implying a review that has not happened.
 reviewed_upstream = false
+review_url        = ""
 
 [display]
 order = 30
 hue   = 150
 short = "Vector"
 
-[planned]
-blockers = """
-Two things must be settled before a Vector number is defensible.
+[version]
+# Resolved by running the built image. `vector --version` prints
+# `vector 0.57.0 (aarch64-unknown-linux-gnu ...)`; the second field is the
+# version. `pinned` is asserted against what is resolved, so a base-image bump
+# refuses the run rather than publishing a mislabelled number.
+strategy = "command"
+command  = ["sh", "-c", "vector --version | cut -d' ' -f2"]
+pinned   = "0.57.0"
 
-Its `clickhouse` sink writes JSONEachRow; `arrow_stream` is the faster option and
-is what a competent user would pick, so the arm must use it and the page must
-report the format either way — JSONEachRow against RowBinary is not like-for-like
-server-side work, and a results table that hides that is indefensible.
+[build]
+# The repository root, uniformly for every entrant: the build needs
+# `entrants/vector/` and `workload/schema/` — the committed .avsc is baked into
+# the config at image build so the inline schema cannot drift from THE schema.
+context    = "../.."
+dockerfile = "Dockerfile"
+image      = "spate-bench-vector"
 
-Vector has no Schema Registry integration: it takes a static inline schema with
-`decoding.avro.strip_schema_id_prefix`. It therefore never pays a registry
-lookup. That is negligible at steady state, since every arm caches, but it is a
-difference in what is being executed and must be disclosed rather than absorbed.
+# One container, the full envelope, no control plane. Vector is a single native
+# process; the eight Kafka consumers (one per partition) share it. No `gc_log`:
+# not a JVM, so there is no GC log to collect and the record carries an absence
+# rather than a zero.
+[envelope]
+cpus   = "6"
+memory = "24g"
 
-Vector is Rust with the same no-GC story as Spate and may well beat us. That is a
-reason to run it, not a reason to defer it.
+[[envelope.container]]
+role   = "data-plane"
+name   = "sut"
+cpus   = "6"
+memory = "24g"
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "offset-commit"
+# The kafka source's `commit_interval_ms`, matched to the 5 s convention every
+# arm pays (Spate commits every 5 s; Flink checkpoints every 5 s). It is also
+# Vector's shipped default, but it is set explicitly in the config so the
+# cadence is a statement rather than an inheritance.
+interval_ms = 5000
+
+# Vector's own vocabulary. Sending another arm's variable names would leave
+# Vector on its defaults while the record claimed knob values that were never
+# applied. No REGISTRY_URL: Vector has no Schema Registry integration — that is
+# deviation 1 below, not an oversight here.
+[env]
+BOOTSTRAP                = "{{broker_internal}}"
+CLICKHOUSE_URL           = "{{clickhouse_internal}}"
+TOPIC                    = "{{topic}}"
+GROUP_ID                 = "{{group_id}}"
+AUTO_OFFSET_RESET        = "{{offset_reset}}"
+VECTOR_THREADS           = "{{knob:threads}}"
+SINK_BATCH_EVENTS        = "{{knob:batch_events}}"
+SINK_BATCH_TIMEOUT_SECS  = "{{knob:batch_timeout_secs}}"
+SINK_REQUEST_CONCURRENCY = "{{knob:request_concurrency}}"
+SINK_BUFFER_EVENTS       = "{{knob:buffer_events}}"
+SINK_COMPRESSION         = "{{knob:compression}}"
+
+# Declared here so a sweep is refused before any container starts, exactly as
+# Flink's buffered_rows/max_rows rule is.
+[[constraints]]
+knob    = "buffer_events"
+exceeds = "batch_events"
+why     = """
+The sink's memory buffer feeds the batcher, so a buffer smaller than one batch
+means every batch seals early on buffer starvation and the declared batch_events
+never takes effect — the record would misdescribe the arm. Raise buffer_events
+with batch_events.
 """
+
+# Rule 4. Machine-readable, so the site renders these from the same source the
+# driver reads and prose cannot drift from behaviour.
+
+[[deviations]]
+what = """
+Static inline Avro schema with `strip_schema_id_prefix`; the Schema Registry is
+never contacted. The 5-byte Confluent frame is stripped without validating the
+schema id, no registry lookup is ever paid, and the arm cannot detect a
+writer-schema change mid-run.
+"""
+why = """
+Vector has no Schema Registry integration. The baked schema is manufactured at
+image build from the committed workload/schema/sensor_batch.avsc, so it cannot
+drift from the schema every other arm fetches.
+"""
+affects = ["decode-path"]
+
+[[deviations]]
+what = """
+The default variant's wire format, ArrowStream, is marked beta in Vector 0.57's
+documentation.
+"""
+why = """
+It is shipped, documented, and selected by one config line, so rule 1 permits it
+and rule 2 requires considering it; the json-each-row realistic variant is
+published as the GA control.
+"""
+affects = ["wire-format"]
+
+# One axis: the wire format, mirroring Spate's native/rowbinary pair. Both are
+# published because ArrowStream and JSONEachRow are not the same amount of
+# server-side work, and the difference belongs to the reader.
+
+[[variants]]
+id       = "arrow"
+label    = "Vector · ArrowStream"
+approach = "realistic"
+default  = true
+env      = { FORMAT = "arrow_stream" }
+knobs    = { threads = 6, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 8, buffer_events = 524288, compression = "none" }
+reports  = { wire_format = "arrow_stream" }
+
+# The GA wire-format control. Vector's clickhouse sink wrote JSONEachRow only
+# until 0.57 added `format` (vector#24373, which quotes JSONEachRow as "~4-5x
+# less efficient" server-side); this arm quantifies what the beta format buys.
+[[variants]]
+id       = "json-each-row"
+label    = "Vector · JSONEachRow"
+approach = "realistic"
+env      = { FORMAT = "json_each_row" }
+knobs    = { threads = 6, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 8, buffer_events = 524288, compression = "none" }
+reports  = { wire_format = "json_each_row" }

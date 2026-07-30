@@ -17,22 +17,9 @@ Each entry below comes from `[planned].blockers` in that system's
 |---|---|---|
 | **Spate** | native (Rust) | Native and RowBinary wire formats |
 | **Apache Flink 2.2.1** | JVM | RowBinaryWithNamesAndTypes, via the official ClickHouse connector |
+| **Vector 0.57.0** | native (Rust) | ArrowStream and JSONEachRow wire formats |
 
 ## Not yet measured
-
-### Vector
-
-Its `clickhouse` sink writes JSONEachRow; `arrow_stream` is the faster option and
-is what a competent user would pick, so the arm must use it and the page must
-report the format either way — JSONEachRow against RowBinary is not like-for-like
-server-side work.
-
-Vector has no Schema Registry integration and takes a static inline schema, so it
-never pays a registry lookup. Negligible at steady state, but a difference in
-what is executed and so a disclosure rather than something to absorb.
-
-Vector is Rust with the same no-GC story as Spate and may well beat us. That is a
-reason to run it, not a reason to defer it.
 
 ### ClickHouse Kafka table engine
 
