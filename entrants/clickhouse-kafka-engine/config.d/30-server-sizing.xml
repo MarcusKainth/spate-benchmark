@@ -55,22 +55,49 @@
 
     <!-- System logs a storageless node pays for and nobody reads. Each is a
          local MergeTree with inserts, merges and flush threads of its own —
-         real CPU inside the envelope. Removed, EXCEPT query_log: that is the
-         reviewer's window into the forwarded inserts (~2 rows/s at a 5 s
-         flush across 8 consumers), and this benchmark's credibility rests on
-         a reviewer being able to look. -->
-    <metric_log remove="remove"/>
+         real CPU inside the envelope; query_views_log and query_thread_log
+         are even driven by the hot path (a row per MV execution / per thread
+         per forwarded insert). The list below is every <*_log> the shipped
+         26.3 config enables, removed, EXCEPT two:
+
+         * query_log — the reviewer's window into the forwarded inserts
+           (~3 rows/s: a QueryStart and a QueryFinish per insert, 8 consumers
+           on a 5 s flush). This benchmark's credibility rests on a reviewer
+           being able to look.
+         * crash_log — written only on a fatal signal, so it costs nothing in
+           a healthy run and is the artifact everyone wants when a run dies. -->
+    <aggregated_zookeeper_log remove="remove"/>
+    <asynchronous_insert_log remove="remove"/>
     <asynchronous_metric_log remove="remove"/>
-    <trace_log remove="remove"/>
-    <text_log remove="remove"/>
-    <latency_log remove="remove"/>
+    <background_schedule_pool_log remove="remove"/>
+    <backup_log remove="remove"/>
+    <blob_storage_log remove="remove"/>
+    <delta_lake_metadata_log remove="remove"/>
+    <error_log remove="remove"/>
+    <iceberg_metadata_log remove="remove"/>
+    <instrumentation_trace_log remove="remove"/>
+    <metric_log remove="remove"/>
+    <opentelemetry_span_log remove="remove"/>
+    <part_log remove="remove"/>
     <processors_profile_log remove="remove"/>
+    <query_metric_log remove="remove"/>
+    <query_thread_log remove="remove"/>
+    <query_views_log remove="remove"/>
+    <text_log remove="remove"/>
+    <trace_log remove="remove"/>
+    <zookeeper_connection_log remove="remove"/>
+    <zookeeper_log remove="remove"/>
 
     <!-- Console only, at warning: the driver reads container stdout, and a
-         server logging INFO to a file inside the measured cgroup is I/O and
-         cycles spent narrating. -->
+         server logging to files inside the measured cgroup is I/O and cycles
+         spent narrating. The remove elements are what make "console only"
+         true — level/console alone leave the base config's file paths in
+         force (verified: without them the server writes
+         /var/log/clickhouse-server/*.log). -->
     <logger>
         <level>warning</level>
         <console>1</console>
+        <log remove="remove"/>
+        <errorlog remove="remove"/>
     </logger>
 </clickhouse>

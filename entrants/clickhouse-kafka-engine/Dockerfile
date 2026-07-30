@@ -34,9 +34,10 @@ COPY entrants/clickhouse-kafka-engine/users.d/ /etc/clickhouse-server/users.d/
 COPY --chmod=0755 entrants/clickhouse-kafka-engine/initdb/ /docker-entrypoint-initdb.d/
 
 # Defaults equal the published knob values and target the bench network, so a
-# hand-run container matches the recorded numbers; the driver overrides what
-# it varies. Each variable lands via from_env in config.d/ and users.d/, and
-# initdb/20_assert.sh proves it landed.
+# hand-run container matches a DRAIN-mode run's configuration (sustained runs
+# consume a different topic from `latest`, both set by the driver); the driver
+# overrides what it varies. Each variable lands via from_env in config.d/ and
+# users.d/, and initdb/20_assert.sh proves it landed.
 ENV BOOTSTRAP=spate-bench-redpanda:29092 \
     REGISTRY_URL=http://spate-bench-redpanda:8081 \
     TOPIC=comparison-sensor-batches \

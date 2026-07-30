@@ -4,8 +4,12 @@
      port and credentials every arm writes to, spelled exactly as
      harness/src/infra.rs starts it: container (= network hostname)
      `spate-bench-clickhouse`, native TCP port 9000, user `default`, password
-     `bench`. If those constants ever move, initdb/20_assert.sh fails this
-     container's start rather than letting it forward into nowhere.
+     `bench`. These are entrant-local literals, so two guards hold them:
+     initdb/20_assert.sh proves THIS file took effect in the server, and
+     harness/tests/entrants_are_valid.rs holds this file's spellings to
+     harness/src/infra.rs — without that second edge, a renamed infra
+     container would leave both files agreeing with each other while the arm
+     forwarded into nowhere.
 
      The interserver link sends native columnar blocks over TCP, lz4-compressed:
      the replica's `compression` attribute defaults to true and is left there —

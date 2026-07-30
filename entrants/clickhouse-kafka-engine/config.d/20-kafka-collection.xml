@@ -34,20 +34,24 @@
                  so exposing it would only manufacture broken sweep cells. -->
             <kafka_thread_per_consumer>1</kafka_thread_per_consumer>
 
-            <!-- One consumer per partition (8). The cap against detected CPU
-                 cores (6 in this cgroup) is lifted by
-                 kafka_disable_num_consumers_limit in the default profile;
+            <!-- One consumer per partition (8), oversubscribed on 6 CPUs
+                 exactly as spate threads=8 and flink parallelism=8 are. The
+                 CREATE-time cap on this value is max(detected cores, 16) at
+                 this version (StorageKafkaUtils.cpp, v26.3.17.4-lts) and a
+                 violation THROWS at CREATE — loud, in initdb, never a silent
+                 clamp — so 8 needs no escape hatch on this 6-core cgroup.
                  20_assert.sh checks the value the collection carries, and the
-                 README's post-start check counts what actually materialised —
-                 a silent clamp is the "measures the same as 4" failure
-                 methodology/envelope.md warns about. -->
+                 README's post-start count of system.kafka_consumers guards
+                 against a future version moving the cap. -->
             <kafka_num_consumers from_env="KAFKA_NUM_CONSUMERS"></kafka_num_consumers>
 
             <!-- MESSAGES per flushed block, not rows: 16384 messages are
-                 ~1.2M surviving rows per forwarded insert. The shipped default
-                 is max_insert_block_size = 1,048,576 MESSAGES — never reached
-                 at this corpus, so under the default the flush timer always
-                 binds and block size stops being a knob at all. -->
+                 ~1.2M surviving rows per forwarded insert. Unset, the engine
+                 uses max_insert_block_size / num_consumers = 131,072 MESSAGES
+                 per consumer (StorageKafka.cpp, v26.3.17.4-lts) — never
+                 reached at this corpus's rates, so under the default the
+                 flush timer always binds and block size stops being a knob
+                 at all. -->
             <kafka_max_block_size from_env="KAFKA_MAX_BLOCK_MSGS"></kafka_max_block_size>
 
             <!-- The commit cadence: offsets commit once per flushed block
@@ -75,13 +79,18 @@
              it per mode (drain replays from earliest; sustained tails). -->
         <auto_offset_reset from_env="OFFSET_RESET"></auto_offset_reset>
 
-        <!-- Prefetch buffer per consumer, raised 64 MiB -> 256 MiB: the
-             default sits at the edge of ONE 16384-msg x ~5KiB block, and a
-             consumer that cannot buffer the next block while the current one
-             flushes is paced by the broker round-trip. queued_min_messages
-             raised with it (2x the block in messages) for the same reason. -->
+        <!-- Prefetch byte cap per consumer queue, raised 64 MiB -> 256 MiB:
+             ClickHouse itself targets queued.min.messages =
+             max(block_msgs, 100000) messages of prefetch
+             (KafkaConfigLoader.cpp, v26.3.17.4-lts), and at ~5 KiB per
+             message the shipped 64 MiB cap cuts that off below ONE
+             16384-msg block — a consumer that cannot buffer the next block
+             while the current one flushes is paced by the broker
+             round-trip. 256 MiB admits ~3 blocks. queued.min.messages
+             itself is left to the server's computed value: overriding it
+             DOWN here would re-create the same starvation through the
+             message-count bound. -->
         <queued_max_messages_kbytes>262144</queued_max_messages_kbytes>
-        <queued_min_messages>32768</queued_min_messages>
 
         <!-- No stats callbacks: no published figure comes from the system's
              own instrumentation (methodology/measurement.md), so the cycles

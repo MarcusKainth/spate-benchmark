@@ -176,6 +176,22 @@ fn production_source(src: &str) -> &str {
     src.split_once("#[cfg(test)]").map_or(src, |(head, _)| head)
 }
 
+/// The text a restatement may live in. For SQL artifacts the `--` comments are
+/// stripped first: the ClickHouse arm's DDL narrates its own predicates, and a
+/// `contains` over the raw file was satisfied by that narration — the MV's
+/// actual WHERE clause could change or vanish and the test stayed green. No
+/// string literal in the checked DDL contains `--`, which is what makes the
+/// line-wise strip safe.
+fn restatement_text(rel: &str, src: &str) -> String {
+    if !rel.ends_with(".sql") {
+        return src.to_owned();
+    }
+    src.lines()
+        .map(|l| l.split_once("--").map_or(l, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn no_rust_arm_imports_its_transform_from_the_oracle() {
     for arm in ARMS.iter().filter(|a| a.rust_oracle_check) {
@@ -213,12 +229,12 @@ fn every_arm_restates_the_drop_unit_the_workload_specifies() {
         if wanted.is_empty() {
             continue;
         }
-        let src = read(arm.file);
+        let src = restatement_text(arm.file, &read(arm.file));
         assert!(
             wanted.iter().any(|w| src.contains(w)),
-            "the {} arm must restate the drop unit in {} as one of {wanted:?}; the \
-             workload specifies it and `build.rs` derives the constant this test \
-             compares against",
+            "the {} arm must restate the drop unit in {} as one of {wanted:?} \
+             (in code, not in a comment); the workload specifies it and \
+             `build.rs` derives the constant this test compares against",
             arm.entrant,
             arm.file
         );
@@ -233,10 +249,11 @@ fn every_arm_restates_the_quality_floor_the_workload_specifies() {
         if wanted.is_empty() {
             continue;
         }
-        let src = read(arm.file);
+        let src = restatement_text(arm.file, &read(arm.file));
         assert!(
             wanted.iter().any(|w| src.contains(w)),
-            "the {} arm must restate the quality floor in {} as one of {wanted:?}",
+            "the {} arm must restate the quality floor in {} as one of {wanted:?} \
+             (in code, not in a comment)",
             arm.entrant,
             arm.file
         );

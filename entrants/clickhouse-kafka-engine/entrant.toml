@@ -133,11 +133,15 @@ affects = ["envelope"]
 what = """
 Wire format is native, but via the Distributed engine's interserver transfer
 (lz4-compressed columnar blocks), not a client insert API any external program
-could call.
+could call. The headroom gate divides this arm's rate by the measured native
+ceiling, which was measured with a CLIENT posting FORMAT Native over HTTP —
+a transport this arm never uses; probably conservative for interserver
+blocks, but unmeasured.
 """
 why = """
 Least server-side work of any arm's format; read against spate native, not
-flink rowbinary_nt.
+flink rowbinary_nt, and read the headroom share with the ceiling's transport
+caveat in mind.
 """
 affects = ["wire-format"]
 
@@ -151,23 +155,74 @@ affects = ["durability"]
 
 [[deviations]]
 what = """
-The latency floor is the flush cadence — rows wait up to flush_ms in the
-engine's block buffer, and ingest_ts is stamped by the shared server when the
-forwarded insert lands.
+The latency floor is the flush cadence — rows wait up to flush_ms = 5000 in
+the engine's block buffer, and ingest_ts is stamped by the shared server when
+the forwarded insert lands. That is the same linger-for-throughput trade as
+Spate's linger_ms = 500, at 10x the floor — and here the same knob is also
+the offset-commit cadence, so tightening it buys latency by committing more
+often rather than being an independent choice.
 """
 why = """
-The honest cost of a server-batched design, the same trade Spate's
-linger_ms=500 makes at 500 ms.
+The honest cost of a server-batched design; the 10x factor is stated so the
+sustained-mode latency panel is read as a knob consequence, not a mystery.
 """
 affects = ["latency"]
 
 [[deviations]]
 what = """
-No insert_deduplication_token is sent (like every arm except Spate); replays
-after a crash mid-block surface as the duplicate metric.
+No insert_deduplication_token is sent (like every arm except Spate). A replay
+after a crash mid-block is suppressed by the shared table's
+non_replicated_deduplication_window=1000 when the re-consumed block is
+byte-identical, and surfaces as the duplicate metric when re-framing produced
+a different block.
 """
 why = """
-The shared table's non_replicated_deduplication_window=1000 content-hashes
-forwarded blocks; duplicates are reported, never suppressed.
+The same content-hash dedup every non-token arm gets; duplicates that do land
+are reported, never hidden — but "reported" must not be read as "replays
+cannot be absorbed", because absorbing identical replays is what the window
+is for.
 """
 affects = ["dedup"]
+
+[[deviations]]
+what = """
+At block_msgs = 16384 (~1.2M rows) this arm sends the largest insert blocks
+of any arm — 4.6x Spate's 262144-row batches, 24x Flink's 50000 — so it
+holds the smallest share of the background-merge cost that the server-side
+figure excludes by construction (merges appear in part_log, not query_log).
+"""
+why = """
+methodology/measurement.md requires records to say so: the merge cost an
+insert makes inevitable lands nowhere in the per-row server-side number, and
+the asymmetry scales inversely with block size.
+"""
+affects = ["server-side"]
+
+[[deviations]]
+what = """
+Server-side attribution for this arm runs under the INVERTED predicate NOT
+is_initial_query (declared by [clickhouse].forwarded_inserts): its inserts
+reach the shared server as Distributed forwards, whose initial query ran on
+the arm's own node. Every other arm is measured under is_initial_query.
+"""
+why = """
+The strict predicate would attribute nothing to this arm; the inversion is
+declared here so a reader of the record knows this arm's server-side figure
+came from the complementary predicate, not the one the methodology describes
+for client arms.
+"""
+affects = ["server-side"]
+
+[[deviations]]
+what = """
+Drain-mode windows for this arm include the official image's two-phase boot —
+an init server that runs the DDL and the assert script, then the real server —
+before the first block can flush; a start-up cost with no analogue in the
+other arms' single-process clients.
+"""
+why = """
+Drain charges start-up for every arm by design; declared because the magnitude
+here is structurally arm-specific (two server boots plus ~10 assert queries),
+not because the rule differs.
+"""
+affects = ["measurement"]

@@ -23,7 +23,17 @@ ch() { clickhouse-client --host 127.0.0.1 --query "$1"; }
 
 fail=0
 expect() { # expect <description> <query> <want>
-    got="$(ch "$2")"
+    # The assignment sits in an `if !` condition so that a FAILING query — a
+    # denied system table, a malformed cluster — reports through the same
+    # accumulate-and-REFUSE path as a wrong value, instead of set -e killing
+    # the script before it can say which check died.
+    if ! got="$(ch "$2")"; then
+        echo >&2 "ASSERT FAILED: $1"
+        echo >&2 "  query: $2"
+        echo >&2 "  (the query itself failed)"
+        fail=1
+        return
+    fi
     if [ "$got" != "$3" ]; then
         echo >&2 "ASSERT FAILED: $1"
         echo >&2 "  query: $2"
@@ -33,10 +43,16 @@ expect() { # expect <description> <query> <want>
     fi
 }
 
-# The guarantee-bearing session setting (see users.d/10-profile.xml).
+# The guarantee-bearing session settings (see users.d/10-profile.xml).
 expect "distributed_foreground_insert is on — offsets must not commit before the shared server acks" \
     "SELECT value FROM system.settings WHERE name = 'distributed_foreground_insert'" \
     "1"
+expect "async_insert is off — a forwarded insert must not take the async path on the shared server" \
+    "SELECT value FROM system.settings WHERE name = 'async_insert'" \
+    "0"
+expect "materialized_views_ignore_errors is off — the loss gate must see stall-and-replay, never a skip" \
+    "SELECT value FROM system.settings WHERE name = 'materialized_views_ignore_errors'" \
+    "0"
 
 # The forward target, exactly as harness/src/infra.rs runs it. A wrong host or
 # port here is a container that consumes and forwards into nowhere.
@@ -62,9 +78,16 @@ expect "kafka_src exists in system.named_collections" \
     "1"
 PREPROCESSED=/var/lib/clickhouse/preprocessed_configs/config.xml
 nc() { sed -n "s|.*<$1>\\([^<]*\\)</$1>.*|\\1|p" "$PREPROCESSED" | head -n 1; }
+# Every [env] variable the driver sets, read back — the whole point of this
+# script is that no published knob can silently run at a default.
+[ "$(nc kafka_broker_list)" = "$BOOTSTRAP" ] || { echo >&2 "ASSERT FAILED: kafka_broker_list != \$BOOTSTRAP ($(nc kafka_broker_list) != $BOOTSTRAP)"; fail=1; }
 [ "$(nc kafka_topic_list)" = "$TOPIC" ] || { echo >&2 "ASSERT FAILED: kafka_topic_list != \$TOPIC ($(nc kafka_topic_list) != $TOPIC)"; fail=1; }
 [ "$(nc kafka_group_name)" = "$GROUP_ID" ] || { echo >&2 "ASSERT FAILED: kafka_group_name != \$GROUP_ID ($(nc kafka_group_name) != $GROUP_ID)"; fail=1; }
+[ "$(nc auto_offset_reset)" = "$OFFSET_RESET" ] || { echo >&2 "ASSERT FAILED: auto_offset_reset != \$OFFSET_RESET ($(nc auto_offset_reset) != $OFFSET_RESET)"; fail=1; }
 [ "$(nc kafka_num_consumers)" = "$KAFKA_NUM_CONSUMERS" ] || { echo >&2 "ASSERT FAILED: kafka_num_consumers != \$KAFKA_NUM_CONSUMERS ($(nc kafka_num_consumers) != $KAFKA_NUM_CONSUMERS)"; fail=1; }
+[ "$(nc kafka_max_block_size)" = "$KAFKA_MAX_BLOCK_MSGS" ] || { echo >&2 "ASSERT FAILED: kafka_max_block_size != \$KAFKA_MAX_BLOCK_MSGS ($(nc kafka_max_block_size) != $KAFKA_MAX_BLOCK_MSGS)"; fail=1; }
+[ "$(nc kafka_flush_interval_ms)" = "$KAFKA_FLUSH_MS" ] || { echo >&2 "ASSERT FAILED: kafka_flush_interval_ms != \$KAFKA_FLUSH_MS — the [guarantees] interval would not be the one in force ($(nc kafka_flush_interval_ms) != $KAFKA_FLUSH_MS)"; fail=1; }
+[ "$(nc kafka_poll_timeout_ms)" = "$KAFKA_POLL_TIMEOUT_MS" ] || { echo >&2 "ASSERT FAILED: kafka_poll_timeout_ms != \$KAFKA_POLL_TIMEOUT_MS ($(nc kafka_poll_timeout_ms) != $KAFKA_POLL_TIMEOUT_MS)"; fail=1; }
 
 # The two fixed values no correct configuration may move (issue #35153; the
 # loss gate). Asserted so an edit to the XML cannot pass unnoticed.

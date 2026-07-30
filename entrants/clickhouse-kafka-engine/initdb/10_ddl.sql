@@ -53,7 +53,7 @@ ENGINE = Kafka(kafka_src);
 --    makes this topology honest: the default (0) spools to local disk and acks
 --    early, and offsets would commit before the rows existed remotely.
 --
---    13 physical columns and NO ingest_ts, deliberately: MATERIALIZED columns
+--    The 12 physical columns and NO ingest_ts, deliberately: MATERIALIZED columns
 --    must not transit Distributed inserts (ClickHouse issues #4015, #9439).
 --    The shared server computes `ingest_ts MATERIALIZED now64(6)` when the
 --    forwarded INSERT lands there — the same per-INSERT stamp every arm gets,
@@ -84,9 +84,11 @@ ENGINE = Distributed('bench_target', 'default', 'sensor_events');
 --
 --    * ARRAY JOIN is the flatten: one decoded message row becomes one row per
 --      element of `events`, aliased `e`.
---    * `e.unit != 'drop'` and the quality floor `0.2` are the workload's
---      literals; harness/tests/each_arm_restates_the_transform.rs holds these
---      spellings to workload/workload.toml.
+--    * The unit sentinel and the quality floor in the WHERE clause are the
+--      workload's literals; harness/tests/each_arm_restates_the_transform.rs
+--      holds their spellings to workload/workload.toml. (Deliberately not
+--      spelled out in this comment: that test checks the predicates as
+--      source text, and a comment that contained them would satisfy it.)
 --    * `ifNull(region, '')` is the null coalesce forced by the target's
 --      LowCardinality(String).
 --    * `upper()` is ASCII-only per ClickHouse's string-function docs — which

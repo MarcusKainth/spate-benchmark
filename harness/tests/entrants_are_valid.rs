@@ -363,6 +363,63 @@ fn the_rust_toolchain_pin_matches_the_arm_image() {
     );
 }
 
+#[test]
+fn the_kafka_engine_arms_forward_target_matches_the_infra_it_names() {
+    // Two files have to agree and neither can import the other: the shared
+    // ClickHouse's coordinates are constants in `harness/src/infra.rs`, and the
+    // Kafka engine arm repeats them as literals in its cluster XML — an arm
+    // image cannot read harness code, and the harness does not template entrant
+    // config files. Without this edge a renamed infra container or a moved
+    // credential leaves the arm's own assert green (20_assert.sh checks the XML
+    // against itself) while every forwarded insert resolves to nowhere and each
+    // rep burns the full drain limit. Same shape as the toolchain pin above:
+    // neither file is obviously authoritative, so the agreement is the check.
+    let root = repo_root();
+    let xml = std::fs::read_to_string(
+        root.join("entrants/clickhouse-kafka-engine/config.d/10-remote-cluster.xml"),
+    )
+    .expect("10-remote-cluster.xml");
+    let tag = |name: &str| -> &str {
+        xml.split(&format!("<{name}>"))
+            .nth(1)
+            .and_then(|rest| rest.split(&format!("</{name}>")).next())
+            .unwrap_or_else(|| panic!("<{name}> missing from 10-remote-cluster.xml"))
+    };
+    let infra = std::fs::read_to_string(root.join("harness/src/infra.rs")).expect("infra.rs");
+
+    let host = tag("host");
+    assert!(
+        infra.contains(&format!("const CLICKHOUSE: &str = \"{host}\"")),
+        "the arm forwards to <host>{host}</host> but harness/src/infra.rs does not name \
+         that container; the Distributed table would forward into a resolution error"
+    );
+    let password = tag("password");
+    assert!(
+        infra.contains(&format!("CLICKHOUSE_PASSWORD={password}")),
+        "the arm authenticates with <password>{password}</password> but \
+         harness/src/infra.rs does not start the shared server with it"
+    );
+    assert!(
+        infra.contains(&format!("ch_user: \"{}\"", tag("user"))),
+        "the arm connects as <user>{}</user> but harness/src/infra.rs uses a \
+         different user for the shared server",
+        tag("user")
+    );
+    // The arm speaks to the container-internal native port; infra publishes it
+    // as 19000 on the host. The mapping string is the one place infra spells
+    // the internal port, so it is what pins the XML's <port>.
+    assert_eq!(
+        tag("port"),
+        "9000",
+        "the cluster XML must target the container-internal native port"
+    );
+    assert!(
+        infra.contains("\"19000:9000\""),
+        "harness/src/infra.rs no longer publishes the shared server's native port as \
+         19000:9000 — if the internal port moved, the arm's cluster XML must move with it"
+    );
+}
+
 /// The `size:` values under each `process:` key, in file order, as MiB.
 fn process_sizes(config: &str) -> Vec<u64> {
     let mut out = Vec::new();
