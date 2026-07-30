@@ -86,7 +86,7 @@ struct Arm {
 /// Every arm's transform artifacts. A new arm adds its row(s) here in the PR
 /// that activates it; [`every_active_arm_has_a_row_in_this_table`] is what makes
 /// omitting them a failure rather than a gap.
-const ARMS: [Arm; 3] = [
+const ARMS: [Arm; 4] = [
     Arm {
         entrant: "spate",
         file: "entrants/spate/src/rows.rs",
@@ -116,6 +116,22 @@ const ARMS: [Arm; 3] = [
                 format!("QUALITY_FLOOR = {spec};"),
             ]
         },
+        rust_oracle_check: false,
+    },
+    Arm {
+        // A config-only arm: the transform is a VRL program, compiled by Vector
+        // from this committed file. Both needles are bounded on the right by a
+        // delimiter the VRL text supplies — the sentinel's closing quote, the
+        // floor's closing paren — so a constant that merely EXTENDS the spec's
+        // spelling (a 0.25 floor against a 0.2 spec) cannot ride a prefix
+        // match. The file's comments spell neither needle, deliberately: the
+        // match is substring over the whole file, and prose containing one
+        // would hold this test green while the code drifted.
+        // Not Rust — VRL has no import edge to the oracle to check.
+        entrant: "vector",
+        file: "entrants/vector/transform.vrl",
+        drop_unit: |spec| vec![format!("!= {spec:?}")],
+        quality_floor: |spec| vec![format!(">= {spec})")],
         rust_oracle_check: false,
     },
 ];

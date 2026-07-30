@@ -6,10 +6,12 @@ description: Which systems are measured, which are not yet, and exactly what eac
 
 A partial comparison invites one accusation above all others: *you only measured
 the ones you beat*. The only defence is to name what is missing and what it is
-waiting on, in a file that CI checks rather than in prose that quietly rots.
+waiting on, in the descriptors CI checks — which this page mirrors — rather than
+in prose that quietly rots.
 
-Each entry below comes from `[planned].blockers` in that system's
-`entrant.toml`. Validation refuses a planned entrant that does not say why.
+The Implemented table lists the arms whose descriptors are `active`. Each entry
+under "Not yet measured" comes from `[planned].blockers` in that system's
+`entrant.toml`; validation refuses a planned entrant that does not say why.
 
 ## Implemented
 
@@ -17,22 +19,9 @@ Each entry below comes from `[planned].blockers` in that system's
 |---|---|---|
 | **Spate** | native (Rust) | Native and RowBinary wire formats |
 | **Apache Flink 2.2.1** | JVM | RowBinaryWithNamesAndTypes, via the official ClickHouse connector |
+| **Vector 0.57.0** | native (Rust) | ArrowStream and JSONEachRow wire formats |
 
 ## Not yet measured
-
-### Vector
-
-Its `clickhouse` sink writes JSONEachRow; `arrow_stream` is the faster option and
-is what a competent user would pick, so the arm must use it and the page must
-report the format either way — JSONEachRow against RowBinary is not like-for-like
-server-side work.
-
-Vector has no Schema Registry integration and takes a static inline schema, so it
-never pays a registry lookup. Negligible at steady state, but a difference in
-what is executed and so a disclosure rather than something to absorb.
-
-Vector is Rust with the same no-GC story as Spate and may well beat us. That is a
-reason to run it, not a reason to defer it.
 
 ### ClickHouse Kafka table engine
 
