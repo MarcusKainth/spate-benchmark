@@ -1,0 +1,95 @@
+<!-- Everything the Kafka engine table reads, in one named collection.
+
+     This is the arm's whole configuration mechanism, and it is deliberately
+     free of custom code: the driver sets environment variables (entrant.toml
+     [env]), `from_env` substitutes them here at config load, and the DDL is
+     static SQL saying `ENGINE = Kafka(kafka_src)`. The from_env elements are
+     deliberately BARE — an inline default needs a `replace` attribute, which
+     the config.d merge phase consumes before substitution runs, and the
+     server then refuses to start (verified on 26.3.17.4). The defaults live
+     in the Dockerfile's ENV instead, one per variable, kept equal to the
+     published knob values so a hand-run container matches the recorded
+     numbers — and every variable is therefore always set. initdb/20_assert.sh
+     reads the collection back out of system.named_collections and refuses
+     container start on a mismatch — the same "assert settings took effect"
+     convention every arm follows. -->
+<clickhouse>
+    <named_collections>
+        <kafka_src>
+            <kafka_broker_list from_env="BOOTSTRAP"></kafka_broker_list>
+            <kafka_topic_list from_env="TOPIC"></kafka_topic_list>
+            <kafka_group_name from_env="GROUP_ID"></kafka_group_name>
+
+            <!-- Confluent framing (0x00 + BE u32 schema id + Avro datum),
+                 resolved against the live registry — the same wire contract
+                 every arm decodes. The registry URL is a FORMAT setting, not
+                 an engine one, so it lives in the default profile
+                 (users.d/10-profile.xml), not here. -->
+            <kafka_format>AvroConfluent</kafka_format>
+
+            <!-- THE trap (ClickHouse issue #35153): with the shipped default
+                 kafka_thread_per_consumer = 0, all consumers are squashed into
+                 ONE flush thread — 8 consumers measure like 1. FIXED, not a
+                 knob: no correct configuration of this arm has another value,
+                 so exposing it would only manufacture broken sweep cells. -->
+            <kafka_thread_per_consumer>1</kafka_thread_per_consumer>
+
+            <!-- One consumer per partition (8). The cap against detected CPU
+                 cores (6 in this cgroup) is lifted by
+                 kafka_disable_num_consumers_limit in the default profile;
+                 20_assert.sh checks the value the collection carries, and the
+                 README's post-start check counts what actually materialised —
+                 a silent clamp is the "measures the same as 4" failure
+                 methodology/envelope.md warns about. -->
+            <kafka_num_consumers from_env="KAFKA_NUM_CONSUMERS"></kafka_num_consumers>
+
+            <!-- MESSAGES per flushed block, not rows: 16384 messages are
+                 ~1.2M surviving rows per forwarded insert. The shipped default
+                 is max_insert_block_size = 1,048,576 MESSAGES — never reached
+                 at this corpus, so under the default the flush timer always
+                 binds and block size stops being a knob at all. -->
+            <kafka_max_block_size from_env="KAFKA_MAX_BLOCK_MSGS"></kafka_max_block_size>
+
+            <!-- The commit cadence: offsets commit once per flushed block
+                 (kafka_commit_every_batch = 0, shipped default), so this timer
+                 IS the [guarantees] interval_ms = 5000. -->
+            <kafka_flush_interval_ms from_env="KAFKA_FLUSH_MS"></kafka_flush_interval_ms>
+
+            <!-- The stream thread's poll bound. The flush deadline is only
+                 evaluated between polls, so flush_ms must exceed this —
+                 declared as a [[constraints]] entry so a sweep refuses the
+                 inverted cell before a container starts. -->
+            <kafka_poll_timeout_ms from_env="KAFKA_POLL_TIMEOUT_MS"></kafka_poll_timeout_ms>
+
+            <!-- FIXED at 0: one skipped message silently drops 100 rows, the
+                 loss gate then voids the arm, and no setting may trade
+                 correctness for throughput. -->
+            <kafka_skip_broken_messages>0</kafka_skip_broken_messages>
+        </kafka_src>
+    </named_collections>
+
+    <!-- librdkafka, the same client library under Spate's consumer. Keys here
+         are librdkafka global properties with dots as underscores. -->
+    <kafka>
+        <!-- Where a group with no committed offsets starts. The driver sets
+             it per mode (drain replays from earliest; sustained tails). -->
+        <auto_offset_reset from_env="OFFSET_RESET"></auto_offset_reset>
+
+        <!-- Prefetch buffer per consumer, raised 64 MiB -> 256 MiB: the
+             default sits at the edge of ONE 16384-msg x ~5KiB block, and a
+             consumer that cannot buffer the next block while the current one
+             flushes is paced by the broker round-trip. queued_min_messages
+             raised with it (2x the block in messages) for the same reason. -->
+        <queued_max_messages_kbytes>262144</queued_max_messages_kbytes>
+        <queued_min_messages>32768</queued_min_messages>
+
+        <!-- No stats callbacks: no published figure comes from the system's
+             own instrumentation (methodology/measurement.md), so the cycles
+             would be spent on strings nobody reads. -->
+        <statistics_interval_ms>0</statistics_interval_ms>
+
+        <!-- syslog WARNING: librdkafka at INFO logs per-partition chatter on
+             the hot path through the server's logger. -->
+        <log_level>4</log_level>
+    </kafka>
+</clickhouse>

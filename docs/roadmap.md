@@ -21,6 +21,7 @@ under "Not yet measured" comes from `[planned].blockers` in that system's
 | **Apache Flink 2.2.1** | JVM | RowBinaryWithNamesAndTypes, via the official ClickHouse connector |
 | **Vector 0.57.0** | native (Rust) | ArrowStream and JSONEachRow wire formats |
 | **Kafka Connect 4.3.1 + `clickhouse-kafka-connect` v1.4.0** | JVM | RowBinary into a Null-engine landing table, flattened by a ClickHouse materialized view — Connect has no fan-out operator, so the transform's CPU moves to the server and the arm leans on ClickHouse's own profiling, declared in `[[deviations]]` |
+| **ClickHouse 26.3 Kafka table engine** | native (C++) | Native, forwarded synchronously through a Distributed table to the shared ClickHouse |
 
 The Kafka Connect arm's former licence gate is **closed**: it runs on the ASF's
 own `apache/kafka` image with an Apache-2.0 connector and a POM-verified
@@ -30,18 +31,6 @@ declared as a deviation on the entrant. Implemented and CI-gated; its first
 published run is still pending, so no record for it exists in `results/` yet.
 
 ## Not yet measured
-
-### ClickHouse Kafka table engine
-
-The zero-framework baseline: ClickHouse consuming the topic itself, with no
-network hop between consumer and storage. It may win outright, and it is
-published if it does.
-
-It does not fit the envelope the other arms are held to, and that has to be
-resolved honestly rather than fudged — the consumption happens *inside* the
-ClickHouse container, so its CPU is not separable from the server's by the cgroup
-sampler. Either this arm runs against a dedicated ClickHouse whose whole container
-is the envelope, or it is reported on a different basis and labelled so.
 
 ### Redpanda Connect
 

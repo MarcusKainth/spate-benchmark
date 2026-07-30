@@ -1,0 +1,29 @@
+<!-- The one-node cluster the Distributed table forwards through.
+
+     The single replica is the SHARED infra ClickHouse — the same container,
+     port and credentials every arm writes to, spelled exactly as
+     harness/src/infra.rs starts it: container (= network hostname)
+     `spate-bench-clickhouse`, native TCP port 9000, user `default`, password
+     `bench`. If those constants ever move, initdb/20_assert.sh fails this
+     container's start rather than letting it forward into nowhere.
+
+     The interserver link sends native columnar blocks over TCP, lz4-compressed:
+     the replica's `compression` attribute defaults to true and is left there —
+     it is what any user of this topology would run.
+
+     No internal_replication: with one shard and one replica there is nothing
+     to replicate and the setting selects nothing. -->
+<clickhouse>
+    <remote_servers>
+        <bench_target>
+            <shard>
+                <replica>
+                    <host>spate-bench-clickhouse</host>
+                    <port>9000</port>
+                    <user>default</user>
+                    <password>bench</password>
+                </replica>
+            </shard>
+        </bench_target>
+    </remote_servers>
+</clickhouse>

@@ -1,0 +1,42 @@
+<!-- The default profile: session settings the pipeline's inserts run under.
+
+     The Kafka engine's background streaming executes with the table owner's
+     profile, and initdb creates every object as `default` — so these four
+     settings ARE the pipeline's session settings, and 20_assert.sh reads
+     each one back before the container is allowed to serve. -->
+<clickhouse>
+    <profiles>
+        <default>
+            <!-- THE guarantee. The MV inserts into a Distributed table; with
+                 the shipped default (0) that insert spools to the LOCAL disk
+                 and acks immediately, a background pool forwards later, and
+                 the Kafka engine — which commits offsets after its block is
+                 written through the MVs — would commit offsets for rows the
+                 shared server does not have yet. A crash then loses them,
+                 and the arm is not at-least-once. With 1, the MV insert
+                 blocks until the remote server acks the block, so
+                 offset-commit implies remote-ack and the declared guarantee
+                 is the real one. (Renamed from insert_distributed_sync in
+                 23.11; the old name is an alias.) -->
+            <distributed_foreground_insert>1</distributed_foreground_insert>
+
+            <!-- Where AvroConfluent resolves schema ids. A FORMAT setting,
+                 which is why it is here and not in the kafka_src collection;
+                 same live registry, same subject, as every arm. -->
+            <format_avro_schema_registry_url from_env="REGISTRY_URL"></format_avro_schema_registry_url>
+
+            <!-- CREATE-time cap on kafka_num_consumers, compared against
+                 DETECTED cores — 6 in this cgroup — which would clamp the 8
+                 consumers this arm runs (one per partition, oversubscribed on
+                 6 CPUs exactly as spate threads=8 and flink parallelism=8
+                 are). Without this the clamp is silent and the arm measures
+                 like a 4-consumer one. -->
+            <kafka_disable_num_consumers_limit>1</kafka_disable_num_consumers_limit>
+
+            <!-- Shipped default, PINNED: 1 would turn a failed transform or a
+                 refused remote insert into a dropped block plus a log line,
+                 and the loss gate must see a stall-and-replay, never a skip. -->
+            <materialized_views_ignore_errors>0</materialized_views_ignore_errors>
+        </default>
+    </profiles>
+</clickhouse>

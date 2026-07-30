@@ -86,7 +86,7 @@ struct Arm {
 /// Every arm's transform artifacts. A new arm adds its row(s) here in the PR
 /// that activates it; [`every_active_arm_has_a_row_in_this_table`] is what makes
 /// omitting them a failure rather than a gap.
-const ARMS: [Arm; 5] = [
+const ARMS: [Arm; 6] = [
     Arm {
         entrant: "spate",
         file: "entrants/spate/src/rows.rs",
@@ -143,6 +143,16 @@ const ARMS: [Arm; 5] = [
         file: "entrants/kafka-connect/clickhouse/arm.sql",
         drop_unit: |spec| vec![format!("!= '{spec}'")],
         quality_floor: |spec| vec![format!(">= {spec}")],
+        rust_oracle_check: false,
+    },
+    Arm {
+        // A config-only arm: the transform is a materialized view's SQL, and
+        // the constants appear as ClickHouse literals — the filter predicates
+        // in the MV's WHERE clause.
+        entrant: "clickhouse-kafka-engine",
+        file: "entrants/clickhouse-kafka-engine/initdb/10_ddl.sql",
+        drop_unit: |spec| vec![format!("e.unit != '{spec}'")],
+        quality_floor: |spec| vec![format!("e.quality < {spec}")],
         rust_oracle_check: false,
     },
 ];
