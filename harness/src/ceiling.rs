@@ -197,7 +197,7 @@
 //! the environment profile, which is what this module gates against.
 //!
 //! Two things in this module exist because of it. [`select_combinations`] lets a
-//! pass measure the format that actually binds instead of all three, because a
+//! pass measure the format that actually binds instead of all of them, because a
 //! search is a dozen passes and a fifteen-minute pass makes it a day; and
 //! [`Ceilings::measured_under_other_envelopes`] refuses to commit the half-file
 //! that a narrowed pass under new caps would otherwise leave behind. Neither
@@ -230,9 +230,16 @@
 //! # What the ingest ceiling can honestly be measured for
 //!
 //! The rig emits the formats it can emit **correctly**, from this crate, with no
-//! dependency on any system under test — today that is `Native`, `RowBinary` and
-//! `RowBinaryWithNamesAndTypes` (see [`Format`]). It does not substitute one
-//! format's figure for another's.
+//! dependency on any system under test — today that is `Native`, `RowBinary`,
+//! `RowBinaryWithNamesAndTypes`, `JSONEachRow` and `ArrowStream` (see
+//! [`Format`]). The last two are the newest: their encoders exist so that the
+//! next ceiling pass can measure the formats two new arms will report, and the
+//! live-server proof that gated Native's arrival —
+//! `harness/tests/native_encoder_matches_clickhouse.rs`, POSTing this crate's
+//! bytes at a real server and holding what lands to the corpus's closed-form
+//! oracle — covers them too and **must pass before a ceiling measured through
+//! either is committed**. It does not substitute one format's figure for
+//! another's.
 //!
 //! The substitution is tempting and is refused on purpose. RowBinary is
 //! row-oriented and has to be transposed server-side, so its ceiling is very
@@ -1233,11 +1240,17 @@ fn mb_to_bytes(mb_per_s: f64) -> u64 {
 /// The set is small on purpose. Every format here is encoded by this crate, from
 /// the committed column list, with no dependency on any system under test — the
 /// same rule that makes the harness write its own Avro rather than borrow the
-/// framework's. A format is added here only once a live server has been shown to
-/// accept blocks from this encoder that satisfy the corpus's closed-form
-/// expectations; `JSONEachRow` is absent for that reason, and the honest
-/// consequence of an absence is stated in the module docs and enforced in
-/// [`Ceiling::headroom`].
+/// framework's. And an encoder is not trusted because it was written carefully:
+/// the live-server proof in `harness/tests/native_encoder_matches_clickhouse.rs`
+/// — this crate's bytes POSTed at a real server and what lands held to
+/// [`corpus::run_gates`] — is what stands behind each format, and it **still
+/// gates commitment**: a ceiling measured through `JsonEachRow` or
+/// `ArrowStream`, the two newest, is not committed until that Docker-gated test
+/// has passed for them the way it has for Native. The encoders exist first so
+/// the next ceiling pass can measure the formats the two new benchmark arms will
+/// report; until a format's ceiling is committed, an arm declaring it is not
+/// gated against ClickHouse at all — the honest consequence stated in the module
+/// docs and enforced in [`Ceiling::headroom`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     /// ClickHouse's own columnar block format. What the headline
@@ -1249,13 +1262,28 @@ pub enum Format {
     /// Rows behind a name-and-type header, so the server validates the column
     /// contract rather than trusting position. What the Flink arm writes.
     RowBinaryWithNamesAndTypes,
+    /// One JSON object per row, newline-separated — the format everything that
+    /// cannot speak a binary protocol falls back to, and the one whose
+    /// server-side parse cost is the reason rule 5 refuses to share ceilings
+    /// across formats. See [`encode_json_each_row_block`] for the encoding
+    /// decisions, each of which exists to keep the text round-trip exact.
+    JsonEachRow,
+    /// Arrow's IPC streaming format: a schema message, then columnar record
+    /// batches. Columnar like Native but in a vocabulary ClickHouse has to
+    /// convert on arrival — `Utf8` into `LowCardinality`, `Timestamp` into
+    /// `DateTime64` — so its ceiling prices that conversion. See
+    /// [`encode_arrow_stream_block`] for the schema mapping and why every
+    /// timestamp carries an explicit `"UTC"`.
+    ArrowStream,
 }
 
 /// Every format the rig measures, in the order it measures them.
-pub const FORMATS: [Format; 3] = [
+pub const FORMATS: [Format; 5] = [
     Format::Native,
     Format::RowBinary,
     Format::RowBinaryWithNamesAndTypes,
+    Format::JsonEachRow,
+    Format::ArrowStream,
 ];
 
 impl Format {
@@ -1267,6 +1295,8 @@ impl Format {
             Self::Native => "native",
             Self::RowBinary => "rowbinary",
             Self::RowBinaryWithNamesAndTypes => "rowbinary_nt",
+            Self::JsonEachRow => "json_each_row",
+            Self::ArrowStream => "arrow_stream",
         }
     }
 
@@ -1277,6 +1307,8 @@ impl Format {
             Self::Native => "Native",
             Self::RowBinary => "RowBinary",
             Self::RowBinaryWithNamesAndTypes => "RowBinaryWithNamesAndTypes",
+            Self::JsonEachRow => "JSONEachRow",
+            Self::ArrowStream => "ArrowStream",
         }
     }
 
@@ -1284,8 +1316,13 @@ impl Format {
     /// measure it.
     ///
     /// `None` is not a parse failure; it is the answer for a format that exists
-    /// and is not measurable here — `jsoneachrow` today — and the caller's job is
-    /// to decline to gate rather than to substitute.
+    /// and is not measurable here — `protobuf`, say, or any other format an arm
+    /// could declare and this crate has no encoder for — and the caller's job is
+    /// to decline to gate rather than to substitute. It is also the answer for a
+    /// near-miss spelling of a format this rig **can** measure: `JSONEachRow`'s
+    /// descriptor is `json_each_row`, and `jsoneachrow` deliberately does not
+    /// resolve to it, because a matcher that forgave one spelling would be a
+    /// second place the descriptor grammar is defined.
     #[must_use]
     pub fn parse(wire_format: &str) -> Option<Self> {
         FORMATS.into_iter().find(|f| f.wire_format() == wire_format)
@@ -1307,7 +1344,7 @@ pub fn all_combinations() -> Vec<Format> {
 ///
 /// # Why a restriction exists at all
 ///
-/// A full pass measures three formats and takes minutes apiece, which
+/// A full pass measures five formats and takes minutes apiece, which
 /// is the right cost for the pass that produces a committed ceiling and the wrong
 /// cost for the pass that is one point of a **search**. A search over
 /// infrastructure allocations needs the ClickHouse ingest ceiling at each of
@@ -3038,23 +3075,19 @@ enum Cell {
     NullableFloat64(Option<f64>),
     LowCardStringArray(Vec<String>),
     DateTime64 {
-        /// What goes on the wire: a `DateTime64` travels as its underlying
-        /// `Int64` tick count.
+        /// What goes on the wire in the binary formats: a `DateTime64` travels
+        /// as its underlying `Int64` tick count.
         ticks: i64,
-        /// Not written, and carried anyway so a cell can state the column type
-        /// it believes it is writing. That claim is what
+        /// Never written by RowBinary or Native — there the scale is a property
+        /// of the column type in the header, not of the wire — and read by two
+        /// consumers. The JSONEachRow encoder needs it to know how many
+        /// fractional digits the epoch-seconds decimal carries (see
+        /// [`push_json_datetime64`]), and
         /// `every_encoded_row_declares_the_columns_the_ddl_declares_in_order`
-        /// checks against the committed DDL, and it is the only thing standing
-        /// between a reordered `row_of` and a silently corrupt block: column
-        /// order is the wire contract for RowBinary, so a divergence does not
-        /// fail loudly, it mis-writes every row.
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "read by the DDL-agreement test, which is the only consumer that should read it"
-            )
-        )]
+        /// checks the type each cell claims against the committed DDL — the only
+        /// thing standing between a reordered `row_of` and a silently corrupt
+        /// block: column order is the wire contract for RowBinary, so a
+        /// divergence does not fail loudly, it mis-writes every row.
         scale: u8,
     },
 }
@@ -3617,6 +3650,427 @@ fn row_of(batch_id: u64, seq: u32) -> Vec<Cell> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// JSONEachRow encoding
+// ---------------------------------------------------------------------------
+
+/// Appends `s` as a JSON string, escaped per RFC 8259's minimum: `"`, `\`, and
+/// every control character below 0x20 as `\u00XX`.
+///
+/// Every string this corpus emits is an ASCII identifier (`sensor-17`,
+/// `METRIC_4`, `tag-9`), so on today's inputs this is a quote, the bytes, and a
+/// quote. It escapes anyway, because an encoder that is correct only for the
+/// inputs it happens to be handed is the kind that fails once it is reused —
+/// the same reason [`Dictionary::write`] handles the empty group this corpus
+/// cannot produce.
+///
+/// Hand-rolled rather than routed through `serde_json`, deliberately, even
+/// though `serde_json` is already a dependency. Three reasons: the block is
+/// accumulated into one growing `String` and a per-cell `serde_json::to_string`
+/// would allocate per value; `serde_json::Map` does not preserve insertion
+/// order without the `preserve_order` feature, and this block's key order is
+/// asserted byte-for-byte by its tests; and the escaping rule is four lines
+/// whose output those same tests pin — a dependency would not make it more
+/// proven, only less visible.
+fn push_json_string(out: &mut String, s: &str) {
+    use std::fmt::Write as _;
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Appends one `DateTime64` value as a JSON **string** holding Unix epoch
+/// seconds with exactly `scale` fractional digits, e.g. ticks `1772000000123`
+/// at scale 3 as `"1772000000.123"`.
+///
+/// # Why numeric epoch and not a formatted date string
+///
+/// ClickHouse parses `YYYY-MM-DD hh:mm:ss.fff` text **in the column's
+/// timezone**, which for this DDL is the server's — so the same block would
+/// land different ticks on servers configured differently, and a ceiling pass
+/// must not depend on how a container's `TZ` happens to be set. A Unix epoch
+/// names an instant with no timezone to consult. This is the same
+/// server-timezone independence the ArrowStream encoder buys with an explicit
+/// `"UTC"` on its timestamps.
+///
+/// # Why a quoted string and not a bare JSON number
+///
+/// Measured, not assumed: `clickhouse-server:26.3` **refused** the bare form.
+/// Its JSONEachRow reader accepts only an integer number for a `DateTime64`
+/// column — the live test's first run answered
+/// `Cannot parse input: expected ',' before: '.000,...'` at the first
+/// `batch_ts` — and an integer is epoch *seconds*, which cannot carry the
+/// sub-second digits. The quoted form routes through the `DateTime64` text
+/// parser instead, which accepts a decimal epoch in full. The cost is two
+/// bytes per timestamp; the alternative — bare integer ticks and a cast in
+/// the INSERT — would change the statement per column and measure an insert
+/// no arm sends.
+///
+/// # Why the round trip is exact and not merely close
+///
+/// A `DateTime64(S)` is a `Decimal64(S)` underneath, and ClickHouse's text
+/// reader parses the integer and fractional digits directly into that `Int64`
+/// tick count — the value never passes through a float. That matters at scale
+/// 6: `1772000000.000123` is not representable in an `f64` (31 bits of integer
+/// part leave the mantissa ~0.24µs of resolution), so a reader that went
+/// through `Float64` could misround the last microsecond digit. Digit-by-digit
+/// parsing cannot. That the whole chain holds — quoted decimal epoch, parsed
+/// exactly, timezone never consulted — is what the live test's `batch_ts` sum
+/// and `send_ts` bound prove against a real server.
+///
+/// # Why the fraction is fixed-width
+///
+/// Exactly `scale` digits, zero-padded, trailing zeros kept: `seconds * 10^S +
+/// fraction == ticks` then holds by construction, which is what lets a test
+/// assert the serialised form and a reader recompute the ticks without
+/// thinking about shortening rules. ClickHouse accepts trailing zeros; a
+/// whole-second value serialises as `"1772000000.000"`, not `"1772000000"`.
+///
+/// # Panics
+///
+/// If `scale` is 0 or above 9. A zero scale would emit a trailing `.` with no
+/// digits — not a decimal the text parser reads — and nothing in ClickHouse
+/// goes finer than nanoseconds. The committed DDL uses 3 and 6.
+fn push_json_datetime64(out: &mut String, ticks: i64, scale: u8) {
+    use std::fmt::Write as _;
+    assert!(
+        (1..=9).contains(&scale),
+        "DateTime64 scale {scale} has no JSON epoch form this encoder emits"
+    );
+    let per_second = 10u64.pow(u32::from(scale));
+    // Decomposed over the magnitude so that a negative tick count — before the
+    // epoch, which this corpus never is but the encoder does not get to assume
+    // — reads as a negative decimal rather than as floor-division debris:
+    // -1 tick at scale 3 is "-0.001", not "-1.999".
+    let magnitude = ticks.unsigned_abs();
+    out.push('"');
+    if ticks < 0 {
+        out.push('-');
+    }
+    let _ = write!(
+        out,
+        "{}.{:0width$}",
+        magnitude / per_second,
+        magnitude % per_second,
+        width = usize::from(scale)
+    );
+    out.push('"');
+}
+
+impl Cell {
+    /// Appends this cell as a JSONEachRow value.
+    ///
+    /// The integer cells — including the `UInt64` — are bare JSON numbers.
+    /// JSON the grammar puts no width limit on a number; the familiar 2^53
+    /// hazard is a property of consumers that parse into IEEE-754 doubles, and
+    /// ClickHouse's `JSONEachRow` reader is not one: it parses the digit string
+    /// directly into the column's own integer type, full-width. Quoting the
+    /// value would also be accepted (ClickHouse reads numbers from strings on
+    /// input), but it would measure a parse-plus-unquote nobody's arm performs.
+    ///
+    /// A present `quality` uses Rust's `Display` for `f64`, which prints the
+    /// shortest decimal that parses back to the identical bits — so the `f64`
+    /// the server stores equals the one the corpus generated, and the gate's
+    /// quality checks hold. Asserted finite because the corpus cannot produce
+    /// a NaN or an infinity and JSON cannot carry one; a silent `null` there
+    /// would corrupt the null-count gate instead of failing loudly here.
+    fn write_json(&self, out: &mut String) {
+        use std::fmt::Write as _;
+        match self {
+            Self::UInt64(v) => {
+                let _ = write!(out, "{v}");
+            }
+            Self::UInt16(v) => {
+                let _ = write!(out, "{v}");
+            }
+            Self::Int64(v) => {
+                let _ = write!(out, "{v}");
+            }
+            Self::LowCardString(s) => push_json_string(out, s),
+            Self::NullableFloat64(None) => out.push_str("null"),
+            Self::NullableFloat64(Some(v)) => {
+                assert!(
+                    v.is_finite(),
+                    "a non-finite quality ({v}) has no JSON form and cannot come from the corpus"
+                );
+                let _ = write!(out, "{v}");
+            }
+            Self::LowCardStringArray(vs) => {
+                out.push('[');
+                for (i, s) in vs.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    push_json_string(out, s);
+                }
+                out.push(']');
+            }
+            Self::DateTime64 { ticks, scale } => push_json_datetime64(out, *ticks, *scale),
+        }
+    }
+}
+
+/// Encodes one JSONEachRow block over `batches` batches of the workload's rows:
+/// one JSON object per row, keys the committed column names, newline-separated.
+///
+/// The keys are emitted in `corpus::COLUMNS` order. ClickHouse matches
+/// JSONEachRow fields by name rather than position, so the order is not a wire
+/// contract the way it is for RowBinary — it is kept anyway so that a block
+/// diffed against the DDL reads in one order, and so the exact-text tests can
+/// pin whole lines rather than sets of fragments.
+///
+/// The per-value decisions — numeric epoch timestamps, bare full-width
+/// integers, shortest-round-trip floats, the minimal escaper — live on
+/// [`Cell::write_json`] and [`push_json_datetime64`], beside the code that
+/// takes them.
+fn encode_json_each_row_block(lo: u64, batches: u64) -> Block {
+    let declared = corpus::COLUMNS;
+    let mut body = String::new();
+    let mut rows = 0u64;
+    for batch_id in lo..lo + batches {
+        for seq in 0..corpus::EVENTS_PER_BATCH {
+            if !corpus::keeps(batch_id, seq) {
+                continue;
+            }
+            let row = row_of(batch_id, seq);
+            assert_eq!(
+                row.len(),
+                declared.len(),
+                "a row carries {} cells but the target declares {} columns",
+                row.len(),
+                declared.len()
+            );
+            body.push('{');
+            for (i, ((name, _), cell)) in declared.iter().zip(&row).enumerate() {
+                if i > 0 {
+                    body.push(',');
+                }
+                push_json_string(&mut body, name);
+                body.push(':');
+                cell.write_json(&mut body);
+            }
+            body.push_str("}\n");
+            rows += 1;
+        }
+    }
+    Block {
+        body: body.into_bytes(),
+        rows,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ArrowStream encoding
+// ---------------------------------------------------------------------------
+
+/// The Arrow field one committed ClickHouse column maps to.
+///
+/// One match from the DDL's own type spelling, driven by [`corpus::COLUMNS`],
+/// so a column cannot be added to the workload without this mapping being
+/// decided — an unmapped type panics here rather than silently landing as
+/// whatever a generic converter guessed. The choices, and why each:
+///
+/// * `UInt64` / `UInt16` / `Int64` → the same-width Arrow integer. Identical
+///   bits, no conversion for the server to price.
+/// * `LowCardinality(String)` → plain `Utf8`, **not** an Arrow dictionary.
+///   ClickHouse casts to `LowCardinality` on insert, so the server pays the
+///   dictionary build — deliberately the same shape as RowBinary, where
+///   `LowCardinality` is transparent on the wire. Sending pre-built Arrow
+///   dictionaries would presuppose an arm that builds them client-side and
+///   would err in the *lenient* direction for arms that do not.
+/// * `Nullable(Float64)` → nullable `Float64` — the only nullable field,
+///   mirroring the DDL exactly so the schema states the null contract rather
+///   than leaving every column formally nullable the way lazy Arrow writers
+///   do.
+/// * `Array(LowCardinality(String))` → `List` of non-nullable `Utf8` items.
+///   The corpus has no null tag elements and the target's array elements are
+///   not `Nullable`, so the item field says so.
+/// * `DateTime64(3)` → `Timestamp(Millisecond)` and `DateTime64(6)` →
+///   `Timestamp(Microsecond)`: the tick unit matches the column scale, so the
+///   value on the wire is the same `Int64` tick count the binary formats
+///   carry, converted by nobody. Both carry an explicit `"UTC"` timezone. An
+///   Arrow timestamp *without* a timezone is defined as a wall-clock reading
+///   ("naive" time), which a consumer is entitled to interpret in its own
+///   local zone — the same server-timezone dependence the JSONEachRow encoder
+///   avoids with numeric epochs, avoided here with metadata: with `"UTC"` the
+///   ticks are instants and land identically on any server.
+fn arrow_field(name: &str, clickhouse_type: &str) -> arrow_schema::Field {
+    use arrow_schema::{DataType, Field, TimeUnit};
+    let data_type = match clickhouse_type {
+        "UInt64" => DataType::UInt64,
+        "UInt16" => DataType::UInt16,
+        "Int64" => DataType::Int64,
+        "LowCardinality(String)" => DataType::Utf8,
+        "Nullable(Float64)" => DataType::Float64,
+        "Array(LowCardinality(String))" => DataType::List(std::sync::Arc::new(Field::new(
+            "item",
+            DataType::Utf8,
+            false,
+        ))),
+        "DateTime64(3)" => DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+        "DateTime64(6)" => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        other => panic!("no Arrow mapping has been decided for ClickHouse type {other}"),
+    };
+    Field::new(name, data_type, clickhouse_type == "Nullable(Float64)")
+}
+
+/// The Arrow schema of one encoded block: [`arrow_field`] over the committed
+/// column list, in DDL order.
+fn arrow_block_schema() -> arrow_schema::Schema {
+    arrow_schema::Schema::new(
+        corpus::COLUMNS
+            .iter()
+            .map(|(name, ty)| arrow_field(name, ty))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Encodes one ArrowStream block over `batches` batches of the workload's rows:
+/// the IPC stream framing around a single `RecordBatch`.
+///
+/// One record batch per block rather than many, mirroring the other encoders:
+/// a pre-encoded block covers its whole batch range in one piece, and the
+/// block-size caveat recorded on Native ceilings (one large block amortises
+/// per-block work an arm's smaller blocks would pay) applies here identically.
+///
+/// Columnar like Native, so it transposes from [`row_of`] the same way and for
+/// the same reason: one definition of what a row is, guarded by the
+/// DDL-agreement test. The destructuring below is deliberately total — twelve
+/// cells, each matched by variant, the two timestamps by their scale as well —
+/// so a reordered or reshaped `row_of` fails loudly here rather than filling a
+/// builder with the wrong column's values.
+///
+/// # Panics
+///
+/// If a row's shape stops matching the committed columns, or if the assembled
+/// arrays disagree with [`arrow_block_schema`] — both of which are encoder
+/// defects, not runtime conditions, exactly as with [`Column::push`].
+fn encode_arrow_stream_block(lo: u64, batches: u64) -> Block {
+    use arrow_array::builder::{
+        Float64Builder, Int64Builder, ListBuilder, StringBuilder, TimestampMicrosecondBuilder,
+        TimestampMillisecondBuilder, UInt16Builder, UInt64Builder,
+    };
+    use arrow_array::{ArrayRef, RecordBatch};
+    use std::sync::Arc;
+
+    let mut batch_ids = UInt64Builder::new();
+    let mut event_seqs = UInt16Builder::new();
+    let mut sensors = StringBuilder::new();
+    let mut regions = StringBuilder::new();
+    let mut name_uppers = StringBuilder::new();
+    let mut units = StringBuilder::new();
+    let mut values = Int64Builder::new();
+    let mut values_scaled = Int64Builder::new();
+    let mut qualities = Float64Builder::new();
+    // The list builder is told its item field up front so the finished array's
+    // type — name and non-nullability included — is byte-identical to what
+    // [`arrow_field`] declares; `RecordBatch::try_new` rejects the block
+    // otherwise, which is the loud failure this module prefers.
+    let mut tags_lists = ListBuilder::new(StringBuilder::new()).with_field(
+        arrow_schema::Field::new("item", arrow_schema::DataType::Utf8, false),
+    );
+    // `with_timezone` here and in the schema: the builders produce the array's
+    // data type, and the two spellings of "UTC" must agree or try_new refuses.
+    let mut batch_tss = TimestampMillisecondBuilder::new().with_timezone("UTC");
+    let mut send_tss = TimestampMicrosecondBuilder::new().with_timezone("UTC");
+
+    let mut rows = 0u64;
+    for batch_id in lo..lo + batches {
+        for seq in 0..corpus::EVENTS_PER_BATCH {
+            if !corpus::keeps(batch_id, seq) {
+                continue;
+            }
+            let cells: [Cell; 12] =
+                row_of(batch_id, seq)
+                    .try_into()
+                    .unwrap_or_else(|row: Vec<Cell>| {
+                        panic!(
+                            "a row carries {} cells but the target declares 12",
+                            row.len()
+                        )
+                    });
+            let [
+                Cell::UInt64(id),
+                Cell::UInt16(event_seq),
+                Cell::LowCardString(sensor),
+                Cell::LowCardString(region),
+                Cell::LowCardString(name_upper),
+                Cell::LowCardString(unit),
+                Cell::Int64(value),
+                Cell::Int64(value_scaled),
+                Cell::NullableFloat64(quality),
+                Cell::LowCardStringArray(tags),
+                Cell::DateTime64 {
+                    ticks: batch_ts,
+                    scale: 3,
+                },
+                Cell::DateTime64 {
+                    ticks: send_ts,
+                    scale: 6,
+                },
+            ] = cells
+            else {
+                panic!("row shape changed: row_of no longer matches the committed columns")
+            };
+            batch_ids.append_value(id);
+            event_seqs.append_value(event_seq);
+            sensors.append_value(sensor);
+            regions.append_value(region);
+            name_uppers.append_value(name_upper);
+            units.append_value(unit);
+            values.append_value(value);
+            values_scaled.append_value(value_scaled);
+            qualities.append_option(quality);
+            for tag in &tags {
+                tags_lists.values().append_value(tag);
+            }
+            tags_lists.append(true);
+            batch_tss.append_value(batch_ts);
+            send_tss.append_value(send_ts);
+            rows += 1;
+        }
+    }
+
+    let schema = Arc::new(arrow_block_schema());
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(batch_ids.finish()),
+        Arc::new(event_seqs.finish()),
+        Arc::new(sensors.finish()),
+        Arc::new(regions.finish()),
+        Arc::new(name_uppers.finish()),
+        Arc::new(units.finish()),
+        Arc::new(values.finish()),
+        Arc::new(values_scaled.finish()),
+        Arc::new(qualities.finish()),
+        Arc::new(tags_lists.finish()),
+        Arc::new(batch_tss.finish()),
+        Arc::new(send_tss.finish()),
+    ];
+    let batch = RecordBatch::try_new(Arc::clone(&schema), arrays)
+        .expect("the assembled arrays match the declared schema");
+    let mut writer = arrow_ipc::writer::StreamWriter::try_new(Vec::new(), &schema)
+        .expect("an IPC stream writer over a Vec cannot fail to construct");
+    writer
+        .write(&batch)
+        .expect("writing one record batch to a Vec cannot fail");
+    writer
+        .finish()
+        .expect("finishing an IPC stream over a Vec cannot fail");
+    let body = writer
+        .into_inner()
+        .expect("unwrapping a finished IPC stream cannot fail");
+    Block { body, rows }
+}
+
 /// Pre-encodes one insert block covering batches `lo..lo + INSERT_BLOCK_BATCHES`.
 ///
 /// Encoded before the clock starts on purpose. The arms are measured with their
@@ -3633,10 +4087,17 @@ fn encode_block(format: Format, lo: u64) -> Block {
 /// thousand: the block size is chosen for the measurement, and paying it in
 /// every `cargo test` would make a correctness test slow enough to be skipped.
 fn encode_batches(format: Format, lo: u64, batches: u64) -> Block {
-    // Native is columnar and shares nothing with the row-oriented path below
-    // beyond `row_of`, which both read so that neither can drift from the DDL.
+    // Native and ArrowStream are columnar, and JSONEachRow is text; none of
+    // the three shares anything with the row-oriented binary path below beyond
+    // `row_of`, which all of them read so that none can drift from the DDL.
     if format == Format::Native {
         return encode_native_block(lo, batches);
+    }
+    if format == Format::JsonEachRow {
+        return encode_json_each_row_block(lo, batches);
+    }
+    if format == Format::ArrowStream {
+        return encode_arrow_stream_block(lo, batches);
     }
     let mut body = Vec::new();
     if format == Format::RowBinaryWithNamesAndTypes {
@@ -3981,7 +4442,9 @@ mod tests {
 
     /// A name this rig cannot emit is a refusal naming what it can, not an empty
     /// selection: a typo that measured nothing would look exactly like a pass
-    /// that had nothing to measure.
+    /// that had nothing to measure. `jsoneachrow` is the sharpest case now that
+    /// `json_each_row` IS measurable: the near-miss spelling must be refused
+    /// rather than forgiven, or the descriptor grammar would have two homes.
     #[test]
     fn a_restriction_naming_a_format_this_rig_cannot_emit_is_refused_with_the_ones_it_can() {
         let e = select_combinations(&["jsoneachrow".to_owned()]).expect_err("must refuse");
@@ -4251,9 +4714,11 @@ mod tests {
     }
 
     /// Rule 5 says the insert format materially changes server-side work, so an
-    /// arm is never gated against a format it does not write. `jsoneachrow` is
-    /// the live instance of that: it is a format arms could declare and this rig
-    /// does not encode.
+    /// arm is never gated against a format it does not write. `protobuf` is a
+    /// live instance: a format arms could declare and this rig does not encode.
+    /// (`jsoneachrow` was the example here until the `json_each_row` encoder
+    /// landed; the near-miss spelling still resolves to nothing, which the
+    /// last assertion keeps true.)
     #[test]
     fn an_arm_whose_insert_format_has_no_ceiling_is_not_gated_against_another_format() {
         let current = corpus_message_bytes();
@@ -4265,19 +4730,19 @@ mod tests {
             msgs_per_s: 50_000.0,
             // Far over the RowBinary ceiling, and deliberately not gated by it.
             rows_per_s: 50_000_000.0,
-            wire_format: "jsoneachrow",
+            wire_format: "protobuf",
         });
         assert!(!headroom.infra_bound());
         assert!(!headroom.is_proven());
         assert!(
-            headroom
-                .unproven()
-                .iter()
-                .any(|u| u.contains("jsoneachrow")),
+            headroom.unproven().iter().any(|u| u.contains("protobuf")),
             "{:?}",
             headroom.unproven()
         );
+        assert!(Format::parse("protobuf").is_none());
         assert!(Format::parse("jsoneachrow").is_none());
+        assert_eq!(Format::parse("json_each_row"), Some(Format::JsonEachRow));
+        assert_eq!(Format::parse("arrow_stream"), Some(Format::ArrowStream));
     }
 
     /// The gap this encoder closes, as a test. Every headline arm of this
@@ -4404,6 +4869,357 @@ mod tests {
                 "{format:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The JSONEachRow encoder
+    //
+    // Exact-text assertions, because the whole defence of this encoder is that
+    // its serialised forms are pinned: a timestamp that drifted into a
+    // formatted date string, or a float that grew digits, would still be
+    // "valid JSON" and would land different values on a differently configured
+    // server. The live proof against a real ClickHouse is in
+    // `harness/tests/native_encoder_matches_clickhouse.rs`.
+    // -----------------------------------------------------------------------
+
+    /// The serialised form the timestamp decision promises: a quoted decimal
+    /// epoch — the quotes are load-bearing, 26.3's number path refused a
+    /// fractional bare number — with exactly the column scale of fractional
+    /// digits, zero-padded, trailing zeros kept, so `seconds * 10^scale +
+    /// fraction == ticks` by construction and no timezone is consulted
+    /// anywhere.
+    #[test]
+    fn a_datetime64_serialises_as_epoch_seconds_with_exactly_the_column_scale_of_digits() {
+        let mut out = String::new();
+
+        // Sub-second digits at scale 3: the millisecond lands in the fraction.
+        push_json_datetime64(&mut out, 1_772_000_000_123, 3);
+        assert_eq!(out, "\"1772000000.123\"");
+
+        // A whole second keeps its zeros rather than shortening: the fraction
+        // width is the scale, always.
+        out.clear();
+        push_json_datetime64(&mut out, 1_772_000_000_000, 3);
+        assert_eq!(out, "\"1772000000.000\"");
+
+        // Scale 6, with sub-second digits an f64 could not carry exactly —
+        // the case that makes digit-by-digit parsing load-bearing.
+        out.clear();
+        push_json_datetime64(&mut out, 1_772_000_000_000_123, 6);
+        assert_eq!(out, "\"1772000000.000123\"");
+
+        out.clear();
+        push_json_datetime64(&mut out, 1_772_000_000_000_000, 6);
+        assert_eq!(out, "\"1772000000.000000\"");
+
+        // Before the epoch — unreachable from this corpus, and the sign must
+        // still read as a decimal rather than as floor-division debris.
+        out.clear();
+        push_json_datetime64(&mut out, -1, 3);
+        assert_eq!(out, "\"-0.001\"");
+    }
+
+    /// The escaper's contract: quotes, backslashes and control characters, and
+    /// nothing else — the corpus's ASCII identifiers pass through untouched.
+    #[test]
+    fn json_strings_escape_quotes_backslashes_and_control_characters() {
+        let mut plain = String::new();
+        push_json_string(&mut plain, "sensor-17");
+        assert_eq!(plain, "\"sensor-17\"");
+
+        let mut escaped = String::new();
+        push_json_string(&mut escaped, "a\"b\\c\n");
+        assert_eq!(escaped, "\"a\\\"b\\\\c\\u000a\"");
+    }
+
+    /// The block's first lines, byte for byte.
+    ///
+    /// Hand-derived from the corpus's committed generator constants rather
+    /// than recomputed through the encoder's own helpers, so this test cannot
+    /// agree with a shared mistake. Batch 0 keeps seqs 0, 4 and 5 first: 1 and
+    /// 2 fall to the quality floor (0.07 and 0.14 < 0.2), 3 to the `drop`
+    /// unit. Batch 0 also pins the two coalesces the gate cares about — the
+    /// null region landing as `""` and the null quality landing as JSON
+    /// `null` — plus an empty and a non-empty tags array, a present quality
+    /// (0.28, shortest-round-trip), and both timestamp scales at the corpus
+    /// base timestamp.
+    ///
+    /// If a generator constant in `workload.toml` moves, these literals move
+    /// with it — the same coupling `DATASET_VERSION` exists to make loud.
+    #[test]
+    fn the_first_json_lines_are_byte_for_byte_the_corpus_rows_they_encode() {
+        let block = encode_insert_block(Format::JsonEachRow, 0, 1);
+        let text = String::from_utf8(block.body).expect("a JSON block is UTF-8");
+        assert!(text.ends_with('\n'), "every line is newline-terminated");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(block.rows as usize, lines.len());
+
+        assert_eq!(
+            lines[0],
+            "{\"batch_id\":0,\"event_seq\":0,\"sensor\":\"sensor-0\",\"region\":\"\",\
+             \"name_upper\":\"METRIC_0\",\"unit\":\"count\",\"value\":0,\"value_scaled\":0,\
+             \"quality\":null,\"tags\":[],\"batch_ts\":\"1772000000.000\",\
+             \"send_ts\":\"1772000000.000000\"}"
+        );
+        assert_eq!(
+            lines[1],
+            "{\"batch_id\":0,\"event_seq\":4,\"sensor\":\"sensor-0\",\"region\":\"\",\
+             \"name_upper\":\"METRIC_4\",\"unit\":\"ratio\",\"value\":388,\
+             \"value_scaled\":77600,\"quality\":0.28,\"tags\":[],\
+             \"batch_ts\":\"1772000000.000\",\"send_ts\":\"1772000000.000000\"}"
+        );
+        assert_eq!(
+            lines[2],
+            "{\"batch_id\":0,\"event_seq\":5,\"sensor\":\"sensor-0\",\"region\":\"\",\
+             \"name_upper\":\"METRIC_5\",\"unit\":\"celsius\",\"value\":485,\
+             \"value_scaled\":80833,\"quality\":null,\"tags\":[\"tag-5\"],\
+             \"batch_ts\":\"1772000000.000\",\"send_ts\":\"1772000000.000000\"}"
+        );
+    }
+
+    /// Every line of a multi-batch block through an independent parser —
+    /// `serde_json`, which shares no code with the hand-rolled writer — and
+    /// field-by-field against the corpus's own derivations.
+    ///
+    /// The timestamps come back as the strings they are sent as — the quoted
+    /// form exists precisely so no float sits on the path — and their ticks
+    /// are recovered here by deleting the point, which the fixed-width
+    /// fraction makes an exact inversion.
+    #[test]
+    fn a_json_block_agrees_with_the_corpus_through_an_independent_parser() {
+        let batches = 3;
+        let block = encode_insert_block(Format::JsonEachRow, 0, batches);
+        let text = String::from_utf8(block.body).expect("a JSON block is UTF-8");
+
+        let mut kept = Vec::new();
+        for batch_id in 0..batches {
+            for seq in 0..corpus::EVENTS_PER_BATCH {
+                if corpus::keeps(batch_id, seq) {
+                    kept.push((batch_id, seq));
+                }
+            }
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), kept.len());
+
+        for (line, &(batch_id, seq)) in lines.iter().zip(&kept) {
+            let v: serde_json::Value =
+                serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+            let obj = v.as_object().expect("a row is an object");
+            let declared: Vec<&str> = corpus::COLUMNS.iter().map(|(n, _)| *n).collect();
+            let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+            let mut sorted = declared.clone();
+            sorted.sort_unstable();
+            assert_eq!(keys, sorted, "serde_json sorts keys; the sets must match");
+
+            assert_eq!(obj["batch_id"].as_u64(), Some(batch_id));
+            assert_eq!(obj["event_seq"].as_u64(), Some(u64::from(seq)));
+            assert_eq!(obj["sensor"].as_str(), Some(&*corpus::sensor_of(batch_id)));
+            assert_eq!(
+                obj["region"].as_str(),
+                Some(&*corpus::region_of(batch_id).unwrap_or_default())
+            );
+            assert_eq!(
+                obj["name_upper"].as_str(),
+                Some(&*corpus::ascii_upper(&corpus::name_of(batch_id, seq)))
+            );
+            assert_eq!(obj["unit"].as_str(), Some(corpus::unit_of(batch_id, seq)));
+            let value = corpus::value_of(batch_id, seq);
+            assert_eq!(obj["value"].as_i64(), Some(value));
+            assert_eq!(
+                obj["value_scaled"].as_i64(),
+                Some(corpus::value_scaled_of(value, seq))
+            );
+            // Shortest-round-trip printing means the parsed f64 is bit-equal
+            // to the generated one, so exact comparison is the correct check.
+            assert_eq!(obj["quality"].as_f64(), corpus::quality_of(batch_id, seq));
+            let tags: Vec<&str> = obj["tags"]
+                .as_array()
+                .expect("tags is an array")
+                .iter()
+                .map(|t| t.as_str().expect("a tag is a string"))
+                .collect();
+            assert_eq!(tags, corpus::tags_of(batch_id, seq));
+            // The quoted decimal epoch is fixed-width, so deleting the point
+            // must recover the exact tick count — an independent inversion of
+            // the encoder's `seconds * 10^scale + fraction` construction.
+            let ticks_of = |v: &serde_json::Value| -> i64 {
+                v.as_str()
+                    .expect("a timestamp is a quoted decimal epoch")
+                    .replace('.', "")
+                    .parse()
+                    .expect("digits either side of one point")
+            };
+            assert_eq!(ticks_of(&obj["batch_ts"]), corpus::batch_ts_ms_of(batch_id));
+            assert_eq!(
+                ticks_of(&obj["send_ts"]),
+                corpus::send_ts_us_prefill(batch_id)
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The ArrowStream encoder
+    //
+    // Structural round-trip rather than exact bytes: the IPC framing carries
+    // flatbuffer padding this crate has no business pinning. What is pinned is
+    // everything ClickHouse acts on — the schema, field for field, and the
+    // values — read back through arrow-ipc's own reader, which shares no code
+    // with the builder path that wrote them.
+    // -----------------------------------------------------------------------
+
+    /// The declared schema, field for field: names in DDL order, the mapped
+    /// types, `quality` alone nullable, non-nullable list items, and the
+    /// explicit `"UTC"` on both timestamps — the field whose absence would let
+    /// a server read the ticks as wall-clock time.
+    #[test]
+    fn the_arrow_schema_maps_every_committed_column_the_documented_way() {
+        use arrow_schema::{DataType, Field, TimeUnit};
+
+        let schema = arrow_block_schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        let declared: Vec<&str> = corpus::COLUMNS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, declared);
+
+        for field in schema.fields() {
+            assert_eq!(
+                field.is_nullable(),
+                field.name() == "quality",
+                "{} must mirror the DDL's null contract",
+                field.name()
+            );
+        }
+        assert_eq!(
+            schema
+                .field_with_name("batch_id")
+                .expect("batch_id")
+                .data_type(),
+            &DataType::UInt64
+        );
+        assert_eq!(
+            schema
+                .field_with_name("sensor")
+                .expect("sensor")
+                .data_type(),
+            &DataType::Utf8
+        );
+        assert_eq!(
+            schema
+                .field_with_name("quality")
+                .expect("quality")
+                .data_type(),
+            &DataType::Float64
+        );
+        assert_eq!(
+            schema.field_with_name("tags").expect("tags").data_type(),
+            &DataType::List(std::sync::Arc::new(Field::new(
+                "item",
+                DataType::Utf8,
+                false
+            )))
+        );
+        assert_eq!(
+            schema
+                .field_with_name("batch_ts")
+                .expect("batch_ts")
+                .data_type(),
+            &DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
+        );
+        assert_eq!(
+            schema
+                .field_with_name("send_ts")
+                .expect("send_ts")
+                .data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        );
+    }
+
+    /// The stream read back through arrow-ipc's own reader: the schema
+    /// travels, the row count is the workload's, and the first rows hold the
+    /// corpus's values — including the null quality, the present quality, the
+    /// empty and non-empty tags rows and both timestamps' raw tick counts.
+    #[test]
+    fn an_arrow_stream_block_round_trips_through_the_ipc_reader() {
+        use arrow_array::{
+            Array, Float64Array, ListArray, StringArray, TimestampMicrosecondArray,
+            TimestampMillisecondArray, UInt16Array, UInt64Array,
+        };
+
+        let batches = 10;
+        let block = encode_insert_block(Format::ArrowStream, 0, batches);
+        let reader =
+            arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(&block.body[..]), None)
+                .expect("the body opens as an IPC stream");
+        assert_eq!(*reader.schema(), arrow_block_schema());
+
+        let read: Vec<arrow_array::RecordBatch> = reader
+            .collect::<Result<_, _>>()
+            .expect("every message in the stream decodes");
+        // One record batch per block is part of the encoding's shape — see
+        // `encode_arrow_stream_block` — not an accident of this input.
+        assert_eq!(read.len(), 1);
+        let batch = &read[0];
+        assert_eq!(batch.num_rows() as u64, block.rows);
+        assert_eq!(block.rows, corpus::expected_rows(batches));
+
+        let batch_ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("batch_id is UInt64");
+        let event_seqs = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .expect("event_seq is UInt16");
+        let sensors = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("sensor is Utf8");
+        let qualities = batch
+            .column(8)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("quality is Float64");
+        let tags = batch
+            .column(9)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("tags is a list");
+        let batch_tss = batch
+            .column(10)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("batch_ts is Timestamp(ms)");
+        let send_tss = batch
+            .column(11)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("send_ts is Timestamp(us)");
+
+        // Rows 0..3 are batch 0's kept seqs 0, 4 and 5 — the same rows the
+        // JSON exact-text test derives by hand, checked against the corpus
+        // here so the two encoder tests cannot drift apart.
+        assert_eq!(batch_ids.value(0), 0);
+        assert_eq!(event_seqs.value(0), 0);
+        assert_eq!(sensors.value(0), "sensor-0");
+        assert!(qualities.is_null(0), "quality (0,0) is the corpus's null");
+        assert_eq!(tags.value(0).len(), 0, "tags (0,0) is empty");
+        assert_eq!(batch_tss.value(0), corpus::batch_ts_ms_of(0));
+        assert_eq!(send_tss.value(0), corpus::send_ts_us_prefill(0));
+
+        assert_eq!(event_seqs.value(1), 4);
+        assert!((qualities.value(1) - 0.28).abs() < f64::EPSILON);
+
+        assert_eq!(event_seqs.value(2), 5);
+        let row2_tags = tags.value(2);
+        let row2_tags = row2_tags
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("tag items are Utf8");
+        assert_eq!(row2_tags.len(), 1);
+        assert_eq!(row2_tags.value(0), "tag-5");
     }
 
     // -----------------------------------------------------------------------
@@ -5255,7 +6071,7 @@ mod tests {
             consume: Some(consume_at(840, 305_554, "old")),
             clickhouse: vec![
                 ingest_of("rowbinary", 1, "old"),
-                ingest_of("jsoneachrow", 2, "old"),
+                ingest_of("json_each_row", 2, "old"),
             ],
         };
         ceilings.merge(Pass {
@@ -5276,7 +6092,7 @@ mod tests {
         let je = ceilings
             .clickhouse
             .iter()
-            .find(|c| c.format == "jsoneachrow")
+            .find(|c| c.format == "json_each_row")
             .expect("an unmeasured format is not deleted");
         assert_eq!(je.rows_per_s, 2);
     }

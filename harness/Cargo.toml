@@ -16,6 +16,19 @@ repository.workspace = true
 # its own row types.
 [dependencies]
 apache-avro = { workspace = true }
+# The ceiling rig's ArrowStream encoder (`ceiling::Format::ArrowStream`) and its
+# round-trip test, and nothing else. The three sub-crates are named instead of
+# the `arrow` facade because the facade pulls the CSV, JSON and compute kernels
+# this crate has no use for; and they are declared here rather than in
+# `[workspace.dependencies]` because the harness is their only consumer — the
+# entrants must not grow an arrow dependency by accident, for the same reason
+# they do not share this crate's Avro. Pinned exactly, and to one version across
+# the three, because arrow-rs releases them in lockstep and the bytes this
+# encoder emits are the denominator of a committed ceiling — a silent minor-bump
+# that moved the IPC layout would change what a "reproduced" pass sends.
+arrow-array = "=59.1.0"
+arrow-ipc = "=59.1.0"
+arrow-schema = "=59.1.0"
 bytes = { workspace = true }
 rdkafka = { workspace = true }
 serde = { workspace = true }
