@@ -308,7 +308,10 @@ fn unrunnable_knobs(
 }
 
 /// Seconds a drain may take before it is abandoned.
-const DRAIN_MAX_S: u64 = 1800;
+///
+/// 600 is 2.5x the slowest drain any arm has needed (236 s), so it is
+/// unreachable by a working one — it bounds what a broken one wastes.
+const DRAIN_MAX_S: u64 = 600;
 /// Seconds to wait for the pipeline to settle before gating.
 const QUIESCE_MAX_S: u64 = 900;
 /// Sampler interval.
@@ -643,7 +646,7 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     }
     // Verify the load source BEFORE starting anything. Without this, a missing
     // or short topic is discovered one arm at a time, each failing only at the
-    // drain deadline — thirty minutes to learn what a metadata call answers
+    // drain deadline — ten minutes to learn what a metadata call answers
     // instantly.
     match opts.mode {
         Mode::Drain => {
@@ -2237,7 +2240,7 @@ fn stop_samplers(
 /// EVERY declared container, not merely one of them. Defect this closes: the
 /// test was `!names.iter().any(sut_alive)`, so an arm counted as alive while any
 /// single container of it was — and an OOM-killed Flink TaskManager beside a
-/// healthy JobManager burned the whole 1800s deadline and was recorded as
+/// healthy JobManager burned the whole drain deadline and was recorded as
 /// slowness. That attributes a data-plane crash to the framework being slow,
 /// which is the wrong finding about the wrong thing.
 fn dead_container(

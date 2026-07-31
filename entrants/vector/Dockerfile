@@ -73,22 +73,14 @@ COPY entrants/vector/transform.vrl /etc/vector/transform.vrl
 # on this use: the values interpolated here are the driver's own knobs, not
 # secrets.
 #
-# VECTOR_LOG was `warn`, to keep per-batch chatter off the hot path's stdout.
-# It was measured instead: on the first live run the arrow_stream variant sat
-# for its whole 1800s drain deadline at 0 of 110,250,000 rows and emitted
-# ZERO log lines — the harness printed its `--- spate-bench-sut-sut ---`
-# header with nothing under it. An arm that produces no evidence when it
-# stalls cannot be diagnosed at all, and the sink's start-up (arrow_stream
-# fetches the table schema from system.columns) and librdkafka's assignment
-# lifecycle both log at INFO, so `warn` discarded precisely the two things
-# worth reading.
-#
-# `info` is the level, not `debug`: Vector logs component lifecycle and sink
-# start-up at INFO and per-request detail at DEBUG/TRACE, so the hot path
-# stays quiet. If a future run shows INFO is chatty enough to matter, narrow
-# it with a directive (`warn,vector::sinks=info`) rather than returning to a
-# level that makes a stall silent. No metrics exporter is configured, because
-# no published figure comes from an arm's self-report.
+# VECTOR_LOG=info is what makes a stalled arm diagnosable: the two things worth
+# reading when nothing moves — librdkafka's assignment lifecycle and the sink's
+# start-up, where arrow_stream fetches the table schema from system.columns —
+# both log at INFO, while per-request detail is DEBUG/TRACE, so the hot path
+# stays quiet. Narrow with a directive (`warn,vector::sinks=info`) if INFO ever
+# costs a number; a level that silences a stall is not the remedy. No metrics
+# exporter is configured, because no published figure comes from an arm's
+# self-report.
 ENV VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true \
     VECTOR_LOG=info \
     BOOTSTRAP=spate-bench-redpanda:29092 \
