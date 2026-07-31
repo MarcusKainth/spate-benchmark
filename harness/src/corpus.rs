@@ -761,9 +761,34 @@ pub fn split_sql(sql: &str) -> Vec<String> {
 // Registry and prefill
 // ---------------------------------------------------------------------------
 
-/// The registry subject. Topic-name strategy, which is what Kafka Connect's
-/// `AvroConverter` and ClickHouse's `AvroConfluent` both expect by default.
-pub const SUBJECT: &str = "sensor-batches-value";
+/// The topic the corpus is produced to and every arm consumes from.
+///
+/// [`SUBJECT`] is derived from it, so the registry name and the topic cannot
+/// drift apart — which is exactly how they drifted before.
+pub const TOPIC: &str = "comparison-sensor-batches";
+
+/// The registry subject: `<topic>-value`, Confluent's topic-name strategy.
+///
+/// Most arms never ask for it. Flink (`forGeneric`), spate and ClickHouse's
+/// `AvroConfluent` all resolve the writer schema by the id in the Confluent
+/// frame, and Vector bakes the schema in and never contacts the registry at
+/// all. Kafka Connect's `AvroConverter` is the exception: it additionally
+/// resolves the schema *version*, and that lookup is subject-scoped. It is
+/// therefore the only arm this name can break, and it breaks by decoding
+/// nothing whatsoever rather than by decoding badly.
+///
+/// This read `sensor-batches-value` until a live run measured it. The doc
+/// comment claimed topic-name strategy while the value hardcoded a topic that
+/// does not exist, so the claim was false the whole time and no arm that
+/// resolves by id could notice. Kafka Connect drained 0 of 110,250,000 rows
+/// against `Subject 'comparison-sensor-batches-value' not found` (error code
+/// 40401). [`subject_follows_the_topic_name_strategy`] now pins the two
+/// together so the comment cannot go stale again.
+///
+/// Changing it re-versions nothing: the subject name is outside the
+/// `dataset-version` region because it determines no byte of the corpus — the
+/// Confluent frame carries the schema *id*, never the subject.
+pub const SUBJECT: &str = "comparison-sensor-batches-value";
 
 /// Register the committed schema under [`SUBJECT`] and return its id.
 ///
@@ -1721,6 +1746,25 @@ pub fn verify_corpus(bootstrap: &str, topic: &str, schema_id: u32, sample: u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The subject a Confluent client derives from the topic is the subject the
+    /// prefill must register under. These were written independently once, the
+    /// doc comment asserted they agreed, and they did not: the Kafka Connect arm
+    /// spent its whole 1800s drain deadline retrieving `Subject
+    /// 'comparison-sensor-batches-value' not found` and landed zero rows. An
+    /// assertion is the only form of that claim a future edit cannot falsify
+    /// silently, because every other arm resolves the schema by wire id and
+    /// would stay green through the same mistake.
+    #[test]
+    fn subject_follows_the_topic_name_strategy() {
+        assert_eq!(
+            SUBJECT,
+            format!("{TOPIC}-value"),
+            "the registry subject must be the topic-name-strategy name for {TOPIC}; \
+             Kafka Connect's AvroConverter resolves the schema version by subject and \
+             decodes nothing at all when it does not exist"
+        );
+    }
 
     #[test]
     fn the_committed_schema_parses() {

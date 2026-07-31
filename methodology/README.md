@@ -41,7 +41,8 @@ those rows into ClickHouse.
 - Target: [`workload/clickhouse/ddl.sql`](workload/clickhouse/ddl.sql) —
   the `sensor_events` table. Column order is the wire contract.
 - Wire format: Confluent framing (`0x00` + big-endian u32 schema id + datum),
-  subject `sensor-batches-value`, against a live Schema Registry.
+  subject `comparison-sensor-batches-value` — the topic-name-strategy name for
+  the topic — against a live Schema Registry.
 
 **The transform**, applied to every decoded row, in this order — drop rows where
 `unit = 'drop'` (the sentinel); drop rows where `quality` is non-null and

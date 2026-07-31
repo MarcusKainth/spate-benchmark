@@ -182,7 +182,7 @@ fn opts_from(args: &[String], root: &Path) -> Result<RunOptions, String> {
         dry_run: false,
         fresh_infra: false,
         fail_fast: false,
-        topic: "comparison-sensor-batches".to_owned(),
+        topic: spate_benchmark_harness::corpus::TOPIC.to_owned(),
         batches: 1_500_000,
         knobs: BTreeMap::new(),
     };
