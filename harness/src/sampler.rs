@@ -821,7 +821,7 @@ pub fn sample_arm(names: &[String], interval_s: f64) -> Vec<Sampler> {
 
 /// Stop and remove a framework arm, returning its last log lines for diagnosis.
 pub fn stop_sut(name: &str) -> String {
-    let logs = docker_try(&["logs", "--tail", "40", name]).unwrap_or_default();
+    let logs = crate::docker::container_logs(name, 40);
     let _ = docker_try(&["rm", "-f", name]);
     logs
 }

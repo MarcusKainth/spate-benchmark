@@ -47,6 +47,44 @@ pub fn docker_try(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// The last `tail` lines a container wrote, on **both** streams.
+///
+/// `docker logs` replicates each of the container's streams to the matching one
+/// of its own, so [`docker_try`], which keeps stdout alone, drops the whole log
+/// of a SUT that writes to stderr — Vector does, log4j does not.
+///
+/// Never returns an empty string: silence and an unreadable log are different
+/// facts, and a reader who cannot tell them apart debugs the wrong one.
+#[must_use]
+pub fn container_logs(name: &str, tail: u32) -> String {
+    let out = Command::new("docker")
+        .args(["logs", "--tail", &tail.to_string(), name])
+        .output()
+        .expect("docker CLI");
+    merge_log_streams(
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+        out.status.success(),
+    )
+}
+
+/// Splices what `docker logs` put on each stream into one block.
+///
+/// Separate from [`container_logs`] so the three outcomes — output, no output,
+/// unreadable — are testable without a daemon.
+fn merge_log_streams(stdout: &str, stderr: &str, ok: bool) -> String {
+    if !ok {
+        return format!("<log unreadable: {}>", stderr.trim());
+    }
+    let joined = format!("{}{}", stdout, stderr);
+    let joined = joined.trim();
+    if joined.is_empty() {
+        "<container wrote nothing on either stream>".to_owned()
+    } else {
+        joined.to_owned()
+    }
+}
+
 /// Force-remove any container of this name (running or exited), ignoring a
 /// "no such container" miss.
 ///
@@ -130,4 +168,37 @@ pub fn clickhouse_sql(
         "clickhouse error for {sql:?}: {body}"
     );
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A container whose whole log is on stderr, which a stdout-only capture
+    /// renders as no failure information at all.
+    #[test]
+    fn stderr_only_output_is_kept() {
+        let merged = merge_log_streams("", "ERROR sink failed\n", true);
+        assert!(
+            merged.contains("ERROR sink failed"),
+            "stderr-only logs must survive, got {merged:?}"
+        );
+    }
+
+    #[test]
+    fn both_streams_are_kept() {
+        let merged = merge_log_streams("out line\n", "err line\n", true);
+        assert!(merged.contains("out line") && merged.contains("err line"));
+    }
+
+    /// Silence and unreadability are different facts and must not share a
+    /// rendering — telling them apart is the whole point of this function.
+    #[test]
+    fn silence_and_unreadable_are_distinguishable() {
+        let quiet = merge_log_streams("", "", true);
+        let broken = merge_log_streams("", "No such container: x", false);
+        assert_ne!(quiet, broken);
+        assert!(!quiet.is_empty() && !broken.is_empty());
+        assert!(broken.contains("No such container"));
+    }
 }
