@@ -31,10 +31,20 @@ spate-benchmark-harness = { version = "=0.1.0", path = "harness" }
 # Records produced from here on carry `sut.version`. The ones already in
 # `results/` carry `sut.commit`, because they were measured before 0.1.0 existed
 # — the schema accepts either, and saying they were 0.1.0 would be false.
-spate-core = "0.1.0"
-spate-avro = "0.1.0"
-spate-kafka = "0.1.0"
-spate-clickhouse = "0.1.0"
+# CANDIDATE BRANCH — pinned to an unreleased revision, never to be merged.
+#
+# spate-etl/spate#32 (`feat/avro-datum-deserializer`, stacked on #31) at
+# 5a855d78731e7ec5c2e75f4637106038e41ddffc. A git source makes
+# `entrants/spate/build.rs` report `0.1.0-dev` and bake this commit, so a record
+# measured here says what it was built from instead of claiming a release.
+#
+# `results/` on main must never carry these numbers: they describe code nobody
+# has shipped. The collector bases a candidate run's PR on this branch, so
+# reaching main would take a second, deliberate merge of the pin itself.
+spate-core = { git = "https://github.com/spate-etl/spate", rev = "5a855d78731e7ec5c2e75f4637106038e41ddffc" }
+spate-avro = { git = "https://github.com/spate-etl/spate", rev = "5a855d78731e7ec5c2e75f4637106038e41ddffc" }
+spate-kafka = { git = "https://github.com/spate-etl/spate", rev = "5a855d78731e7ec5c2e75f4637106038e41ddffc" }
+spate-clickhouse = { git = "https://github.com/spate-etl/spate", rev = "5a855d78731e7ec5c2e75f4637106038e41ddffc" }
 
 apache-avro = "0.21"
 bytes = "1.11.1"

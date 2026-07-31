@@ -2468,8 +2468,7 @@ dependencies = [
 [[package]]
 name = "spate-avro"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3535658985da34648175c05f9db85aad2191e416b4f0055ce7cffc7e7a7e432"
+source = "git+https://github.com/spate-etl/spate?rev=5a855d78731e7ec5c2e75f4637106038e41ddffc#5a855d78731e7ec5c2e75f4637106038e41ddffc"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -2503,8 +2502,7 @@ dependencies = [
 [[package]]
 name = "spate-clickhouse"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87a926d971210d856aebbd5fd8a6a0fdb9ab041b03639d6405dcdeebe5763414"
+source = "git+https://github.com/spate-etl/spate?rev=5a855d78731e7ec5c2e75f4637106038e41ddffc#5a855d78731e7ec5c2e75f4637106038e41ddffc"
 dependencies = [
  "bytes",
  "bytesize",
@@ -2521,8 +2519,7 @@ dependencies = [
 [[package]]
 name = "spate-core"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b77c831bafbae47c7f1a7c3198dadaf7952153617e5844f78d52f0568b49927e"
+source = "git+https://github.com/spate-etl/spate?rev=5a855d78731e7ec5c2e75f4637106038e41ddffc#5a855d78731e7ec5c2e75f4637106038e41ddffc"
 dependencies = [
  "bytes",
  "bytesize",
@@ -2548,8 +2545,7 @@ dependencies = [
 [[package]]
 name = "spate-kafka"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70a4c9377a68ac957e31406091235d4d25cea4677c3a089788b09fca22d557ea"
+source = "git+https://github.com/spate-etl/spate?rev=5a855d78731e7ec5c2e75f4637106038e41ddffc#5a855d78731e7ec5c2e75f4637106038e41ddffc"
 dependencies = [
  "bytes",
  "bytesize",
