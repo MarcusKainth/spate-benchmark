@@ -125,6 +125,18 @@ export default function Table({
         {group.dataset_version && <> · corpus {group.dataset_version}</>}
       </p>
 
+      {/* Every arm's newest sitting here produced no number, so there is no table
+          to draw. Rendering the empty one instead would caption it with the
+          not-headline-eligible footer below, which blames rule 3 for an absence
+          that is nothing of the kind: these arms were run and they broke. The
+          gaps themselves are listed by the caller. */}
+      {!rows.length ? (
+        <p className="bench-note">
+          Nothing in this group has a current measurement: every arm&rsquo;s most recent
+          run produced no number. The runs are listed below.
+        </p>
+      ) : (
+      <>
       <div className="bench-scroll">
         <table className="bench-table">
           <caption className="bench-sr-only">
@@ -230,6 +242,8 @@ export default function Table({
         )}
         Every column has its own scale and no scale is shared with any other group.
       </p>
+      </>
+      )}
     </div>
   );
 }

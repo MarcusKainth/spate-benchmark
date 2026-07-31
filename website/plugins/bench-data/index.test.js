@@ -119,12 +119,37 @@ test('flags are the union across repetitions, not the newest one\'s', async () =
 
 test('a run that produced no publishable number is an explicit gap, not silence', async () => {
   const {rows, attempts} = await load();
-  assert.equal(attempts.length, 1);
-  assert.equal(attempts[0].status, 'failed');
+  assert.ok(attempts.length > 0);
+  for (const a of attempts) assert.equal(a.status, 'failed');
   assert.ok(
     !rows.some((r) => r.metrics.rows_per_s?.value === 0),
     'a failed record must not become a row',
   );
+});
+
+test('a sitting that failed every repetition is one gap, not one per repetition', async () => {
+  const {attempts} = await load();
+  // Two failed reps of one sweep. Listing each would say the arm was attempted
+  // twice, and would grow this list without bound as re-runs accumulate — the
+  // same unbounded payload the rows were carrying.
+  const sustained = attempts.filter((a) => a.reps_counted === 2);
+  assert.equal(sustained.length, 1, 'the two failed reps collapse into one gap');
+  assert.equal(sustained[0].note, 'could not hold the offered rate');
+});
+
+test('a group with nothing but gaps is still named on the page', async () => {
+  const {groups, rows, attempts} = await load();
+  // The component renders only groups this list names, so deriving it from rows
+  // alone would make an arm that fails everywhere vanish rather than read as
+  // broken — the loudest thing on the page becoming the quietest.
+  const empty = groups.filter((g) => !rows.some((r) => r.group === g.key));
+  assert.equal(empty.length, 1, 'the sustained-mode group has no rows');
+  assert.ok(
+    attempts.some((a) => a.group === empty[0].key),
+    'and it is named because an attempt describes it',
+  );
+  assert.equal(empty[0].env_id, 'testenv');
+  assert.equal(empty[0].dataset_version, 'd1-fixture');
 });
 
 test('approach and wire format reach the row, which is what makes the contract renderable', async () => {
@@ -149,16 +174,81 @@ test('a stripped arm is present but never headline-eligible, even when it is fas
   assert.ok(inGroup.some(eligible), 'something must still be rankable');
 });
 
-test('two sittings on one day are two rows, not one', async () => {
+test('a re-run supersedes the sitting before it rather than merging into it', async () => {
   const {rows} = await load();
   // Four records, one arm, one configuration, one UTC day, two invocation ids.
-  // Under the calendar-day key these collapsed into a single published row whose
-  // spread read as run-to-run variance rather than as two different sweeps.
+  // The later sweep is what the arm does now, so it is the only one published —
+  // but the two are still aggregated SEPARATELY first. Medianing them together
+  // and then publishing would give 1505, a number no sitting measured.
   const gamma = rows.filter((r) => r.entrant === 'gamma');
-  assert.equal(gamma.length, 2, 'one row per invocation');
-  const medians = gamma.map((r) => r.metrics.rows_per_s.value).sort((a, b) => a - b);
-  assert.deepEqual(medians, [1005, 2005]);
-  for (const r of gamma) assert.equal(r.reps_counted, 2);
+  assert.equal(gamma.length, 1, 'only the newest sitting is published');
+  assert.equal(gamma[0].metrics.rows_per_s.value, 2005, 'median of the later sweep alone');
+  assert.equal(gamma[0].metrics.rows_per_s.lo, 2000);
+  assert.equal(gamma[0].metrics.rows_per_s.hi, 2010);
+  assert.equal(gamma[0].reps_counted, 2);
+});
+
+test('one published sitting per arm, which is what bounds the payload', async () => {
+  const {rows} = await load();
+  // Docusaurus global data is not code-split: it ships in main.js to every
+  // visitor. Without this the catalogue grows by an arm per nightly sweep,
+  // forever, and each re-run also ranks an arm against older copies of itself.
+  //
+  // The invariant is one SITTING per arm, not one row: an arm measured at two
+  // configurations in a single sweep would publish both, and they would be a
+  // real comparison rather than an arm against a stale copy of itself.
+  const seen = new Map();
+  for (const r of rows) {
+    const arm = [r.group, r.entrant, r.variant_id].join('|');
+    const first = seen.get(arm);
+    if (first !== undefined) assert.equal(r.sitting, first, `${arm} published twice over`);
+    else seen.set(arm, r.sitting);
+  }
+  assert.equal(seen.size, rows.length, 'the fixture measures one configuration per sweep');
+});
+
+test('a failed repetition does not evict the number its own sitting produced', async () => {
+  const {rows, attempts} = await load();
+  // alpha:native measured three reps and failed a fourth, six seconds later, in
+  // the same sweep. Selecting on the newest RECORD rather than the newest
+  // SITTING would drop a reading the sweep genuinely took.
+  const r = find(rows, 'alpha', 'native');
+  assert.ok(r, 'the measured reps must still publish');
+  assert.equal(r.metrics.rows_per_s.value, 1100);
+  const gap = attempts.find((a) => a.group === r.group && a.variant_id === r.variant_id);
+  assert.ok(gap, 'and the failure is still listed beside it');
+  assert.equal(gap.sitting, r.sitting, 'same sweep');
+  assert.equal(gap.reps_counted, 1);
+});
+
+test('selection never crosses a comparability group', async () => {
+  const {rows, attempts} = await load();
+  // alpha:native was measured in drain mode and, strictly later, failed in
+  // sustained mode. Those are different experiments — `mode` is in the group key
+  // — so the failure must not retire the drain reading. A selection that ranked
+  // sittings globally rather than within a group would drop it.
+  const measured = find(rows, 'alpha', 'native');
+  const elsewhere = attempts.find(
+    (a) => a.entrant === 'alpha' && a.variant_id === 'native' && a.group !== measured.group,
+  );
+  assert.ok(elsewhere, 'the fixture must fail this arm in a second group');
+  assert.ok(elsewhere.ts_ms > measured.ts_ms, 'and fail it later, or this proves nothing');
+  assert.equal(measured.metrics.rows_per_s.value, 1100, 'the drain reading survives');
+});
+
+test('a refusal supersedes the number it followed rather than deferring to it', async () => {
+  const {rows, attempts} = await load();
+  // beta:legacy measured 700 on one day and broke on the next, in the same
+  // comparability group. The page answers what the arm does now, so the stale
+  // figure goes: publishing it would present a number the system can no longer
+  // produce, which is the one thing a benchmark must never do quietly.
+  assert.equal(find(rows, 'beta', 'legacy'), undefined, 'the superseded number is gone');
+  const gap = attempts.filter((a) => a.entrant === 'beta' && a.variant_id === 'legacy');
+  assert.equal(gap.length, 1, 'and the arm reads as failing instead');
+  assert.equal(gap[0].status, 'failed');
+  assert.equal(gap[0].note, 'decoder rejected the corpus');
+  // Same group, so this really is supersession and not the cross-group case.
+  assert.equal(gap[0].group, find(rows, 'beta', 'rowbinary').group);
 });
 
 test('a status this build does not recognise is never ranked', () => {
