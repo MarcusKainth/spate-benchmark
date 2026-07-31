@@ -19,6 +19,17 @@
 // the archive justifies it, it becomes content-hashed shards under static/ that
 // are fetched only when a reader expands history.
 //
+// Only the newest SITTING of each arm is published, so the summary is bounded by
+// (groups x arms x configurations measured in one sitting) rather than growing
+// with every sweep ever run: a nightly re-measurement of the same seven arms adds
+// nothing to what every visitor downloads. A sweep measures an arm at one
+// configuration, so that last factor is 1 in practice — but it is a property of
+// how `bench run` is invoked, not one this file enforces, which is why the bound
+// is stated with it rather than without.
+//
+// `results/` still keeps every record — the archive is append-only, and this is a
+// selection made at build time, not a retention policy. See `latestSitting`.
+//
 // COMPARABILITY IS ENFORCED HERE, NOT IN THE COMPONENTS
 //
 // Records that differ in (harness_version, dataset_version, env_id, infra digest)
@@ -179,6 +190,23 @@ function variantKey(rec) {
   return JSON.stringify(v, Object.keys(v).sort());
 }
 
+/**
+ * Which sitting a record belongs to.
+ *
+ * `invocation_id` is minted once per `bench run` from harness 2 on, so a sitting
+ * is identified exactly. The UTC calendar day is the fallback for records written
+ * before the field existed, and it is only an approximation: a sweep crossing
+ * midnight splits in two, and two sweeps on one day merge into one.
+ */
+function sittingKey(rec) {
+  return rec.run?.invocation_id || new Date(rec.run?.ts_ms ?? 0).toISOString().slice(0, 10);
+}
+
+/** The arm a row or attempt belongs to, within its comparability group. */
+function armKey(x) {
+  return [x.group, x.entrant, x.variant_id].join('|');
+}
+
 function median(xs) {
   if (!xs.length) return null;
   const s = [...xs].sort((a, b) => a - b);
@@ -219,13 +247,16 @@ function worstStatus(recs) {
 }
 
 /**
- * One summary row per (group, entrant, variant, configuration, version).
+ * One summary row per (group, entrant, variant, configuration, version, sitting),
+ * of which [`latestSitting`] then publishes only the newest per arm.
  *
  * Repetitions within a single invocation are aggregated by median. Runs from
- * DIFFERENT sittings are not: they get their own rows. That is the correction to
- * the framework site's aggregator, which hashes only variant keys and so
- * silently medians a re-run months later into the original figure while
- * captioning it with the newest date.
+ * DIFFERENT sittings are not: they are aggregated separately and the older one is
+ * dropped rather than merged. That is the correction to the framework site's
+ * aggregator, which hashes only variant keys and so silently medians a re-run
+ * months later into the original figure while captioning it with the newest date
+ * — a mistake selection would otherwise reintroduce, since a superseded sitting
+ * that had been medianed into its successor could never be dropped from it.
  *
  * Three properties this function is responsible for, each of which it previously
  * got wrong:
@@ -239,25 +270,57 @@ function worstStatus(recs) {
  *   entirely, so two sweeps of the same arm at different knob settings on the
  *   same day were medianed into one number captioned as run-to-run spread.
  *
- * Known remaining limitation: a "sitting" is still approximated by UTC calendar
- * day, so a sweep straddling midnight splits into two rows and two sweeps of an
- * identical configuration on one day merge. Fixing it properly needs an
- * invocation id on the record, which is a harness change rather than a site one.
+ * Known remaining limitation, and it costs more now than it used to: a record
+ * carrying no `invocation_id` falls back to the UTC calendar day (see
+ * [`sittingKey`]), so a sweep straddling midnight reads as two sittings — and
+ * selection then drops the earlier half rather than merely listing it separately.
+ * Every record the harness writes carries the field, so this reaches only ones
+ * written before it existed.
  */
 function summarise(records) {
   const byKey = new Map();
-  const attempts = [];
+  const byAttempt = new Map();
   for (const rec of records) {
     if (!CARRIES_METRICS.has(rec.status)) {
       // Attempted and produced no publishable number. Surfaced as an explicit
       // gap rather than an absence a reader would read as "not tried".
-      attempts.push({
-        group: groupKey(rec),
+      //
+      // Collapsed per sitting for the same reason rows are: a three-repetition
+      // failure is one thing that went wrong, not three, and listing it once per
+      // repetition would grow this list without bound as re-runs accumulate.
+      const group = groupKey(rec);
+      const sitting = sittingKey(rec);
+      const ts = rec.run?.ts_ms ?? 0;
+      const key = [group, rec.sut?.entrant, rec.sut?.variant_id, sitting].join('|');
+      const prev = byAttempt.get(key);
+      if (prev) {
+        prev.reps_counted += 1;
+        // Status and note come from the newest repetition TOGETHER. `worstStatus`
+        // cannot order these: it knows `ok` and `infra_bound`, and every status
+        // that reaches here scores `UNKNOWN_SEVERITY`, so it would have returned
+        // the first repetition's status while the note came from the last — an
+        // entry describing a failure that never happened in that pairing.
+        if (ts >= prev.ts_ms) {
+          prev.ts_ms = ts;
+          prev.status = rec.status;
+          prev.note = rec.note ?? null;
+        }
+        continue;
+      }
+      byAttempt.set(key, {
+        group,
         entrant: rec.sut?.entrant,
         variant_id: rec.sut?.variant_id,
+        sitting,
         status: rec.status,
         note: rec.note ?? null,
-        ts_ms: rec.run?.ts_ms ?? 0,
+        ts_ms: ts,
+        reps_counted: 1,
+        // Carried so a group whose every arm refused can still be named on the
+        // page: `groups` is derived from attempts as well as rows.
+        env_id: rec.run?.env_id,
+        harness_version: rec.run?.harness_version,
+        dataset_version: rec.run?.dataset_version,
       });
       continue;
     }
@@ -268,14 +331,9 @@ function summarise(records) {
       rec.sut?.version ?? rec.sut?.commit ?? '?',
       variantKey(rec),
       // Distinct sittings stay distinct. Without this, a re-run silently joins
-      // the original and the archive stops being a history.
-      //
-      // `invocation_id` is minted once per `bench run` from harness 2 on, so a
-      // sitting is now identified exactly rather than approximated. The calendar
-      // day remains the fallback for records written before the field existed,
-      // and it is only an approximation: a sweep crossing midnight UTC split
-      // into two published rows, and two sweeps on one day merged into one.
-      rec.run?.invocation_id || new Date(rec.run?.ts_ms ?? 0).toISOString().slice(0, 10),
+      // the original and its repetitions are medianed into one number captioned
+      // as run-to-run spread.
+      sittingKey(rec),
     ].join('|');
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(rec);
@@ -333,6 +391,7 @@ function summarise(records) {
     }
     rows.push({
       key,
+      sitting: sittingKey(newest),
       group: groupKey(newest),
       entrant: newest.sut.entrant,
       variant_id: newest.sut.variant_id,
@@ -364,9 +423,44 @@ function summarise(records) {
       metrics,
     });
   }
-  rows.sort((a, b) => b.ts_ms - a.ts_ms);
-  attempts.sort((a, b) => b.ts_ms - a.ts_ms);
-  return { rows, attempts };
+  const published = latestSitting(rows, [...byAttempt.values()]);
+  published.rows.sort((a, b) => b.ts_ms - a.ts_ms);
+  published.attempts.sort((a, b) => b.ts_ms - a.ts_ms);
+  return published;
+}
+
+/**
+ * Keeps each arm's newest sitting and drops the ones it superseded.
+ *
+ * The unit is the SITTING, not the record. An arm whose sweep measured three
+ * repetitions and failed a fourth still publishes the number those three
+ * produced: the failure is listed beside it as the gap it is, and it does not
+ * evict a row taken on the same occasion. Only a strictly newer sitting
+ * supersedes, and if that sitting produced no number the arm shows as failing
+ * rather than as the stale figure it last managed: the page answers what these
+ * systems do now, and an arm ranked on a reading its latest sweep could not
+ * reproduce is the one way this page could mislead while every number on it is
+ * individually true.
+ *
+ * Selection never crosses a comparability group: records differing in
+ * (env_id, harness_version, dataset_version, infra digest, mode) describe
+ * different experiments, so a fresh reading under a new protocol must not
+ * silently retire the last reading taken under the old one.
+ *
+ * Ordering is by timestamp, then by sitting id, so an unchanged tree selects the
+ * same records on every build and a diff in the output means the input moved.
+ */
+function latestSitting(rows, attempts) {
+  const newest = new Map();
+  for (const x of [...rows, ...attempts]) {
+    const arm = armKey(x);
+    const prev = newest.get(arm);
+    if (!prev || x.ts_ms > prev.ts_ms || (x.ts_ms === prev.ts_ms && x.sitting > prev.sitting)) {
+      newest.set(arm, { ts_ms: x.ts_ms, sitting: x.sitting });
+    }
+  }
+  const kept = (x) => newest.get(armKey(x)).sitting === x.sitting;
+  return { rows: rows.filter(kept), attempts: attempts.filter(kept) };
 }
 
 module.exports = function benchData(context) {
@@ -389,9 +483,14 @@ module.exports = function benchData(context) {
       const { records, counts } = loadRecords(root);
       const { rows, attempts } = summarise(records);
 
-      const groups = [...new Set(rows.map((r) => r.group))]
+      // Named from attempts as well as rows. A group whose every arm's newest
+      // sitting refused has no rows at all, and deriving this from rows alone
+      // would drop it from the page — hiding exactly the failure the page should
+      // be loudest about, because the component renders only groups listed here.
+      const described = [...rows, ...attempts];
+      const groups = [...new Set(described.map((r) => r.group))]
         .map((g) => {
-          const any = rows.find((r) => r.group === g);
+          const any = described.find((r) => r.group === g);
           return {
             key: g,
             env_id: any.env_id,

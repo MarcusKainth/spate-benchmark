@@ -37,3 +37,12 @@ label     = "hand"
 approach  = "stripped"
 unshipped = ["hand-rolled decode"]
 reports   = { wire_format = "rowbinary" }
+
+# Measured once, then broken by a later sweep in the same comparability group.
+# Holds the case where a refusal supersedes a number rather than sitting beside
+# it: the arm reads as failing, not as the figure it last managed.
+[[variants]]
+id       = "legacy"
+label    = "legacy"
+approach = "realistic"
+reports  = { wire_format = "rowbinary" }

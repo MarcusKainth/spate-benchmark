@@ -35,6 +35,8 @@ export type Metric = {
 
 export type Row = {
   key: string;
+  /** The sweep this reading came from. Only an arm's newest one is published. */
+  sitting: string;
   group: string;
   entrant: string;
   variant_id: string;
@@ -54,14 +56,25 @@ export type Row = {
   mode?: string;
 };
 
-/** A run that happened and produced no publishable number. */
+/**
+ * A sweep that happened and produced no publishable number.
+ *
+ * One per sitting rather than per repetition: a three-repetition failure is one
+ * thing that went wrong. The comparability fields are carried so a group with
+ * nothing but attempts can still be named on the page.
+ */
 export type Attempt = {
   group: string;
   entrant: string;
   variant_id: string;
+  sitting: string;
   status: string;
   note: string | null;
   ts_ms: number;
+  reps_counted: number;
+  env_id: string;
+  harness_version: number;
+  dataset_version: string;
 };
 
 export type Variant = {

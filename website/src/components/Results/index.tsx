@@ -74,6 +74,10 @@ function Attempts({attempts}: {attempts: Attempt[]}) {
         {attempts.map((a) => (
           <li key={`${a.entrant}-${a.variant_id}-${a.ts_ms}`}>
             {a.entrant} <code>{a.variant_id}</code> — {a.status.replace(/_/g, ' ')}
+            {/* One entry is one sweep, so how many repetitions it took down is
+                worth saying: failing every one of three is not the same event as
+                failing one. */}
+            {a.reps_counted > 1 && ` (${a.reps_counted} repetitions)`}
             {a.note && <span className="bench-note"> · {a.note}</span>}
           </li>
         ))}
@@ -157,7 +161,12 @@ export default function Results(): React.JSX.Element {
 
   React.useEffect(() => enhance(), [data]);
 
-  if (!rows.length) {
+  // "Nothing has run" and "everything that ran failed" are different claims, and
+  // only the first belongs here. Since only an arm's newest sitting is published,
+  // one bad sweep across every arm empties `rows` while leaving the gaps that
+  // explain it — and reporting that as "no run has been recorded" would be the
+  // page at its least honest exactly when it has the most to admit.
+  if (!rows.length && !data.attempts.length) {
     return (
       <div className="bench-root bench-wide">
         <NoResults data={data} />

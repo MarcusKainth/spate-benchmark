@@ -313,6 +313,7 @@ export default function SystemPage({profile}: Props): React.JSX.Element {
               {attempts.map((a) => (
                 <li key={`${a.variant_id}-${a.ts_ms}`}>
                   <code>{a.variant_id}</code> — {a.status.replace(/_/g, ' ')}
+                  {a.reps_counted > 1 && ` (${a.reps_counted} repetitions)`}
                   {a.note && <span className="bench-note"> · {a.note}</span>}
                 </li>
               ))}
