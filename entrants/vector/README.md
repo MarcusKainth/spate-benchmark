@@ -90,7 +90,7 @@ minutes into a cell.
 | `partition.assignment.strategy` | `cooperative-sticky` | Settles eight consumers on one partition each; incremental rebalance, so a late joiner does not stall the other seven. |
 | `fetch.message.max.bytes` | 8 MiB | Above the corpus's largest framed message; the 1 MiB default costs extra round-trips. |
 | `queued.max.messages.kbytes` | 262144 (= 256 MiB) | Per-consumer prefetch bound; in drain the consumer must never be the starved side. 8 × 256 MiB is small against 24 GiB. |
-| `VECTOR_LOG` | `warn` | No per-batch chatter on the hot path. |
+| `VECTOR_LOG` | `info` | Component lifecycle and sink start-up are logged; per-request detail is DEBUG/TRACE, so the hot path stays quiet. Was `warn` until a stalled `arrow_stream` run emitted zero lines in 1800s and could not be diagnosed at all. |
 | `api.enabled` | `false` | No published figure comes from an arm's self-report; an idle API server is still a listener on the measured process. |
 
 ## Build
