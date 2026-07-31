@@ -2462,6 +2462,7 @@ dependencies = [
  "spate-clickhouse",
  "spate-core",
  "spate-kafka",
+ "tokio",
  "yaml_serde",
 ]
 

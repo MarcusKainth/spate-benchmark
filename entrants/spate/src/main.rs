@@ -27,16 +27,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use apache_avro::types::Value as AvroValue;
 use bytes::BytesMut;
 use serde::Serialize;
-use spate_arm::rows::{self, Row};
+use spate_arm::rows;
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection};
 use spate_benchmark_harness::corpus;
 use spate_benchmark_harness::{env_str, env_u64};
 use spate_clickhouse::{ClickHouseEncoder, Format, NativeEncoder};
 use spate_core::config::{ComponentConfig, PipelineConfig};
-use spate_core::deser::{Owned, RecFamily};
+use spate_core::deser::RecFamily;
 use spate_core::error::SinkError;
 use spate_core::ops::chain;
 use spate_core::pipeline::Pipeline;
@@ -239,21 +238,16 @@ fn run(format: Format) {
         Format::RowBinary => None,
     };
 
-    // `Emitter::emit` returns a `Flow`, and every site below discards it. That
-    // is deliberate, and the opposite of what it looks like:
-    //
-    // * No backpressure is lost. The emitter latches the signal internally
-    //   (sticky once blocked) and the chain reads it after the closure returns;
-    //   the return value is only an early-exit *hint*.
-    // * Acting on the hint here would be a data-loss bug. A `flat_map` must emit
-    //   every output of the input record it was given — the chain's resume
-    //   cursor is per input record, not per fan-out element, so breaking out
-    //   mid-batch would silently discard the remaining events of that message.
-    //
-    // One chain: `build_value` is the documented throughput path of the shipped
-    // Avro deserializer, and the flatten applies the workload's filters and
-    // derivations before the format-generic encoder sees a row.
-    let d = avro.build_value().expect("value deserializer");
+    // One chain: `build_datum` with a borrowed record family is the shipped
+    // Avro deserializer's throughput path — a single decode pass straight
+    // into `rows::SensorBatch`, whose string fields point into the payload
+    // buffer. The flatten (`rows::explode`, a `fn` item as borrowing
+    // families require) applies the workload's filters and derivations
+    // before the format-generic encoder sees a row; the `Flow`-discard
+    // reasoning lives on `rows::explode`.
+    let d = avro
+        .build_datum::<rows::BatchFam>()
+        .expect("datum deserializer");
     let enc = encoder(format, native_schema);
     let report = pipeline
         .sink(sink)
@@ -261,13 +255,9 @@ fn run(format: Format) {
         .chains(move |ctx| {
             let (d, enc) = (d.clone(), enc.clone());
             let chunk = ctx.chunk();
-            chain::<Owned<AvroValue>, _>(d)
+            chain::<rows::BatchFam, _>(d)
                 .with_metrics(ctx.pipeline, "main")
-                .flat_map::<Owned<Row>, _>(|v, out| {
-                    rows::flatten_value(&v, |row| {
-                        out.emit(row);
-                    });
-                })
+                .flat_map::<rows::RowFam, _>(rows::explode)
                 .sink(enc, KeyHashRouter, chunk, ctx.queues, ctx.budget)
                 .build()
         })

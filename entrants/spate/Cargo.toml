@@ -33,6 +33,13 @@ spate-clickhouse = { workspace = true }
 spate-core = { workspace = true }
 spate-kafka = { workspace = true }
 
+# Test-only: the deserializer builder's API takes a tokio runtime handle, and
+# the lib tests drive the arm's actual decode path (rather than a stand-in)
+# so the flatten is checked against the oracle THROUGH the deserializer the
+# pipeline runs. A dev-dependency cannot reach the measured binary.
+[dev-dependencies]
+tokio = { workspace = true }
+
 [lints]
 workspace = true
 
