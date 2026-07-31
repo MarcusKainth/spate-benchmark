@@ -309,25 +309,8 @@ fn unrunnable_knobs(
 
 /// Seconds a drain may take before it is abandoned.
 ///
-/// Ten minutes, down from thirty. The number is a bound on how long a *broken*
-/// arm may waste, not a target any working arm approaches, so it wants to sit
-/// far enough above the slowest legitimate drain to be unreachable by one and
-/// no further. On the first full measured sweep the slowest arm that finished
-/// was `vector:json-each-row` at 236.1 s; the two that failed
-/// (`kafka-connect` and `vector:arrow`) each landed exactly zero rows and were
-/// going to land zero rows whether the deadline was ten minutes or thirty.
-/// Thirty bought nothing and cost two hours of that one run.
-///
-/// Not lower, though 300 was proposed: 236.1 s against a host this file's
-/// sibling ceilings measure at 14.5 % spread leaves a working arm inside noise
-/// of the bound, and the failure mode of a too-tight deadline is the expensive
-/// one — a healthy arm recorded `Failed`, which is a false number in a suite
-/// whose whole claim is that it does not publish those. 600 sits 2.5x above the
-/// slowest known-good drain.
-///
-/// If an arm ever legitimately needs longer, raise this deliberately rather
-/// than discovering it as an intermittent `Failed`: a drain that approaches
-/// the bound is itself the finding.
+/// 600 is 2.5x the slowest drain any arm has needed (236 s), so it is
+/// unreachable by a working one — it bounds what a broken one wastes.
 const DRAIN_MAX_S: u64 = 600;
 /// Seconds to wait for the pipeline to settle before gating.
 const QUIESCE_MAX_S: u64 = 900;
