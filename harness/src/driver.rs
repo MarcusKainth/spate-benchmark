@@ -3353,7 +3353,7 @@ mod tests {
             dry_run: true,
             fresh_infra: false,
             fail_fast: false,
-            topic: "comparison-sensor-batches".to_owned(),
+            topic: crate::corpus::TOPIC.to_owned(),
             batches: 1_500_000,
             knobs: overrides
                 .iter()
