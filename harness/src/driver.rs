@@ -1862,15 +1862,13 @@ fn run_arm(
     note.push_str(&format!("; headroom {}", headroom.summary()));
     if headroom.infra_bound() {
         status = Status::InfraBound;
-        // The limit is named on the terminal as well as implied by the shares,
-        // because nothing else prints for a record that is written rather than
-        // refused: without this line an operator watching a sweep sees a share
-        // and has to remember the rule to know the arm was demoted.
-        eprintln!(
-            "  INFRA-BOUND: above {:.0}% of a measured ceiling, so this number describes \
-             the shared infrastructure rather than the system",
-            HEADROOM_LIMIT * 100.0
-        );
+        // Said on the terminal for the operator watching, and in the note for
+        // everyone after: a share above the limit only reads as a demotion to
+        // someone who remembers the rule, and `status` only to someone who
+        // knows the schema, while the note is what the site renders beside the
+        // number and what one line of JSONL shows.
+        eprintln!("  {}", infra_bound_notice());
+        note.push_str(&format!("; {}", infra_bound_notice()));
     }
     // "Not gated" must never read as "cleared the gate". A ceiling the
     // methodology names that could not be checked at all — because none was
@@ -2913,6 +2911,19 @@ fn with_logs(reason: &str, logs: &str) -> String {
     format!("{reason}{LOG_SEPARATOR}{logs}")
 }
 
+/// What a demoted record says about itself, in prose.
+///
+/// One spelling for the terminal and the note, so the line an operator reads
+/// during a sweep and the line a reader finds in `results/` months later cannot
+/// disagree about why the number was demoted.
+fn infra_bound_notice() -> String {
+    format!(
+        "INFRA-BOUND: above {:.0}% of a measured ceiling, so this number describes \
+         the shared infrastructure rather than the system",
+        HEADROOM_LIMIT * 100.0
+    )
+}
+
 /// The part of a refusal that belongs in a record's `note`.
 ///
 /// A refusal carries the arm's last forty log lines per container, which is what
@@ -3830,6 +3841,25 @@ mod tests {
     /// a caveat that travels with a published gap. The forty log lines per
     /// container belong to the first only — the site renders `note` beside the
     /// gap, and a JVM stack trace there is a wall rather than a finding.
+    /// A demoted record must say so in prose, not only in `status`. The share
+    /// alone reads as a demotion only to someone holding the rule, and the note
+    /// is what the site renders beside the number.
+    #[test]
+    fn the_infra_bound_notice_names_the_limit_it_broke() {
+        let notice = infra_bound_notice();
+        assert!(notice.starts_with("INFRA-BOUND:"), "{notice}");
+        assert!(
+            notice.contains(&format!("{:.0}%", HEADROOM_LIMIT * 100.0)),
+            "the notice must quote the limit it is enforcing: {notice}"
+        );
+        assert!(
+            notice.contains("shared infrastructure"),
+            "the notice must say what the number describes instead: {notice}"
+        );
+        // Survives `note_for`'s truncation, so a refusal carrying it keeps it.
+        assert!(notice.chars().count() < NOTE_MAX_CHARS, "{notice}");
+    }
+
     #[test]
     fn a_recorded_refusal_keeps_its_reason_and_drops_the_container_logs() {
         let refusal = with_logs(
