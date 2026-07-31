@@ -162,11 +162,29 @@ sinks:
     endpoint: "${CLICKHOUSE_URL}"
     database: default
     table: sensor_events
-    # The variant axis: `arrow_stream` (default; fetches the table schema from
+    # The variant axis: `arrow_stream` (fetches the table schema from
     # system.columns once at start-up; added in 0.53 via vector#24373, still
     # beta in 0.57) or `json_each_row` (the GA control). Not the same
     # server-side work, which is why both are published.
-    format: "${FORMAT:-arrow_stream}"
+    #
+    # Resolved at image build, not by interpolation: `arrow_stream` requires
+    # the batch-encoding block below and `json_each_row` must not carry it, so
+    # each variant is generated as its own config and the entrypoint selects
+    # one by FORMAT. A format the encoder does not match is then not
+    # expressible — see the marked region.
+    format: __FORMAT__
+# >>> arrow-only
+    # What actually selects the Arrow encoder. `format` alone only tells
+    # ClickHouse which format to *expect*: with `format: arrow_stream` and no
+    # batch_encoding, Vector announces `FORMAT ArrowStream` and a
+    # `application/vnd.apache.arrow.stream` content-type, then sends
+    # JSONEachRow in the body. Every insert fails `Code: 117 ... Not an Arrow
+    # IPC stream`, nothing is retried (400 is not retriable) and every batch is
+    # dropped, so the arm lands zero rows while logging no config error.
+    # Vector accepts that pairing; only the server refuses it.
+    batch_encoding:
+      codec: arrow_stream
+# <<< arrow-only
     # DateTime64 columns receive epoch-derived timestamps; best-effort parsing
     # is what lands them at full precision rather than rejected.
     date_time_best_effort: true

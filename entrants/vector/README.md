@@ -51,7 +51,15 @@ aliases of `in-0`, so "identical" is parser-enforced rather than promised.
 
 ## Configuration
 
-Every knob reaches the container as an environment variable. Five live in
+The wire format is chosen by *file*, not by a field. `arrow_stream` needs a
+`batch_encoding` block that `json_each_row` must not carry, so
+[`vector.yaml.tmpl`](vector.yaml.tmpl) marks that block off and the image build
+emits one config per variant; `entrypoint.sh` selects between them on `FORMAT`
+and rejects any other value. Neither config can therefore name a format its
+encoder does not produce — a combination Vector accepts and ClickHouse then
+refuses on every insert.
+
+Every other knob reaches the container as an environment variable. Five live in
 [`vector.yaml.tmpl`](vector.yaml.tmpl) as `${...:-default}` placeholders; the
 sixth, `threads`, is `VECTOR_THREADS` — the binary's own variable, with no
 config-file line to hold it — so its default lives only in the Dockerfile `ENV`
@@ -139,8 +147,14 @@ defaults**, which are kept equal to the published knobs.
 The config itself can be re-checked at any time against the shipped binary:
 
 ```sh
-docker run --rm spate-bench-vector validate --no-environment /etc/vector/vector.yaml
+docker run --rm --entrypoint vector spate-bench-vector \
+    validate --no-environment /etc/vector/vector-arrow.yaml
+docker run --rm --entrypoint vector spate-bench-vector \
+    validate --no-environment /etc/vector/vector-json.yaml
 ```
+
+`--entrypoint vector` because the image's entrypoint selects a config from
+`FORMAT` and execs Vector with it.
 
 ## Versions
 

@@ -40,7 +40,25 @@ tmpl = open("vector.yaml.tmpl").read()
 # NAME the placeholder without being substituted themselves.
 needle = "schema: __AVRO_SCHEMA_JSON__"
 assert needle in tmpl, "vector.yaml.tmpl lost its schema placeholder"
-open("vector.yaml", "w").write(tmpl.replace(needle, f"schema: {json.dumps(schema)}"))
+base = tmpl.replace(needle, f"schema: {json.dumps(schema)}")
+
+# One config per variant. The arrow-only region carries `batch_encoding`, which
+# Vector refuses alongside any format but `arrow_stream` — and whose ABSENCE
+# under `format: arrow_stream` is accepted and silently emits JSONEachRow. Both
+# halves of that trap are closed by generating the pair here: neither config can
+# name a format its encoder does not produce.
+BEGIN, END = "# >>> arrow-only\n", "# <<< arrow-only\n"
+assert BEGIN in base and END in base, "vector.yaml.tmpl lost its arrow-only markers"
+start, stop = base.index(BEGIN), base.index(END) + len(END)
+assert start < stop, "arrow-only markers are out of order"
+
+arrow = base.replace(BEGIN, "").replace(END, "").replace("__FORMAT__", "arrow_stream")
+json_each_row = (base[:start] + base[stop:]).replace("__FORMAT__", "json_each_row")
+for name, text in (("vector-arrow.yaml", arrow), ("vector-json.yaml", json_each_row)):
+    assert "__FORMAT__" not in text and "arrow-only" not in text, name
+    open(name, "w").write(text)
+assert "batch_encoding" in arrow, "the arrow config lost its encoder"
+assert "batch_encoding" not in json_each_row, "the json config kept the arrow encoder"
 PY
 
 # ---------------------------------------------------------------------------
@@ -56,8 +74,10 @@ PY
 # ---------------------------------------------------------------------------
 FROM timberio/vector:0.57.0-debian
 
-COPY --from=gen /gen/vector.yaml /etc/vector/vector.yaml
+COPY --from=gen /gen/vector-arrow.yaml /etc/vector/vector-arrow.yaml
+COPY --from=gen /gen/vector-json.yaml /etc/vector/vector-json.yaml
 COPY entrants/vector/transform.vrl /etc/vector/transform.vrl
+COPY entrants/vector/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Defaults target the bench network; the driver overrides what it varies. The
 # knob defaults are kept EQUAL to the descriptor's published knobs, so a
@@ -96,13 +116,24 @@ ENV VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true \
     SINK_BUFFER_EVENTS=524288 \
     SINK_COMPRESSION=none
 
-# Build-time drift guard: parses the baked YAML (including the alias-expanded
+# Build-time drift guard: parses each baked YAML (including the alias-expanded
 # eight-source topology), compiles transform.vrl, and rejects unknown keys —
 # against the exact binary that will run it. `--no-environment` skips the
 # health checks, because there is no Kafka or ClickHouse at build time.
-RUN vector validate --no-environment /etc/vector/vector.yaml
+#
+# It does NOT prove the format/encoder pairing: `vector validate` accepts both a
+# format with no encoder and an encoder with the wrong format, and only the
+# topology builder refuses the second. Generating the two configs from one
+# marked region is what makes the pairing hold; this checks everything else.
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+    && vector validate --no-environment /etc/vector/vector-arrow.yaml \
+    && vector validate --no-environment /etc/vector/vector-json.yaml \
+    && grep -q 'FORMAT ArrowStream\|arrow_stream' /etc/vector/vector-arrow.yaml \
+    && grep -q batch_encoding /etc/vector/vector-arrow.yaml \
+    && ! grep -q batch_encoding /etc/vector/vector-json.yaml
 
-# Inherited from the base image: the entrypoint runs `vector`, whose default
-# config path is /etc/vector/vector.yaml — the file baked above. Not restated,
-# so a base-image relocation of the binary cannot silently diverge from a path
-# hardcoded here.
+# The variant's config is chosen by name rather than by a field, so `vector` is
+# invoked with an explicit `--config` and the base image's default path is no
+# longer what runs. `vector` is still resolved from PATH, so a base-image
+# relocation of the binary cannot diverge from a path hardcoded here.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -118,9 +118,11 @@ The default variant's wire format, ArrowStream, is marked beta in Vector 0.57's
 documentation.
 """
 why = """
-It is shipped, documented, and selected by one config line, so rule 1 permits it
-and rule 2 requires considering it; the json-each-row realistic variant is
-published as the GA control.
+It is shipped, documented, and selected by two config lines that must agree —
+`format: arrow_stream` names the format to ClickHouse and
+`batch_encoding.codec: arrow_stream` selects the encoder that produces it — so
+rule 1 permits it and rule 2 requires considering it; the json-each-row
+realistic variant is published as the GA control.
 """
 affects = ["wire-format"]
 
